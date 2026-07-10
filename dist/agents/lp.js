@@ -1,7 +1,7 @@
 import { encodeFunctionData, parseAbi } from 'viem';
 export class LpManagerAgent {
     // Cross-chain default NonfungiblePositionManager
-    NPM_ADDRESS = '0xC36442b4a4522E871399CD717aBDD847Ab11FE88';
+    NPM_ADDRESS = process.env.NPM_ADDRESS;
     constructor() { }
     /**
      * Constructs an unsigned mint transaction for Uniswap V3 LP.

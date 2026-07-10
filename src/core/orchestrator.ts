@@ -1,4 +1,6 @@
 import { Bot } from 'grammy';
+import { parseAbi } from 'viem';
+import { publicClient } from '../services/viem.js';
 import { ScoutAgent } from '../agents/scout.js';
 import { TraderAgent } from '../agents/trader.js';
 import { LpManagerAgent } from '../agents/lp.js';
@@ -20,17 +22,38 @@ export class Orchestrator {
     this.guardian = new GuardianAgent();
 
     // Wire up events
-    this.guardian.onExitSignal = (tokenAddress, reason) => {
+    this.guardian.onExitSignal = async (tokenAddress, reason) => {
       console.log(`[Orchestrator] Guardian requested exit for ${tokenAddress} (${reason}), forwarding to Trader...`);
-      // Simulating a dummy token amount for exit
-      const tokenAmountToSell = BigInt(1000 * 10**18); 
-      this.trader.processExitSignal(tokenAddress, tokenAmountToSell, reason);
+      
+      const walletAddress = process.env.USER_WALLET_ADDRESS;
+      let tokenAmountToSell = 0n;
+
+      if (walletAddress && walletAddress.startsWith('0x')) {
+        try {
+          const erc20Abi = parseAbi(['function balanceOf(address owner) view returns (uint256)']);
+          tokenAmountToSell = await publicClient.readContract({
+            address: tokenAddress as `0x${string}`,
+            abi: erc20Abi,
+            functionName: 'balanceOf',
+            args: [walletAddress as `0x${string}`]
+          });
+          console.log(`[Orchestrator] Fetched real token balance: ${tokenAmountToSell}`);
+        } catch (e) {
+          console.error(`[Orchestrator] Failed to fetch token balance for ${tokenAddress}`, e);
+        }
+      }
+
+      if (tokenAmountToSell > 0n) {
+        this.trader.processExitSignal(tokenAddress, tokenAmountToSell, reason);
+      } else {
+        console.warn(`[Orchestrator] Aborting exit signal: Wallet has 0 balance for ${tokenAddress}`);
+      }
     };
 
-    this.scout.onSignal = (tokenAddress) => {
+    this.scout.onSignal = async (tokenAddress) => {
       console.log(`[Orchestrator] Received signal for ${tokenAddress}, consulting Risk Warden...`);
       
-      const riskEvaluation = this.riskWarden.evaluateSignal(tokenAddress);
+      const riskEvaluation = await this.riskWarden.evaluateSignal(tokenAddress);
       
       if (riskEvaluation.approved) {
         console.log(`[Orchestrator] Risk Warden approved. Forwarding to Trader with size ${riskEvaluation.recommendedSize}...`);

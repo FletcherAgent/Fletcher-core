@@ -2,7 +2,7 @@ import { encodeFunctionData, parseAbi } from 'viem';
 
 export class LpManagerAgent {
   // Cross-chain default NonfungiblePositionManager
-  private readonly NPM_ADDRESS = '0xC36442b4a4522E871399CD717aBDD847Ab11FE88';
+  private readonly NPM_ADDRESS = process.env.NPM_ADDRESS!;
 
   constructor() {}
 

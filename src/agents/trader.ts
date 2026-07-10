@@ -1,9 +1,9 @@
 import { encodeFunctionData, parseAbi } from 'viem';
 import { Bot } from 'grammy';
 import { prisma } from '../core/db.js';
+import { publicClient } from '../services/viem.js';
 
 export class TraderAgent {
-  private routerAddress = '0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45'; // Uniswap V3 SwapRouter02
   private bot: Bot;
 
   constructor(bot: Bot) {
@@ -37,11 +37,33 @@ export class TraderAgent {
       'function exactInputSingle(ExactInputSingleParams params) external payable returns (uint256 amountOut)'
     ]);
 
+    const quoterAbi = parseAbi([
+      'function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external returns (uint256 amountOut)'
+    ]);
+
     // WETH address on Robinhood Chain (Placeholder, assume standard WETH for now)
-    const WETH_ADDRESS = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'; 
+    const WETH_ADDRESS = process.env.WETH_ADDRESS!; 
+    const QUOTER_ADDRESS = process.env.QUOTER_ADDRESS!; // Uniswap V3 QuoterV2 (Standard)
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 5); // 5 mins
 
+    let amountOutMinimum = 0n;
+
     try {
+      // 1. Fetch real quote from Quoter
+      const { result } = await publicClient.simulateContract({
+        address: QUOTER_ADDRESS as `0x${string}`,
+        abi: quoterAbi,
+        functionName: 'quoteExactInputSingle',
+        args: [WETH_ADDRESS as `0x${string}`, tokenOut as `0x${string}`, 3000, amountIn, 0n]
+      });
+
+      console.log(`[Trader] Real quote received: ${result} wei out`);
+
+      // 2. Apply 1% Slippage tolerance
+      amountOutMinimum = (result * 99n) / 100n;
+      console.log(`[Trader] Setting amountOutMinimum (1% slippage): ${amountOutMinimum}`);
+
+      // 3. Encode actual tx
       const calldata = encodeFunctionData({
         abi: exactInputSingleAbi,
         functionName: 'exactInputSingle',
@@ -52,7 +74,7 @@ export class TraderAgent {
           recipient: '0x0000000000000000000000000000000000000000', // Replaced with user's vault at signing boundary
           deadline,
           amountIn: amountIn,
-          amountOutMinimum: 0n, // Slippage protection to be calculated
+          amountOutMinimum,
           sqrtPriceLimitX96: 0n
         }]
       });
@@ -61,7 +83,7 @@ export class TraderAgent {
       return calldata;
 
     } catch (error) {
-      console.error("[Trader] Failed to build calldata", error);
+      console.error("[Trader] Failed to build calldata or fetch quote", error);
       return null;
     }
   }
@@ -77,10 +99,31 @@ export class TraderAgent {
       'function exactInputSingle(ExactInputSingleParams params) external payable returns (uint256 amountOut)'
     ]);
 
-    const WETH_ADDRESS = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'; 
+    const quoterAbi = parseAbi([
+      'function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external returns (uint256 amountOut)'
+    ]);
+
+    const WETH_ADDRESS = process.env.WETH_ADDRESS!; 
+    const QUOTER_ADDRESS = process.env.QUOTER_ADDRESS!;
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 5); // 5 mins
 
+    let amountOutMinimum = 0n;
+
     try {
+      // 1. Fetch real quote for exit
+      const { result } = await publicClient.simulateContract({
+        address: QUOTER_ADDRESS as `0x${string}`,
+        abi: quoterAbi,
+        functionName: 'quoteExactInputSingle',
+        args: [tokenIn as `0x${string}`, WETH_ADDRESS as `0x${string}`, 3000, amountIn, 0n]
+      });
+
+      console.log(`[Trader] Real SELL quote received: ${result} WETH out`);
+
+      // 2. Apply 1% Slippage tolerance
+      amountOutMinimum = (result * 99n) / 100n;
+      console.log(`[Trader] Setting SELL amountOutMinimum (1% slippage): ${amountOutMinimum}`);
+
       const calldata = encodeFunctionData({
         abi: exactInputSingleAbi,
         functionName: 'exactInputSingle',
@@ -91,7 +134,7 @@ export class TraderAgent {
           recipient: '0x0000000000000000000000000000000000000000',
           deadline,
           amountIn: amountIn,
-          amountOutMinimum: 0n, // Slippage protection
+          amountOutMinimum,
           sqrtPriceLimitX96: 0n
         }]
       });
@@ -100,7 +143,7 @@ export class TraderAgent {
       return calldata;
 
     } catch (error) {
-      console.error("[Trader] Failed to build sell calldata", error);
+      console.error("[Trader] Failed to build sell calldata or fetch quote", error);
       return null;
     }
   }
