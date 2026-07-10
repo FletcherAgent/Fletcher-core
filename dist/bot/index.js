@@ -50,9 +50,9 @@ bot.command("status", (ctx) => {
 bot.command("dryrun", (ctx) => {
     const tokenAddress = ctx.match;
     if (!tokenAddress || !tokenAddress.startsWith("0x")) {
-        return ctx.reply("❌ Format salah! Gunakan: `/dryrun 0xTokenAddress`", { parse_mode: "Markdown" });
+        return ctx.reply("❌ Invalid format! Usage: `/dryrun 0xTokenAddress`", { parse_mode: "Markdown" });
     }
-    ctx.reply(`🧪 **DRY RUN INITIATED**\nMemaksa masuk ke pipeline untuk token: \`${tokenAddress}\``, { parse_mode: "Markdown" });
+    ctx.reply(`🧪 **DRY RUN INITIATED**\nForcing token into pipeline: \`${tokenAddress}\``, { parse_mode: "Markdown" });
     // Inject directly into Orchestrator (simulate Scout finding it)
     // We can't access Orchestrator.scout directly easily, but we can trigger it
     // Wait, let's expose a method on orchestrator to inject manual signal
