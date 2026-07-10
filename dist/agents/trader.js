@@ -7,15 +7,23 @@ export class TraderAgent {
         this.bot = bot;
     }
     async processSignal(tokenAddress, sizeInWeth) {
-        const calldata = await this.constructUnsignedSwapTx(tokenAddress, sizeInWeth);
-        if (calldata) {
+        const calldataResult = await this.constructUnsignedSwapTx(tokenAddress, sizeInWeth);
+        if (calldataResult) {
+            const { calldata, amountOutMinimum } = calldataResult;
             this.emitToSigningBoundary(tokenAddress, calldata, 'BUY');
+            // Simulate successful trade execution and save to DB
+            const estimatedEntryPrice = Number(sizeInWeth) / Number(amountOutMinimum);
+            await this.registerPosition(tokenAddress, estimatedEntryPrice, Number(sizeInWeth) / 1e18);
         }
     }
     async processExitSignal(tokenAddress, amountInToken, reason) {
-        const calldata = await this.constructUnsignedSellTx(tokenAddress, amountInToken);
-        if (calldata) {
+        const calldataResult = await this.constructUnsignedSellTx(tokenAddress, amountInToken);
+        if (calldataResult) {
+            const { calldata, amountOutMinimum } = calldataResult;
             this.emitToSigningBoundary(tokenAddress, calldata, `SELL [${reason}]`);
+            // Simulate successful sell execution and update DB
+            const estimatedExitPrice = Number(amountOutMinimum) / Number(amountInToken);
+            await this.updatePositionStatus(tokenAddress, estimatedExitPrice);
         }
     }
     /**
@@ -65,7 +73,7 @@ export class TraderAgent {
                     }]
             });
             console.log(`[Trader] Unsigned BUY Calldata generated: ${calldata}`);
-            return calldata;
+            return { calldata, amountOutMinimum };
         }
         catch (error) {
             console.error("[Trader] Failed to build calldata or fetch quote", error);
@@ -115,7 +123,7 @@ export class TraderAgent {
                     }]
             });
             console.log(`[Trader] Unsigned SELL Calldata generated: ${calldata}`);
-            return calldata;
+            return { calldata, amountOutMinimum };
         }
         catch (error) {
             console.error("[Trader] Failed to build sell calldata or fetch quote", error);
@@ -136,10 +144,31 @@ export class TraderAgent {
                     size
                 }
             });
-            console.log(`[Trader] Position registered in DB: ${position.id}`);
+            console.log(`[Trader] 💾 DB UPDATE: Position registered -> ID: ${position.id}`);
         }
         catch (error) {
-            console.error("[Trader] Failed to register position", error);
+            console.error("[Trader] Failed to register position in DB", error);
+        }
+    }
+    /**
+     * Updates a position's status to CLOSED in the database.
+     */
+    async updatePositionStatus(tokenAddress, exitPrice) {
+        try {
+            const position = await prisma.position.findFirst({
+                where: { tokenAddress, status: 'OPEN' },
+                orderBy: { createdAt: 'desc' }
+            });
+            if (position) {
+                await prisma.position.update({
+                    where: { id: position.id },
+                    data: { status: 'CLOSED', exitPrice }
+                });
+                console.log(`[Trader] 💾 DB UPDATE: Position ${position.id} CLOSED in DB.`);
+            }
+        }
+        catch (e) {
+            console.error("[Trader] Failed to update position in DB", e);
         }
     }
     emitToSigningBoundary(tokenAddress, calldata, action) {
