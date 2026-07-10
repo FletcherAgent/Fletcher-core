@@ -20,6 +20,13 @@ export class Orchestrator {
     this.guardian = new GuardianAgent();
 
     // Wire up events
+    this.guardian.onExitSignal = (tokenAddress, reason) => {
+      console.log(`[Orchestrator] Guardian requested exit for ${tokenAddress} (${reason}), forwarding to Trader...`);
+      // Simulating a dummy token amount for exit
+      const tokenAmountToSell = BigInt(1000 * 10**18); 
+      this.trader.processExitSignal(tokenAddress, tokenAmountToSell, reason);
+    };
+
     this.scout.onSignal = (tokenAddress) => {
       console.log(`[Orchestrator] Received signal for ${tokenAddress}, consulting Risk Warden...`);
       
@@ -28,6 +35,9 @@ export class Orchestrator {
       if (riskEvaluation.approved) {
         console.log(`[Orchestrator] Risk Warden approved. Forwarding to Trader with size ${riskEvaluation.recommendedSize}...`);
         this.trader.processSignal(tokenAddress, riskEvaluation.recommendedSize);
+        
+        // Simulating the post-fill workflow: Start Guardian monitoring immediately
+        this.guardian.startMonitoring(tokenAddress, riskEvaluation.recommendedSize);
       } else {
         console.warn(`[Orchestrator] Risk Warden rejected signal for ${tokenAddress}. Reason: ${riskEvaluation.reason}`);
       }

@@ -1,31 +1,54 @@
 export class GuardianAgent {
+  public onExitSignal?: (tokenAddress: string, reason: string) => void;
+  
+  private activeIntervals: Map<string, NodeJS.Timeout> = new Map();
+
   constructor() {}
 
   /**
-   * Continuously monitors an open position.
+   * Starts an interval loop to continuously monitor an open position.
    */
-  public async monitorPosition(positionId: string, tokenAddress: string) {
-    console.log(`[Guardian] Monitoring position ${positionId} for token ${tokenAddress}`);
+  public startMonitoring(tokenAddress: string, size: bigint) {
+    console.log(`[Guardian] Starting active monitoring for token ${tokenAddress} (Size: ${size} wei)...`);
     
-    // Loop or event listener checking current price vs entry price
-    // Checking R-multiple targets, trailing stops, or hard time-stops
+    // Simulate checking every 10 seconds
+    const intervalId = setInterval(async () => {
+      console.log(`[Guardian] 🔍 Polling current price for ${tokenAddress}...`);
+      
+      // Simulating a random price movement
+      const randomOutcome = Math.random();
+      
+      if (randomOutcome > 0.9) {
+        // 10% chance to simulate hitting +50% Take Profit
+        console.log(`[Guardian] 📈 TARGET REACHED: +50% TP hit for ${tokenAddress}!`);
+        this.triggerExit(tokenAddress, "TAKE_PROFIT_50");
+      } else if (randomOutcome < 0.05) {
+        // 5% chance to simulate a rug/emergency
+        console.log(`[Guardian] 🚨 EMERGENCY: Liquidity pull detected for ${tokenAddress}!`);
+        this.triggerExit(tokenAddress, "EMERGENCY_RUG");
+      }
+      
+    }, 10000); // 10 seconds
+
+    this.activeIntervals.set(tokenAddress, intervalId);
   }
 
   /**
-   * Simulates the exit path (Exit Guard).
-   * Ensures that liquidity hasn't been rugged and we can actually sell.
+   * Triggers an exit and stops monitoring.
    */
-  public async simulateExitPath(tokenAddress: string, size: bigint): Promise<boolean> {
-    console.log(`[Guardian] Simulating exit path for ${tokenAddress}`);
-    // Simulate sell via eth_call
-    return true; // Sellable
-  }
+  private triggerExit(tokenAddress: string, reason: string) {
+    console.log(`[Guardian] Triggering exit sequence for ${tokenAddress}. Reason: ${reason}`);
+    
+    // Stop the interval loop
+    const intervalId = this.activeIntervals.get(tokenAddress);
+    if (intervalId) {
+      clearInterval(intervalId);
+      this.activeIntervals.delete(tokenAddress);
+    }
 
-  /**
-   * Triggers an emergency exit if conditions are met.
-   */
-  public async triggerEmergencyExit(tokenAddress: string) {
-    console.log(`[Guardian] 🚨 EMERGENCY EXIT triggered for ${tokenAddress}!`);
-    // Pass to Trader to generate sell calldata immediately
+    // Fire the event back to the orchestrator
+    if (this.onExitSignal) {
+      this.onExitSignal(tokenAddress, reason);
+    }
   }
 }
