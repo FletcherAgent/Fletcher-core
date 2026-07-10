@@ -44,7 +44,14 @@ export class ScoutAgent {
                 const errText = await contractRes.text();
                 throw new Error(`Blockscout API failed: ${contractRes.status} ${contractRes.statusText} - ${errText}`);
             }
-            const contractData = await contractRes.json();
+            const contractText = await contractRes.text();
+            let contractData;
+            try {
+                contractData = JSON.parse(contractText);
+            }
+            catch (e) {
+                throw new Error(`Blockscout returned non-JSON response: ${contractText.substring(0, 50)}...`);
+            }
             const deployer = contractData.creator_address;
             if (!deployer) {
                 console.warn(`[Scout] Could not find deployer for token ${tokenAddress}`);

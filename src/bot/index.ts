@@ -41,6 +41,13 @@ console.error = (...args) => {
   queueLog('❌', ...args);
 };
 
+function escapeHtml(unsafe: string) {
+  return unsafe
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 setInterval(() => {
   if (logBuffer.length > 0 && process.env.TELEGRAM_CHAT_ID) {
     const text = logBuffer.join('\n');
@@ -48,8 +55,9 @@ setInterval(() => {
     
     // Telegram message length limit is 4096. Truncate if needed.
     const chunk = text.length > 4000 ? text.substring(0, 4000) + '... (truncated)' : text;
+    const safeChunk = escapeHtml(chunk);
     
-    bot.api.sendMessage(process.env.TELEGRAM_CHAT_ID, `<pre>${chunk}</pre>`, { parse_mode: 'HTML' })
+    bot.api.sendMessage(process.env.TELEGRAM_CHAT_ID, `<pre>${safeChunk}</pre>`, { parse_mode: 'HTML' })
       .catch(err => originalError("Failed to send log to Telegram", err));
   }
 }, 3000);
