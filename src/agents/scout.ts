@@ -47,7 +47,10 @@ export class ScoutAgent {
     try {
       // 1. Fetch smart contract creator
       const contractRes = await fetch(`${apiUrl}/v2/smart-contracts/${tokenAddress}?apikey=${apiKey}`);
-      if (!contractRes.ok) throw new Error("Failed to fetch contract data");
+      if (!contractRes.ok) {
+        const errText = await contractRes.text();
+        throw new Error(`Blockscout API failed: ${contractRes.status} ${contractRes.statusText} - ${errText}`);
+      }
       
       const contractData = await contractRes.json();
       const deployer = contractData.creator_address;

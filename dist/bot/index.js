@@ -15,7 +15,13 @@ const originalLog = console.log;
 const originalWarn = console.warn;
 const originalError = console.error;
 function queueLog(emoji, ...args) {
-    const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+    const msg = args.map(a => {
+        if (a instanceof Error)
+            return a.message;
+        if (typeof a === 'object')
+            return JSON.stringify(a);
+        return String(a);
+    }).join(' ');
     logBuffer.push(`${emoji} ${msg}`);
 }
 console.log = (...args) => {
