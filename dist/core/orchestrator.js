@@ -1,13 +1,36 @@
 import { ScoutAgent } from '../agents/scout.js';
+import { TraderAgent } from '../agents/trader.js';
+import { LpManagerAgent } from '../agents/lp.js';
+import { RiskWardenAgent } from '../agents/risk.js';
+import { GuardianAgent } from '../agents/guardian.js';
 export class Orchestrator {
     scout;
-    constructor() {
+    trader;
+    lpManager;
+    riskWarden;
+    guardian;
+    constructor(bot) {
         this.scout = new ScoutAgent();
-        // Inisialisasi agen-agen lainnya nanti (Trader, LP Manager, dsb.)
+        this.trader = new TraderAgent(bot);
+        this.lpManager = new LpManagerAgent();
+        this.riskWarden = new RiskWardenAgent();
+        this.guardian = new GuardianAgent();
+        // Wire up events
+        this.scout.onSignal = (tokenAddress) => {
+            console.log(`[Orchestrator] Received signal for ${tokenAddress}, consulting Risk Warden...`);
+            const riskEvaluation = this.riskWarden.evaluateSignal(tokenAddress);
+            if (riskEvaluation.approved) {
+                console.log(`[Orchestrator] Risk Warden approved. Forwarding to Trader with size ${riskEvaluation.recommendedSize}...`);
+                this.trader.processSignal(tokenAddress, riskEvaluation.recommendedSize);
+            }
+            else {
+                console.warn(`[Orchestrator] Risk Warden rejected signal for ${tokenAddress}. Reason: ${riskEvaluation.reason}`);
+            }
+        };
     }
     async startAll() {
-        console.log("🚀 Orchestrator: Memulai seluruh agen Fletcher (Minimum Viable Swarm)...");
-        // Mulai memonitor peluncuran token baru
+        console.log("🚀 Orchestrator: Starting all Fletcher agents (Minimum Viable Swarm)...");
+        // Start monitoring for new token launches
         await this.scout.startListening();
     }
 }

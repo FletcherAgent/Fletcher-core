@@ -1,40 +1,47 @@
+import * as dotenv from "dotenv";
+dotenv.config();
 export class BlockscoutService {
-    baseUrl = 'https://explorer.mainnet.chain.robinhood.com/api'; // Placeholder untuk Blockscout Robinhood Chain
+    baseUrl = process.env.BLOCKSCOUT_API_URL || 'https://explorer.mainnet.chain.robinhood.com/api';
+    apiKey = process.env.BLOCKSCOUT_API_KEY || '';
     /**
-     * Mengambil riwayat transaksi dari alamat deployer.
-     * Bertujuan untuk mengecek apakah deployer ini sering membuat token *rugpull* sebelumnya.
+     * Fetch transaction history from the deployer's address.
+     * Aims to check if this deployer has frequently created rugpull tokens before.
      */
     async getDeployerHistory(address) {
         try {
-            // Contoh pemanggilan API (memerlukan URL valid)
-            // const response = await fetch(`${this.baseUrl}?module=account&action=txlist&address=${address}`);
+            // const url = new URL(this.baseUrl);
+            // url.searchParams.append('module', 'account');
+            // url.searchParams.append('action', 'txlist');
+            // url.searchParams.append('address', address);
+            // if (this.apiKey) url.searchParams.append('apikey', this.apiKey);
+            // const response = await fetch(url.toString());
             // const data = await response.json();
-            console.log(`[Blockscout] Mengambil riwayat untuk deployer: ${address}`);
-            // Simulasi hasil analisis
+            console.log(`[Blockscout] Fetching history for deployer: ${address}`);
+            // Simulated analysis result
             return {
                 totalTokensDeployed: 0,
                 riskScore: "LOW" // LOW, MEDIUM, HIGH
             };
         }
         catch (error) {
-            console.error("[Blockscout] Gagal mengambil riwayat deployer", error);
+            console.error("[Blockscout] Failed to fetch deployer history", error);
             return null;
         }
     }
     /**
-     * Mengambil data distribusi holder dari suatu token.
-     * Memastikan tidak ada satu dompet yang memegang persentase token secara tidak wajar.
+     * Fetch holder distribution data for a token.
+     * Ensures no single wallet holds an unnatural percentage of tokens.
      */
     async getTokenHolders(tokenAddress) {
         try {
-            console.log(`[Blockscout] Menganalisis distribusi holder untuk: ${tokenAddress}`);
+            console.log(`[Blockscout] Analyzing holder distribution for: ${tokenAddress}`);
             return {
                 topHolderPercentage: 5.5,
                 totalHolders: 150
             };
         }
         catch (error) {
-            console.error("[Blockscout] Gagal mengambil data holder", error);
+            console.error("[Blockscout] Failed to fetch holder data", error);
             return null;
         }
     }

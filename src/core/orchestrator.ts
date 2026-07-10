@@ -18,6 +18,20 @@ export class Orchestrator {
     this.lpManager = new LpManagerAgent();
     this.riskWarden = new RiskWardenAgent();
     this.guardian = new GuardianAgent();
+
+    // Wire up events
+    this.scout.onSignal = (tokenAddress) => {
+      console.log(`[Orchestrator] Received signal for ${tokenAddress}, consulting Risk Warden...`);
+      
+      const riskEvaluation = this.riskWarden.evaluateSignal(tokenAddress);
+      
+      if (riskEvaluation.approved) {
+        console.log(`[Orchestrator] Risk Warden approved. Forwarding to Trader with size ${riskEvaluation.recommendedSize}...`);
+        this.trader.processSignal(tokenAddress, riskEvaluation.recommendedSize);
+      } else {
+        console.warn(`[Orchestrator] Risk Warden rejected signal for ${tokenAddress}. Reason: ${riskEvaluation.reason}`);
+      }
+    };
   }
 
   public async startAll() {

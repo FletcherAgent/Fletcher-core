@@ -2,6 +2,8 @@ import { publicClient } from '../services/viem.js';
 import { parseAbiItem } from 'viem';
 
 export class ScoutAgent {
+  public onSignal?: (tokenAddress: string) => void;
+
   constructor() {}
 
   /**
@@ -31,21 +33,58 @@ export class ScoutAgent {
     }
   }
 
-  /**
-   * Perform deep evaluation on a newly detected token.
-   * - Deployer History (Blockscout API)
-   * - Honeypot Simulation (eth_call)
-   * - Liquidity Depth
-   * - Holder Distribution
-   */
   private async scoreLaunch(tokenAddress: string) {
     console.log(`[Scout] Scoring launch for token: ${tokenAddress}`);
     
-    // 1. Fetch deployer history from Blockscout
-    // 2. Check Honeypot via eth_call
-    // 3. Check holder distribution
-    // 4. Calculate composite score
-    
-    // If it passes threshold, pass it to Risk Warden / Trader
+    const apiUrl = process.env.BLOCKSCOUT_API_URL;
+    const apiKey = process.env.BLOCKSCOUT_API_KEY;
+
+    if (!apiUrl || !apiKey) {
+      console.warn("[Scout] Missing Blockscout API credentials in .env. Skipping scoring.");
+      return;
+    }
+
+    try {
+      // 1. Fetch smart contract creator
+      const contractRes = await fetch(`${apiUrl}/v2/smart-contracts/${tokenAddress}?apikey=${apiKey}`);
+      if (!contractRes.ok) throw new Error("Failed to fetch contract data");
+      
+      const contractData = await contractRes.json();
+      const deployer = contractData.creator_address;
+
+      if (!deployer) {
+        console.warn(`[Scout] Could not find deployer for token ${tokenAddress}`);
+        return;
+      }
+
+      console.log(`[Scout] Deployer identified: ${deployer}`);
+
+      // 2. Fetch deployer transaction history
+      const txRes = await fetch(`${apiUrl}/v2/addresses/${deployer}/transactions?apikey=${apiKey}`);
+      const txData = await txRes.json();
+      const txCount = txData.items?.length || 0;
+
+      console.log(`[Scout] Deployer has ${txCount} recent transactions.`);
+
+      // 3. Simple Heuristic Score
+      let score = 50;
+      if (txCount >= 5) score += 30; // Good, not a brand new wallet
+      if (txCount > 200) score -= 40; // Too high, potential spammer/rug factory
+
+      console.log(`[Scout] Calculated composite score: ${score}/100`);
+
+      // 4. Threshold evaluation
+      if (score >= 70) {
+        console.log(`[Scout] ✅ Token ${tokenAddress} PASSED! Emitting signal...`);
+        if (this.onSignal) {
+          this.onSignal(tokenAddress);
+        }
+      } else {
+        console.log(`[Scout] ❌ Token ${tokenAddress} REJECTED. Score too low.`);
+      }
+
+    } catch (error) {
+      console.error(`[Scout] Error during scoring for ${tokenAddress}:`, error);
+    }
   }
 }

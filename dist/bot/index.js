@@ -1,6 +1,7 @@
 import { Bot } from "grammy";
 import * as dotenv from "dotenv";
 import { Orchestrator } from "../core/orchestrator.js";
+import { connectDb } from "../core/db.js";
 dotenv.config();
 const botToken = process.env.TELEGRAM_BOT_TOKEN;
 if (!botToken) {
@@ -14,12 +15,18 @@ bot.command("start", (ctx) => {
 bot.command("status", (ctx) => {
     ctx.reply("📊 Status:\n- Network: Robinhood Chain (4663)\n- Active Agents: 5\n- Positions: 0 OPEN");
 });
-const orchestrator = new Orchestrator();
+// Log Chat ID for every incoming message
+bot.on("message", (ctx) => {
+    console.log(`[Telegram] New message received! Your Chat ID is: ${ctx.chat.id}`);
+});
+const orchestrator = new Orchestrator(bot);
 // Start the bot
 bot.start({
     onStart: async (botInfo) => {
         console.log(`[Bot] Started as @${botInfo.username}`);
-        // Mulai agen-agen Fletcher (Event Listener dll)
+        // Connect Database
+        await connectDb();
+        // Start Fletcher agents (Event Listener, etc.)
         await orchestrator.startAll();
     },
 });

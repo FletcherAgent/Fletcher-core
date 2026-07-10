@@ -1,20 +1,23 @@
 import { createPublicClient, http, defineChain } from 'viem';
-// Mendefinisikan konfigurasi Robinhood Chain secara kustom
+import * as dotenv from "dotenv";
+dotenv.config();
+const rpcUrl = process.env.ROBINHOOD_RPC_URL || 'https://rpc.mainnet.chain.robinhood.com';
+// Define custom Robinhood Chain configuration
 export const robinhoodChain = defineChain({
-    id: 4663, // ID chain placeholder, akan disesuaikan jika perlu
+    id: 4663, // Placeholder chain ID, adjust if necessary
     name: 'Robinhood Chain',
     network: 'robinhood',
     nativeCurrency: {
         decimals: 18,
         name: 'Robinhood',
-        symbol: 'RHD', // Menggunakan RHD atau token gas native Robinhood
+        symbol: 'RHD', // Using RHD or native gas token for Robinhood
     },
     rpcUrls: {
         default: {
-            http: ['https://rpc.mainnet.chain.robinhood.com'],
+            http: [rpcUrl],
         },
         public: {
-            http: ['https://rpc.mainnet.chain.robinhood.com'],
+            http: [rpcUrl],
         },
     },
 });
