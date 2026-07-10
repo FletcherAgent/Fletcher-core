@@ -58,6 +58,14 @@ export class Orchestrator {
             }
         };
     }
+    /**
+     * Manually injects a token into the pipeline (Useful for Dry Run / Telegram commands)
+     */
+    injectManualSignal(tokenAddress) {
+        console.log(`[Orchestrator] 🧪 Manual Dry Run injected for ${tokenAddress}`);
+        // We bypass Scout's listener and force it to score this token
+        this.scout.scoreLaunch(tokenAddress);
+    }
     async startAll() {
         console.log("🚀 Orchestrator: Starting all Fletcher agents (Minimum Viable Swarm)...");
         // Start monitoring for new token launches
