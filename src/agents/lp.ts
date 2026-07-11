@@ -145,11 +145,50 @@ export class LpManagerAgent {
   }
 
   /**
+   * Calculates the Impermanent Loss (IL) percentage.
+   * IL = (Value_LP - Value_HODL) / Value_HODL * 100
+   */
+  public calculateImpermanentLoss(
+    initialAmount0: number,
+    initialAmount1: number,
+    currentAmount0: number,
+    currentAmount1: number,
+    currentPrice0: number // Price of Token0 in terms of Token1
+  ): number {
+    const valueHodl = (initialAmount0 * currentPrice0) + initialAmount1;
+    const valueLp = (currentAmount0 * currentPrice0) + currentAmount1;
+    
+    if (valueHodl === 0) return 0;
+    
+    const ilPercentage = ((valueLp - valueHodl) / valueHodl) * 100;
+    console.log(`[LP Manager] 📉 IL Monitor: Value HODL=${valueHodl.toFixed(4)}, Value LP=${valueLp.toFixed(4)}. IL = ${ilPercentage.toFixed(2)}%`);
+    return ilPercentage;
+  }
+
+  /**
    * Adjusts the active liquidity range (Volatility-Band Rebalancing).
    */
-  public async rebalanceBands(tokenId: string, currentTick: number) {
+  public async rebalanceBands(tokenId: string, currentTick: number, entryPrice: number, currentPrice: number) {
     if (!walletClient || !account) return;
-    console.log(`[LP Manager] ⚖️ Executing real Rebalance for TokenID: ${tokenId}. Current Tick: ${currentTick}`);
+    
+    // Calculate simple volatility proxy (price change percentage)
+    const priceChangePct = Math.abs((currentPrice - entryPrice) / entryPrice) * 100;
+    
+    let tickRange = 200; // Default narrow band
+    if (priceChangePct > 10) {
+      console.log(`[LP Manager] 🌪️ High Volatility Detected (${priceChangePct.toFixed(2)}%). Widening bands.`);
+      tickRange = 1000;
+    } else if (priceChangePct > 5) {
+      console.log(`[LP Manager] 🌬️ Medium Volatility Detected (${priceChangePct.toFixed(2)}%).`);
+      tickRange = 500;
+    } else {
+      console.log(`[LP Manager] ☀️ Low Volatility Detected (${priceChangePct.toFixed(2)}%). Narrowing bands for optimal fees.`);
+    }
+
+    const newTickLower = currentTick - tickRange;
+    const newTickUpper = currentTick + tickRange;
+
+    console.log(`[LP Manager] ⚖️ Executing real Rebalance for TokenID: ${tokenId}. Target Range: [${newTickLower}, ${newTickUpper}]`);
     
     try {
       const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 5);
