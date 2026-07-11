@@ -31,7 +31,7 @@ export class ScoutAgent {
           },
         });
 
-        // Setup listener for NOXA TokenGraduated events (Mock ABI)
+        // Setup listener for NOXA TokenGraduated events
         publicClient.watchEvent({
           address: NOXA_FACTORY,
           event: parseAbiItem('event TokenGraduated(address indexed token)'),
@@ -47,7 +47,7 @@ export class ScoutAgent {
       // Setup listener for PoolCreated events (Uniswap V3)
       publicClient.watchEvent({
         address: UNISWAP_V3_FACTORY,
-        event: parseAbiItem('event PoolCreated(address indexed token0, address indexed token1, uint24 indexed fee, int24 tickSpacing, address pool)'),
+        event: parseAbiItem('event PoolCreated(address indexed token0, address indexed token1, uint24 fee, int24 tickSpacing, address pool)'),
         onLogs: (logs) => {
           for (const log of logs) {
             console.log(`[Scout] New Pool Detected! Token0: ${log.args.token0}, Token1: ${log.args.token1}`);
@@ -62,10 +62,27 @@ export class ScoutAgent {
   }
 
   private async checkLiquidityLock(tokenAddress: string): Promise<boolean> {
-    // Placeholder logic for checking if liquidity is locked in NOXA
-    console.log(`[Scout] 🔒 Simulating Liquidity Lock check for ${tokenAddress}...`);
-    // In reality, this would read from NOXA Locker contract
-    return true; // Always return true for now
+    console.log(`[Scout] 🔒 Checking if token supply is burned to Dead Address for ${tokenAddress}...`);
+    try {
+      const deadAddress = '0x000000000000000000000000000000000000dEaD';
+      const balance = await publicClient.readContract({
+        address: tokenAddress as `0x${string}`,
+        abi: parseAbi(['function balanceOf(address owner) view returns (uint256)']),
+        functionName: 'balanceOf',
+        args: [deadAddress]
+      });
+
+      if (balance > 0n) {
+        console.log(`[Scout] ✅ Liquidity/Tokens burned detected: ${balance.toString()}`);
+        return true;
+      }
+      
+      console.warn(`[Scout] ⚠️ No tokens burned to dead address.`);
+      return false;
+    } catch (e) {
+      console.error(`[Scout] ❌ Failed to check dead address balance`, e);
+      return false;
+    }
   }
 
   private async simulateHoneypot(tokenAddress: string): Promise<boolean> {

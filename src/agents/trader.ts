@@ -29,12 +29,18 @@ export class TraderAgent {
           value: value
         });
         
-        console.log(`[Trader] ✅ BUY TX Broadcasted: ${txHash}`);
-        this.emitToSigningBoundary(tokenAddress, txHash, 'BUY EXECUTED');
+        console.log(`[Trader] ✅ BUY TX Broadcasted: ${txHash}. Waiting for confirmation...`);
+        const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
 
-        // Simulate successful trade execution and save to DB
-        const estimatedEntryPrice = Number(sizeInWeth) / Number(amountOutMinimum);
-        await this.registerPosition(tokenAddress, estimatedEntryPrice, Number(sizeInWeth) / 1e18);
+        if (receipt.status === 'success') {
+          console.log(`[Trader] 🎯 BUY TX Confirmed in block ${receipt.blockNumber}`);
+          this.emitToSigningBoundary(tokenAddress, txHash, 'BUY EXECUTED');
+
+          const estimatedEntryPrice = Number(sizeInWeth) / Number(amountOutMinimum);
+          await this.registerPosition(tokenAddress, estimatedEntryPrice, Number(sizeInWeth) / 1e18);
+        } else {
+          throw new Error('Transaction reverted by network');
+        }
       } catch (error) {
         console.error(`[Trader] ❌ BUY TX Failed:`, error);
         this.emitToSigningBoundary(tokenAddress, "FAILED", 'BUY REJECTED');
@@ -60,12 +66,18 @@ export class TraderAgent {
           data: calldata as `0x${string}`
         });
 
-        console.log(`[Trader] ✅ SELL TX Broadcasted: ${txHash}`);
-        this.emitToSigningBoundary(tokenAddress, txHash, `SELL EXECUTED [${reason}]`);
+        console.log(`[Trader] ✅ SELL TX Broadcasted: ${txHash}. Waiting for confirmation...`);
+        const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
 
-        // Simulate successful sell execution and update DB
-        const estimatedExitPrice = Number(amountOutMinimum) / Number(amountInToken);
-        await this.updatePositionStatus(tokenAddress, estimatedExitPrice);
+        if (receipt.status === 'success') {
+          console.log(`[Trader] 🎯 SELL TX Confirmed in block ${receipt.blockNumber}`);
+          this.emitToSigningBoundary(tokenAddress, txHash, `SELL EXECUTED [${reason}]`);
+
+          const estimatedExitPrice = Number(amountOutMinimum) / Number(amountInToken);
+          await this.updatePositionStatus(tokenAddress, estimatedExitPrice);
+        } else {
+          throw new Error('Transaction reverted by network');
+        }
       } catch (error) {
         console.error(`[Trader] ❌ SELL TX Failed:`, error);
         this.emitToSigningBoundary(tokenAddress, "FAILED", `SELL REJECTED [${reason}]`);
