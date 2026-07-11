@@ -85,40 +85,7 @@ export class ScoutAgent {
     }
   }
 
-  private async simulateHoneypot(tokenAddress: string): Promise<boolean> {
-    console.log(`[Scout] 🛡️ Simulating Buy & Sell to detect honeypot for ${tokenAddress}...`);
-    try {
-      const quoterAbi = parseAbi([
-        'function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external returns (uint256 amountOut)'
-      ]);
-      const WETH_ADDRESS = process.env.WETH_ADDRESS!;
-      const QUOTER_ADDRESS = process.env.QUOTER_ADDRESS!;
 
-      // 1. Simulate BUY: 0.01 WETH to Token
-      const buyAmountIn = 10000000000000000n; // 0.01 ETH
-      const { result: buyResult } = await publicClient.simulateContract({
-        address: QUOTER_ADDRESS as `0x${string}`,
-        abi: quoterAbi,
-        functionName: 'quoteExactInputSingle',
-        args: [WETH_ADDRESS as `0x${string}`, tokenAddress as `0x${string}`, 3000, buyAmountIn, 0n]
-      });
-
-      // 2. Simulate SELL: Token back to WETH
-      // Use the amount of tokens we would have gotten from the buy
-      await publicClient.simulateContract({
-        address: QUOTER_ADDRESS as `0x${string}`,
-        abi: quoterAbi,
-        functionName: 'quoteExactInputSingle',
-        args: [tokenAddress as `0x${string}`, WETH_ADDRESS as `0x${string}`, 3000, buyResult, 0n]
-      });
-
-      console.log(`[Scout] ✅ Anti-Honeypot check passed. Buy and Sell simulations succeeded.`);
-      return true;
-    } catch (error) {
-      console.warn(`[Scout] 🚨 Anti-Honeypot check FAILED for ${tokenAddress}. Likely a honeypot or illiquid.`, (error as Error).message);
-      return false;
-    }
-  }
 
   private async scoreLaunch(tokenAddress: string, isGraduated: boolean = false) {
     console.log(`[Scout] Scoring launch for token: ${tokenAddress}`);
@@ -152,9 +119,8 @@ export class ScoutAgent {
       const deployerHistory = await this.blockscout.getDeployerHistory(deployer);
       const holdersData = await this.blockscout.getTokenHolders(tokenAddress);
 
-      // 3. Security Checks (Anti-Honeypot & Liq Lock)
+      // 3. Security Checks (Liquidity Lock)
       const isLocked = await this.checkLiquidityLock(tokenAddress);
-      const isNotHoneypot = await this.simulateHoneypot(tokenAddress);
 
       // 4. Composite Heuristic Score
       let score = 50;
@@ -167,11 +133,6 @@ export class ScoutAgent {
 
       if (!isLocked) {
         console.warn(`[Scout] 🚨 Liquidity is not locked! Instant fail.`);
-        score -= 100;
-      }
-
-      if (!isNotHoneypot) {
-        console.warn(`[Scout] 🚨 Failed Honeypot check! Instant fail.`);
         score -= 100;
       }
       

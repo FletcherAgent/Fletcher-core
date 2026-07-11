@@ -110,19 +110,10 @@ export class TraderAgent {
     let amountOutMinimum = 0n;
 
     try {
-      // 1. Fetch real quote from Quoter
-      const { result } = await publicClient.simulateContract({
-        address: QUOTER_ADDRESS as `0x${string}`,
-        abi: quoterAbi,
-        functionName: 'quoteExactInputSingle',
-        args: [WETH_ADDRESS as `0x${string}`, tokenOut as `0x${string}`, 3000, amountIn, 0n]
-      });
-
-      console.log(`[Trader] Real quote received: ${result} wei out`);
-
-      // 2. Apply 1% Slippage tolerance
-      amountOutMinimum = (result * 99n) / 100n;
-      console.log(`[Trader] Setting amountOutMinimum (1% slippage): ${amountOutMinimum}`);
+      // Direct Sniper execution: Set amountOutMinimum to 0 to bypass all quote simulations and guarantee execution.
+      // (100% Slippage Tolerance)
+      amountOutMinimum = 0n;
+      console.log(`[Trader] 🎯 Pure Sniper execution: Setting amountOutMinimum to 0 (No slippage protection)`);
 
       // 3. Encode actual tx
       const calldata = encodeFunctionData({
@@ -171,19 +162,10 @@ export class TraderAgent {
     let amountOutMinimum = 0n;
 
     try {
-      // 1. Fetch real quote for exit
-      const { result } = await publicClient.simulateContract({
-        address: QUOTER_ADDRESS as `0x${string}`,
-        abi: quoterAbi,
-        functionName: 'quoteExactInputSingle',
-        args: [tokenIn as `0x${string}`, WETH_ADDRESS as `0x${string}`, 3000, amountIn, 0n]
-      });
-
-      console.log(`[Trader] Real SELL quote received: ${result} WETH out`);
-
-      // 2. Apply 1% Slippage tolerance
-      amountOutMinimum = (result * 99n) / 100n;
-      console.log(`[Trader] Setting SELL amountOutMinimum (1% slippage): ${amountOutMinimum}`);
+      // Direct Sniper execution: Set amountOutMinimum to 0 to bypass all quote simulations and guarantee execution.
+      // (100% Slippage Tolerance)
+      amountOutMinimum = 0n;
+      console.log(`[Trader] 🎯 Pure Sniper SELL execution: Setting amountOutMinimum to 0 (No slippage protection)`);
 
       const calldata = encodeFunctionData({
         abi: exactInputSingleAbi,

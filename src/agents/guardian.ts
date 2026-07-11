@@ -24,16 +24,15 @@ export class GuardianAgent {
     const WETH_ADDRESS = process.env.WETH_ADDRESS!; 
     const QUOTER_ADDRESS = process.env.QUOTER_ADDRESS!;
 
-    // Fetch initial quote as the entry baseline
     let initialQuote = 0n;
     try {
-      const { result } = await publicClient.simulateContract({
+      const result = await publicClient.readContract({
         address: QUOTER_ADDRESS as `0x${string}`,
         abi: quoterAbi,
         functionName: 'quoteExactInputSingle',
-        args: [tokenAddress as `0x${string}`, WETH_ADDRESS as `0x${string}`, 3000, size, 0n] // Simulating selling the whole size
+        args: [tokenAddress as `0x${string}`, WETH_ADDRESS as `0x${string}`, 3000, size, 0n] // Reading price quote
       });
-      initialQuote = result;
+      initialQuote = result as bigint;
       console.log(`[Guardian] 📌 Baseline Entry Quote for ${tokenAddress}: ${initialQuote} WETH`);
     } catch (e) {
       console.error(`[Guardian] Failed to fetch initial baseline for ${tokenAddress}`, e);
@@ -47,12 +46,12 @@ export class GuardianAgent {
       console.log(`[Guardian] 🔍 Polling current price for ${tokenAddress}...`);
       
       try {
-        const { result: currentQuote } = await publicClient.simulateContract({
+        const currentQuote = await publicClient.readContract({
           address: QUOTER_ADDRESS as `0x${string}`,
           abi: quoterAbi,
           functionName: 'quoteExactInputSingle',
           args: [tokenAddress as `0x${string}`, WETH_ADDRESS as `0x${string}`, 3000, size, 0n]
-        });
+        }) as bigint;
 
         // Update High Watermark
         if (currentQuote > highestQuote) {
