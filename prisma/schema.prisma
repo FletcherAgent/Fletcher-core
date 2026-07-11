@@ -17,6 +17,7 @@ model Position {
   entryPrice   Float
   size         Float
   exitPrice    Float?
+  tokenId      String?  // Storage for Uniswap V3 LP NFT
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 }
