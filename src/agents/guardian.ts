@@ -4,7 +4,11 @@ import { parseAbi } from 'viem';
 export class GuardianAgent {
   public onExitSignal?: (tokenAddress: string, reason: string) => void;
   
-  private activeIntervals: Map<string, NodeJS.Timeout> = new Map();
+  private activeIntervals: Map<string, {
+    intervalId: NodeJS.Timeout;
+    initialQuote: bigint;
+    highestQuote: bigint;
+  }> = new Map();
 
   constructor() {}
 
@@ -36,6 +40,8 @@ export class GuardianAgent {
       return;
     }
 
+    let highestQuote = initialQuote;
+
     // Polling every 10 seconds
     const intervalId = setInterval(async () => {
       console.log(`[Guardian] 🔍 Polling current price for ${tokenAddress}...`);
@@ -48,18 +54,47 @@ export class GuardianAgent {
           args: [tokenAddress as `0x${string}`, WETH_ADDRESS as `0x${string}`, 3000, size, 0n]
         });
 
-        console.log(`[Guardian] Current Quote: ${currentQuote} WETH (Baseline: ${initialQuote})`);
+        // Update High Watermark
+        if (currentQuote > highestQuote) {
+          highestQuote = currentQuote;
+          console.log(`[Guardian] 🚀 New High Watermark for ${tokenAddress}: ${highestQuote} WETH`);
+        } else {
+          console.log(`[Guardian] Current Quote: ${currentQuote} WETH (Highest: ${highestQuote}, Entry: ${initialQuote})`);
+        }
         
-        // 1. Check Take Profit (+50% -> 1.5x)
+        // 1. Fixed Take Profit (+50% -> 1.5x)
         const tpTarget = (initialQuote * 150n) / 100n;
         if (currentQuote >= tpTarget) {
           console.log(`[Guardian] 📈 TARGET REACHED: +50% TP hit for ${tokenAddress}!`);
-          this.triggerExit(tokenAddress, "TAKE_PROFIT_50");
+          this.triggerExit(tokenAddress, "FIXED_TAKE_PROFIT_50");
+          return;
         } 
-        // 2. Check Rug/Emergency (Dropped by 90%)
-        else if (currentQuote <= (initialQuote * 10n) / 100n) {
+        
+        // 2. Fixed Stop-Loss (-30% from entry)
+        const slTarget = (initialQuote * 70n) / 100n;
+        if (currentQuote <= slTarget) {
+          console.log(`[Guardian] 📉 STOP-LOSS HIT: -30% from entry for ${tokenAddress}!`);
+          this.triggerExit(tokenAddress, "FIXED_STOP_LOSS_30");
+          return;
+        }
+
+        // 3. Trailing Take-Profit (-30% from peak)
+        // Only activates if we are actually trailing a peak that is higher than entry
+        if (highestQuote > initialQuote) {
+          const trailingSlTarget = (highestQuote * 70n) / 100n;
+          if (currentQuote <= trailingSlTarget) {
+            console.log(`[Guardian] 📉 TRAILING TAKE-PROFIT HIT: -30% from peak for ${tokenAddress}!`);
+            this.triggerExit(tokenAddress, "TRAILING_TAKE_PROFIT_30");
+            return;
+          }
+        }
+
+        // 4. Emergency Rug Failsafe (-90% from peak)
+        const emergencyTarget = (highestQuote * 10n) / 100n;
+        if (currentQuote <= emergencyTarget) {
           console.log(`[Guardian] 🚨 EMERGENCY: Massive liquidity drop detected for ${tokenAddress}!`);
           this.triggerExit(tokenAddress, "EMERGENCY_RUG");
+          return;
         }
 
       } catch (err) {
@@ -69,7 +104,7 @@ export class GuardianAgent {
       
     }, 10000); // 10 seconds
 
-    this.activeIntervals.set(tokenAddress, intervalId);
+    this.activeIntervals.set(tokenAddress, { intervalId, initialQuote, highestQuote });
   }
 
   /**
@@ -79,9 +114,9 @@ export class GuardianAgent {
     console.log(`[Guardian] Triggering exit sequence for ${tokenAddress}. Reason: ${reason}`);
     
     // Stop the interval loop
-    const intervalId = this.activeIntervals.get(tokenAddress);
-    if (intervalId) {
-      clearInterval(intervalId);
+    const record = this.activeIntervals.get(tokenAddress);
+    if (record) {
+      clearInterval(record.intervalId);
       this.activeIntervals.delete(tokenAddress);
     }
 
