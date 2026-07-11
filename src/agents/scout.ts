@@ -23,24 +23,34 @@ export class ScoutAgent {
         publicClient.watchEvent({
           address: NOXA_FACTORY,
           event: parseAbiItem('event TokenCreated(address indexed token)'),
+          poll: true,
+          pollingInterval: 3000,
           onLogs: (logs) => {
             for (const log of logs) {
               console.log(`[Scout] 🆕 NOXA TokenCreated Detected! Token: ${log.args.token}`);
               if (log.args.token) this.scoreLaunch(log.args.token, false);
             }
           },
+          onError: (error) => {
+            console.error("[Scout] ❌ NOXA TokenCreated watchEvent Error:", error.message);
+          }
         });
 
         // Setup listener for NOXA TokenGraduated events
         publicClient.watchEvent({
           address: NOXA_FACTORY,
           event: parseAbiItem('event TokenGraduated(address indexed token)'),
+          poll: true,
+          pollingInterval: 3000,
           onLogs: (logs) => {
             for (const log of logs) {
               console.log(`[Scout] 🎓 NOXA TokenGraduated Detected! Token: ${log.args.token}`);
               if (log.args.token) this.scoreLaunch(log.args.token, true);
             }
           },
+          onError: (error) => {
+            console.error("[Scout] ❌ NOXA TokenGraduated watchEvent Error:", error.message);
+          }
         });
       }
 
@@ -48,6 +58,8 @@ export class ScoutAgent {
       publicClient.watchEvent({
         address: UNISWAP_V3_FACTORY,
         event: parseAbiItem('event PoolCreated(address indexed token0, address indexed token1, uint24 fee, int24 tickSpacing, address pool)'),
+        poll: true,
+        pollingInterval: 3000,
         onLogs: (logs) => {
           for (const log of logs) {
             console.log(`[Scout] New Pool Detected! Token0: ${log.args.token0}, Token1: ${log.args.token1}`);
@@ -55,6 +67,9 @@ export class ScoutAgent {
             if (log.args.token0) this.scoreLaunch(log.args.token0, false);
           }
         },
+        onError: (error) => {
+          console.error("[Scout] ❌ Uniswap V3 PoolCreated watchEvent Error:", error.message);
+        }
       });
     } catch (error) {
       console.error("🔴 Scout Agent: Failed to start watchEvent", error);
