@@ -1,7 +1,7 @@
 import { Bot } from "grammy";
 import * as dotenv from "dotenv";
 import { Orchestrator } from "../core/orchestrator.js";
-import { connectDb } from "../core/db.js";
+import { connectDb, prisma } from "../core/db.js";
 
 dotenv.config();
 
@@ -64,11 +64,35 @@ setInterval(() => {
 // -----------------------
 
 bot.command("start", (ctx) => {
-  ctx.reply("🟢 Fletcher Agent Core is online.\nRobinhood Chain Active Range Manager.");
+  ctx.reply("🟢 Fletcher Agent Core is online.\nRobinhood Chain Active Range Manager.\n\nKetik /help untuk melihat daftar perintah.");
 });
 
-bot.command("status", (ctx) => {
-  ctx.reply("📊 Status:\n- Network: Robinhood Chain (4663)\n- Active Agents: 5\n- Positions: 0 OPEN");
+bot.command("help", (ctx) => {
+  const helpText = `
+🤖 **Fletcher Bot Commands** 🤖
+
+🚀 **Sistem Utama**
+/start - Memulai bot dan menampilkan status awal.
+/status - Menampilkan status agen, jaringan, dan posisi aktif.
+/help - Menampilkan panduan dan daftar perintah ini.
+
+🕹️ **Mode Operasi**
+/mode auto - (Sniper Mode) Bot otomatis membeli koin baru tanpa konfirmasi (Sangat Cepat).
+/mode confirm - (Manual Mode) Bot akan mengirim tombol [Confirm] / [Reject] ke Telegram sebelum membeli.
+
+🧪 **Pengujian (Developer)**
+/dryrun <Alamat_Token> - Memaksa bot memasukkan token tertentu ke dalam antrean (Inject Signal) untuk testing eksekusi.
+`;
+  ctx.reply(helpText, { parse_mode: "Markdown" });
+});
+
+bot.command("status", async (ctx) => {
+  try {
+    const openPositions = await prisma.position.count({ where: { status: 'OPEN' } });
+    ctx.reply(`📊 Status:\n- Network: Robinhood Chain (4663)\n- Active Agents: 5\n- Positions: ${openPositions} OPEN`);
+  } catch (e) {
+    ctx.reply("❌ Gagal mengambil status dari database.");
+  }
 });
 
 bot.command("dryrun", (ctx) => {
