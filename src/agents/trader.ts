@@ -81,7 +81,7 @@ export class TraderAgent {
           tokenIn: WETH_ADDRESS as `0x${string}`,
           tokenOut: tokenOut as `0x${string}`,
           fee: 3000, // standard 0.3% pool fee, should be dynamic
-          recipient: '0x0000000000000000000000000000000000000000', // Replaced with user's vault at signing boundary
+          recipient: (process.env.USER_WALLET_ADDRESS || '0x0000000000000000000000000000000000000000') as `0x${string}`,
           deadline,
           amountIn: amountIn,
           amountOutMinimum,
@@ -141,7 +141,7 @@ export class TraderAgent {
           tokenIn: tokenIn as `0x${string}`,
           tokenOut: WETH_ADDRESS as `0x${string}`,
           fee: 3000,
-          recipient: '0x0000000000000000000000000000000000000000',
+          recipient: (process.env.USER_WALLET_ADDRESS || '0x0000000000000000000000000000000000000000') as `0x${string}`,
           deadline,
           amountIn: amountIn,
           amountOutMinimum,

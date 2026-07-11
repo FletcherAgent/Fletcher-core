@@ -12,8 +12,8 @@ export const robinhoodChain = defineChain({
   network: 'robinhood',
   nativeCurrency: {
     decimals: 18,
-    name: 'Robinhood',
-    symbol: 'RHD', // Using RHD or native gas token for Robinhood
+    name: 'Ether',
+    symbol: 'ETH',
   },
   rpcUrls: {
     default: {

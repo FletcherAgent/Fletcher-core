@@ -1,8 +1,10 @@
 import { publicClient } from '../services/viem.js';
 import { parseAbiItem } from 'viem';
+import { BlockscoutService } from '../services/blockscout.js';
 
 export class ScoutAgent {
   public onSignal?: (tokenAddress: string) => void;
+  private blockscout = new BlockscoutService();
 
   constructor() {}
 
@@ -12,8 +14,7 @@ export class ScoutAgent {
   public async startListening() {
     console.log("🟢 Scout Agent: Starting monitoring for NOXA Factory & Uniswap V3 PoolCreated...");
 
-    // TODO: Replace with actual NOXA Factory and Uniswap V3 addresses on Robinhood Chain
-    const UNISWAP_V3_FACTORY = '0x1F98431c8aD98523631AE4a59f267346ea31F984'; // Mainnet placeholder
+    const UNISWAP_V3_FACTORY = (process.env.UNISWAP_V3_FACTORY_ADDRESS || '0x1F98431c8aD98523631AE4a59f267346ea31F984') as `0x${string}`;
 
     try {
       // Setup listener for PoolCreated events (Uniswap V3)
@@ -39,27 +40,19 @@ export class ScoutAgent {
     const apiUrl = process.env.BLOCKSCOUT_API_URL;
     const apiKey = process.env.BLOCKSCOUT_API_KEY;
 
-    if (!apiUrl || !apiKey) {
+    if (!apiUrl) {
       console.warn("[Scout] Missing Blockscout API credentials in .env. Skipping scoring.");
       return;
     }
 
     try {
       // 1. Fetch smart contract creator
-      const contractRes = await fetch(`${apiUrl}/v2/smart-contracts/${tokenAddress}?apikey=${apiKey}`);
+      const contractRes = await fetch(`${apiUrl}/v2/smart-contracts/${tokenAddress}${apiKey ? `?apikey=${apiKey}` : ''}`);
       if (!contractRes.ok) {
-        const errText = await contractRes.text();
-        throw new Error(`Blockscout API failed: ${contractRes.status} ${contractRes.statusText} - ${errText}`);
+        throw new Error(`Blockscout API failed: ${contractRes.status}`);
       }
       
-      const contractText = await contractRes.text();
-      let contractData;
-      try {
-        contractData = JSON.parse(contractText);
-      } catch (e) {
-        throw new Error(`Blockscout returned non-JSON response: ${contractText.substring(0, 50)}...`);
-      }
-
+      const contractData = await contractRes.json();
       const deployer = contractData.creator_address;
 
       if (!deployer) {
@@ -69,17 +62,28 @@ export class ScoutAgent {
 
       console.log(`[Scout] Deployer identified: ${deployer}`);
 
-      // 2. Fetch deployer transaction history
-      const txRes = await fetch(`${apiUrl}/v2/addresses/${deployer}/transactions?apikey=${apiKey}`);
-      const txData = await txRes.json();
-      const txCount = txData.items?.length || 0;
+      // 2. Evaluate using Blockscout Service
+      const deployerHistory = await this.blockscout.getDeployerHistory(deployer);
+      const holdersData = await this.blockscout.getTokenHolders(tokenAddress);
 
-      console.log(`[Scout] Deployer has ${txCount} recent transactions.`);
-
-      // 3. Simple Heuristic Score
+      // 3. Composite Heuristic Score
       let score = 50;
-      if (txCount >= 5) score += 30; // Good, not a brand new wallet
-      if (txCount > 200) score -= 40; // Too high, potential spammer/rug factory
+      
+      if (deployerHistory) {
+        if (deployerHistory.riskScore === 'LOW') score += 20;
+        else if (deployerHistory.riskScore === 'MEDIUM') score -= 10;
+        else if (deployerHistory.riskScore === 'HIGH') score -= 50; // High risk
+      }
+
+      if (holdersData) {
+        // If top holder has more than 50% supply, flag it
+        if (holdersData.topHolderPercentage > 50) {
+          console.warn(`[Scout] 🚨 Top holder owns ${holdersData.topHolderPercentage}% of supply!`);
+          score -= 40;
+        } else if (holdersData.topHolderPercentage < 20 && holdersData.totalHolders > 10) {
+          score += 20; // Healthy distribution
+        }
+      }
 
       console.log(`[Scout] Calculated composite score: ${score}/100`);
 
