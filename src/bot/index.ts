@@ -85,6 +85,20 @@ bot.command("dryrun", (ctx) => {
   orchestrator.injectManualSignal(tokenAddress);
 });
 
+bot.command("mode", (ctx) => {
+  const modeParam = ctx.match?.toLowerCase().trim();
+  
+  if (modeParam === "auto") {
+    orchestrator.setTraderMode('AUTO');
+    ctx.reply("⚡ **Mode Changed: AUTO (Sniper Mode)**\nBot will automatically sign and broadcast BUY transactions.", { parse_mode: "Markdown" });
+  } else if (modeParam === "confirm") {
+    orchestrator.setTraderMode('CONFIRM');
+    ctx.reply("🛡️ **Mode Changed: CONFIRM**\nBot will ask for your confirmation (via Inline Buttons) before executing any BUY transaction.", { parse_mode: "Markdown" });
+  } else {
+    ctx.reply("❌ Invalid mode. Usage: `/mode auto` or `/mode confirm`", { parse_mode: "Markdown" });
+  }
+});
+
 // Log Chat ID for every incoming message
 bot.on("message", (ctx) => {
   console.log(`[Telegram] New message received! Your Chat ID is: ${ctx.chat.id}`);

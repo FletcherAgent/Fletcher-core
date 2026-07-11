@@ -1,13 +1,28 @@
 import { encodeFunctionData, parseAbi, parseEther } from 'viem';
-import { Bot } from 'grammy';
+import { Bot, InlineKeyboard } from 'grammy';
 import { prisma } from '../core/db.js';
 import { publicClient, walletClient, account } from '../services/viem.js';
 
 export class TraderAgent {
   private bot: Bot;
+  public executionMode: 'AUTO' | 'CONFIRM' = 'AUTO';
+  private pendingTrades: Map<string, { calldata: string, value: bigint, toAddress: `0x${string}`, amountOutMinimum: bigint, tokenAddress: string, sizeInWeth: bigint, timeoutId: NodeJS.Timeout }> = new Map();
 
   constructor(bot: Bot) {
     this.bot = bot;
+
+    this.bot.on("callback_query:data", async (ctx) => {
+      const data = ctx.callbackQuery.data;
+      if (data.startsWith('confirm_')) {
+        const tradeId = data.replace('confirm_', '');
+        await ctx.answerCallbackQuery({ text: "Executing Trade..." });
+        await this.executePendingTrade(tradeId, ctx.chat?.id);
+      } else if (data.startsWith('reject_')) {
+        const tradeId = data.replace('reject_', '');
+        await ctx.answerCallbackQuery({ text: "Trade Rejected" });
+        this.cancelPendingTrade(tradeId, ctx.chat?.id, "Manually rejected by user.");
+      }
+    });
   }
 
   public async processSignal(tokenAddress: string, sizeInWeth: bigint) {
@@ -21,6 +36,25 @@ export class TraderAgent {
       const { calldata, amountOutMinimum, toAddress, value } = calldataResult;
       
       try {
+        if (this.executionMode === 'CONFIRM' && process.env.TELEGRAM_CHAT_ID) {
+          const tradeId = Math.random().toString(36).substring(7);
+          const timeoutId = setTimeout(() => {
+            this.cancelPendingTrade(tradeId, Number(process.env.TELEGRAM_CHAT_ID), "Timeout (5 mins) reached.");
+          }, 5 * 60 * 1000);
+
+          this.pendingTrades.set(tradeId, { 
+            calldata: calldataResult.calldata, value: calldataResult.value, toAddress: calldataResult.toAddress, 
+            amountOutMinimum: calldataResult.amountOutMinimum, tokenAddress, sizeInWeth, timeoutId 
+          });
+
+          const keyboard = new InlineKeyboard()
+            .text("✅ Confirm Buy", `confirm_${tradeId}`)
+            .text("❌ Reject", `reject_${tradeId}`);
+          
+          await this.bot.api.sendMessage(process.env.TELEGRAM_CHAT_ID, `🚨 **PENDING BUY**\nToken: \`${tokenAddress}\`\nSize: \`${Number(sizeInWeth)/1e18} WETH\`\n\nDo you want to execute this trade?`, { parse_mode: 'Markdown', reply_markup: keyboard });
+          return;
+        }
+
         console.log(`[Trader] ⚡ Broadcasting BUY transaction for ${tokenAddress}...`);
         const txHash = await walletClient.sendTransaction({
           account,
@@ -44,6 +78,58 @@ export class TraderAgent {
       } catch (error) {
         console.error(`[Trader] ❌ BUY TX Failed:`, error);
         this.emitToSigningBoundary(tokenAddress, "FAILED", 'BUY REJECTED');
+      }
+    }
+  }
+
+  public async executePendingTrade(tradeId: string, chatId?: number) {
+    const trade = this.pendingTrades.get(tradeId);
+    if (!trade) {
+      if (chatId) await this.bot.api.sendMessage(chatId, `❌ Trade ${tradeId} not found or expired.`);
+      return;
+    }
+
+    clearTimeout(trade.timeoutId);
+    this.pendingTrades.delete(tradeId);
+
+    try {
+      console.log(`[Trader] ⚡ Broadcasting CONFIRMED BUY transaction for ${trade.tokenAddress}...`);
+      const txHash = await walletClient!.sendTransaction({
+        account: account!,
+        to: trade.toAddress,
+        data: trade.calldata as `0x${string}`,
+        value: trade.value
+      });
+      
+      console.log(`[Trader] ✅ BUY TX Broadcasted: ${txHash}. Waiting for confirmation...`);
+      if (chatId) await this.bot.api.sendMessage(chatId, `🚀 **TX Broadcasted!**\nHash: \`${txHash}\`\nWaiting for block confirmation...`, { parse_mode: 'Markdown' });
+      
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+
+      if (receipt.status === 'success') {
+        console.log(`[Trader] 🎯 BUY TX Confirmed in block ${receipt.blockNumber}`);
+        this.emitToSigningBoundary(trade.tokenAddress, txHash, 'BUY EXECUTED');
+
+        const estimatedEntryPrice = Number(trade.sizeInWeth) / Number(trade.amountOutMinimum || 1n); // Prevent division by zero if amountOutMin is 0
+        await this.registerPosition(trade.tokenAddress, estimatedEntryPrice, Number(trade.sizeInWeth) / 1e18);
+        if (chatId) await this.bot.api.sendMessage(chatId, `✅ **Trade Confirmed!**\nBlock: ${receipt.blockNumber}`);
+      } else {
+        throw new Error('Transaction reverted by network');
+      }
+    } catch (error) {
+      console.error(`[Trader] ❌ BUY TX Failed:`, error);
+      this.emitToSigningBoundary(trade.tokenAddress, "FAILED", 'BUY REJECTED');
+      if (chatId) await this.bot.api.sendMessage(chatId, `❌ **Trade Failed!**\nReason: ${(error as Error).message}`);
+    }
+  }
+
+  public cancelPendingTrade(tradeId: string, chatId?: number, reason?: string) {
+    const trade = this.pendingTrades.get(tradeId);
+    if (trade) {
+      clearTimeout(trade.timeoutId);
+      this.pendingTrades.delete(tradeId);
+      if (chatId) {
+        this.bot.api.sendMessage(chatId, `🗑️ Trade Cancelled.\nReason: ${reason || 'Unknown'}`).catch(console.error);
       }
     }
   }

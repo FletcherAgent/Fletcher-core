@@ -76,6 +76,11 @@ export class Orchestrator {
     (this.scout as any).scoreLaunch(tokenAddress);
   }
 
+  public setTraderMode(mode: 'AUTO' | 'CONFIRM') {
+    this.trader.executionMode = mode;
+    console.log(`[Orchestrator] Trader execution mode set to ${mode}`);
+  }
+
   public async startAll() {
     console.log("🚀 Orchestrator: Starting all Fletcher agents (Minimum Viable Swarm)...");
     
