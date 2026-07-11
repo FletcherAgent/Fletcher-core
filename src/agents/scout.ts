@@ -1,5 +1,5 @@
 import { publicClient } from '../services/viem.js';
-import { parseAbiItem } from 'viem';
+import { parseAbiItem, parseAbi } from 'viem';
 import { BlockscoutService } from '../services/blockscout.js';
 
 export class ScoutAgent {
@@ -15,8 +15,35 @@ export class ScoutAgent {
     console.log("🟢 Scout Agent: Starting monitoring for NOXA Factory & Uniswap V3 PoolCreated...");
 
     const UNISWAP_V3_FACTORY = (process.env.UNISWAP_V3_FACTORY_ADDRESS || '0x1F98431c8aD98523631AE4a59f267346ea31F984') as `0x${string}`;
+    const NOXA_FACTORY = (process.env.NOXA_FACTORY_ADDRESS || '0x0000000000000000000000000000000000000000') as `0x${string}`;
 
     try {
+      // Setup listener for NOXA TokenCreated events (Mock ABI)
+      if (NOXA_FACTORY !== '0x0000000000000000000000000000000000000000') {
+        publicClient.watchEvent({
+          address: NOXA_FACTORY,
+          event: parseAbiItem('event TokenCreated(address indexed token)'),
+          onLogs: (logs) => {
+            for (const log of logs) {
+              console.log(`[Scout] 🆕 NOXA TokenCreated Detected! Token: ${log.args.token}`);
+              if (log.args.token) this.scoreLaunch(log.args.token, false);
+            }
+          },
+        });
+
+        // Setup listener for NOXA TokenGraduated events (Mock ABI)
+        publicClient.watchEvent({
+          address: NOXA_FACTORY,
+          event: parseAbiItem('event TokenGraduated(address indexed token)'),
+          onLogs: (logs) => {
+            for (const log of logs) {
+              console.log(`[Scout] 🎓 NOXA TokenGraduated Detected! Token: ${log.args.token}`);
+              if (log.args.token) this.scoreLaunch(log.args.token, true);
+            }
+          },
+        });
+      }
+
       // Setup listener for PoolCreated events (Uniswap V3)
       publicClient.watchEvent({
         address: UNISWAP_V3_FACTORY,
@@ -25,7 +52,7 @@ export class ScoutAgent {
           for (const log of logs) {
             console.log(`[Scout] New Pool Detected! Token0: ${log.args.token0}, Token1: ${log.args.token1}`);
             // Call scoring function here
-            if (log.args.token0) this.scoreLaunch(log.args.token0);
+            if (log.args.token0) this.scoreLaunch(log.args.token0, false);
           }
         },
       });
@@ -34,7 +61,49 @@ export class ScoutAgent {
     }
   }
 
-  private async scoreLaunch(tokenAddress: string) {
+  private async checkLiquidityLock(tokenAddress: string): Promise<boolean> {
+    // Placeholder logic for checking if liquidity is locked in NOXA
+    console.log(`[Scout] 🔒 Simulating Liquidity Lock check for ${tokenAddress}...`);
+    // In reality, this would read from NOXA Locker contract
+    return true; // Always return true for now
+  }
+
+  private async simulateHoneypot(tokenAddress: string): Promise<boolean> {
+    console.log(`[Scout] 🛡️ Simulating Buy & Sell to detect honeypot for ${tokenAddress}...`);
+    try {
+      const quoterAbi = parseAbi([
+        'function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external returns (uint256 amountOut)'
+      ]);
+      const WETH_ADDRESS = process.env.WETH_ADDRESS!;
+      const QUOTER_ADDRESS = process.env.QUOTER_ADDRESS!;
+
+      // 1. Simulate BUY: 0.01 WETH to Token
+      const buyAmountIn = 10000000000000000n; // 0.01 ETH
+      const { result: buyResult } = await publicClient.simulateContract({
+        address: QUOTER_ADDRESS as `0x${string}`,
+        abi: quoterAbi,
+        functionName: 'quoteExactInputSingle',
+        args: [WETH_ADDRESS as `0x${string}`, tokenAddress as `0x${string}`, 3000, buyAmountIn, 0n]
+      });
+
+      // 2. Simulate SELL: Token back to WETH
+      // Use the amount of tokens we would have gotten from the buy
+      await publicClient.simulateContract({
+        address: QUOTER_ADDRESS as `0x${string}`,
+        abi: quoterAbi,
+        functionName: 'quoteExactInputSingle',
+        args: [tokenAddress as `0x${string}`, WETH_ADDRESS as `0x${string}`, 3000, buyResult, 0n]
+      });
+
+      console.log(`[Scout] ✅ Anti-Honeypot check passed. Buy and Sell simulations succeeded.`);
+      return true;
+    } catch (error) {
+      console.warn(`[Scout] 🚨 Anti-Honeypot check FAILED for ${tokenAddress}. Likely a honeypot or illiquid.`, (error as Error).message);
+      return false;
+    }
+  }
+
+  private async scoreLaunch(tokenAddress: string, isGraduated: boolean = false) {
     console.log(`[Scout] Scoring launch for token: ${tokenAddress}`);
     
     const apiUrl = process.env.BLOCKSCOUT_API_URL;
@@ -66,8 +135,28 @@ export class ScoutAgent {
       const deployerHistory = await this.blockscout.getDeployerHistory(deployer);
       const holdersData = await this.blockscout.getTokenHolders(tokenAddress);
 
-      // 3. Composite Heuristic Score
+      // 3. Security Checks (Anti-Honeypot & Liq Lock)
+      const isLocked = await this.checkLiquidityLock(tokenAddress);
+      const isNotHoneypot = await this.simulateHoneypot(tokenAddress);
+
+      // 4. Composite Heuristic Score
       let score = 50;
+
+      // Graduation bonus
+      if (isGraduated) {
+        console.log(`[Scout] 🎓 Token is Graduated. Applying massive conviction bonus.`);
+        score += 30;
+      }
+
+      if (!isLocked) {
+        console.warn(`[Scout] 🚨 Liquidity is not locked! Instant fail.`);
+        score -= 100;
+      }
+
+      if (!isNotHoneypot) {
+        console.warn(`[Scout] 🚨 Failed Honeypot check! Instant fail.`);
+        score -= 100;
+      }
       
       if (deployerHistory) {
         if (deployerHistory.riskScore === 'LOW') score += 20;

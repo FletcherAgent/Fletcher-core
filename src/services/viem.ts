@@ -1,4 +1,5 @@
-import { createPublicClient, http, defineChain } from 'viem';
+import { createPublicClient, createWalletClient, http, defineChain } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
 import * as dotenv from "dotenv";
 
 dotenv.config();
@@ -30,4 +31,19 @@ export const publicClient = createPublicClient({
   transport: http(),
 });
 
+export const account = process.env.PRIVATE_KEY 
+  ? privateKeyToAccount(process.env.PRIVATE_KEY as `0x${string}`) 
+  : null;
+
+export const walletClient = account ? createWalletClient({
+  account,
+  chain: robinhoodChain,
+  transport: http(),
+}) : null;
+
 console.log("🔌 Viem Client: Connected to Robinhood Chain RPC");
+if (walletClient) {
+  console.log("🔐 Wallet Client: Auto-Trading Enabled (Private Key Loaded)");
+} else {
+  console.warn("⚠️ Wallet Client: PRIVATE_KEY missing! Auto-trading disabled.");
+}

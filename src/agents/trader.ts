@@ -1,7 +1,7 @@
-import { encodeFunctionData, parseAbi } from 'viem';
+import { encodeFunctionData, parseAbi, parseEther } from 'viem';
 import { Bot } from 'grammy';
 import { prisma } from '../core/db.js';
-import { publicClient } from '../services/viem.js';
+import { publicClient, walletClient, account } from '../services/viem.js';
 
 export class TraderAgent {
   private bot: Bot;
@@ -11,26 +11,65 @@ export class TraderAgent {
   }
 
   public async processSignal(tokenAddress: string, sizeInWeth: bigint) {
+    if (!walletClient || !account) {
+      console.error("[Trader] Auto-trading disabled (no PRIVATE_KEY). Aborting trade.");
+      return;
+    }
+    
     const calldataResult = await this.constructUnsignedSwapTx(tokenAddress, sizeInWeth);
     if (calldataResult) {
-      const { calldata, amountOutMinimum } = calldataResult;
-      this.emitToSigningBoundary(tokenAddress, calldata, 'BUY');
+      const { calldata, amountOutMinimum, toAddress, value } = calldataResult;
+      
+      try {
+        console.log(`[Trader] ⚡ Broadcasting BUY transaction for ${tokenAddress}...`);
+        const txHash = await walletClient.sendTransaction({
+          account,
+          to: toAddress,
+          data: calldata as `0x${string}`,
+          value: value
+        });
+        
+        console.log(`[Trader] ✅ BUY TX Broadcasted: ${txHash}`);
+        this.emitToSigningBoundary(tokenAddress, txHash, 'BUY EXECUTED');
 
-      // Simulate successful trade execution and save to DB
-      const estimatedEntryPrice = Number(sizeInWeth) / Number(amountOutMinimum);
-      await this.registerPosition(tokenAddress, estimatedEntryPrice, Number(sizeInWeth) / 1e18);
+        // Simulate successful trade execution and save to DB
+        const estimatedEntryPrice = Number(sizeInWeth) / Number(amountOutMinimum);
+        await this.registerPosition(tokenAddress, estimatedEntryPrice, Number(sizeInWeth) / 1e18);
+      } catch (error) {
+        console.error(`[Trader] ❌ BUY TX Failed:`, error);
+        this.emitToSigningBoundary(tokenAddress, "FAILED", 'BUY REJECTED');
+      }
     }
   }
 
   public async processExitSignal(tokenAddress: string, amountInToken: bigint, reason: string) {
+    if (!walletClient || !account) {
+      console.error("[Trader] Auto-trading disabled (no PRIVATE_KEY). Aborting trade.");
+      return;
+    }
+    
     const calldataResult = await this.constructUnsignedSellTx(tokenAddress, amountInToken);
     if (calldataResult) {
-      const { calldata, amountOutMinimum } = calldataResult;
-      this.emitToSigningBoundary(tokenAddress, calldata, `SELL [${reason}]`);
+      const { calldata, amountOutMinimum, toAddress } = calldataResult;
+      
+      try {
+        console.log(`[Trader] ⚡ Broadcasting SELL transaction for ${tokenAddress}...`);
+        const txHash = await walletClient.sendTransaction({
+          account,
+          to: toAddress,
+          data: calldata as `0x${string}`
+        });
 
-      // Simulate successful sell execution and update DB
-      const estimatedExitPrice = Number(amountOutMinimum) / Number(amountInToken);
-      await this.updatePositionStatus(tokenAddress, estimatedExitPrice);
+        console.log(`[Trader] ✅ SELL TX Broadcasted: ${txHash}`);
+        this.emitToSigningBoundary(tokenAddress, txHash, `SELL EXECUTED [${reason}]`);
+
+        // Simulate successful sell execution and update DB
+        const estimatedExitPrice = Number(amountOutMinimum) / Number(amountInToken);
+        await this.updatePositionStatus(tokenAddress, estimatedExitPrice);
+      } catch (error) {
+        console.error(`[Trader] ❌ SELL TX Failed:`, error);
+        this.emitToSigningBoundary(tokenAddress, "FAILED", `SELL REJECTED [${reason}]`);
+      }
     }
   }
 
@@ -38,7 +77,7 @@ export class TraderAgent {
    * Constructs an unsigned transaction payload for the user/vault to sign.
    * using Uniswap V3 SwapRouter exactInputSingle
    */
-  public async constructUnsignedSwapTx(tokenOut: string, amountIn: bigint): Promise<{ calldata: string, amountOutMinimum: bigint } | null> {
+  public async constructUnsignedSwapTx(tokenOut: string, amountIn: bigint): Promise<{ calldata: string, amountOutMinimum: bigint, toAddress: `0x${string}`, value: bigint } | null> {
     console.log(`[Trader] Constructing exactInputSingle calldata for WETH -> ${tokenOut}...`);
     
     // Uniswap V3 exactInputSingle signature
@@ -90,7 +129,7 @@ export class TraderAgent {
       });
 
       console.log(`[Trader] Unsigned BUY Calldata generated: ${calldata}`);
-      return { calldata, amountOutMinimum };
+      return { calldata, amountOutMinimum, toAddress: process.env.ROUTER_ADDRESS! as `0x${string}`, value: amountIn };
 
     } catch (error) {
       console.error("[Trader] Failed to build calldata or fetch quote", error);
@@ -101,7 +140,7 @@ export class TraderAgent {
   /**
    * Constructs an unsigned transaction payload to sell the token back to WETH.
    */
-  public async constructUnsignedSellTx(tokenIn: string, amountIn: bigint): Promise<{ calldata: string, amountOutMinimum: bigint } | null> {
+  public async constructUnsignedSellTx(tokenIn: string, amountIn: bigint): Promise<{ calldata: string, amountOutMinimum: bigint, toAddress: `0x${string}` } | null> {
     console.log(`[Trader] Constructing exactInputSingle calldata for ${tokenIn} -> WETH...`);
     
     const exactInputSingleAbi = parseAbi([
@@ -150,7 +189,7 @@ export class TraderAgent {
       });
 
       console.log(`[Trader] Unsigned SELL Calldata generated: ${calldata}`);
-      return { calldata, amountOutMinimum };
+      return { calldata, amountOutMinimum, toAddress: process.env.ROUTER_ADDRESS! as `0x${string}` };
 
     } catch (error) {
       console.error("[Trader] Failed to build sell calldata or fetch quote", error);
@@ -199,20 +238,26 @@ export class TraderAgent {
     }
   }
 
-  private emitToSigningBoundary(tokenAddress: string, calldata: string, action: string) {
-    // Integration point for the Telegram bot
+  private emitToSigningBoundary(tokenAddress: string, txHash: string, action: string) {
     const chatId = process.env.TELEGRAM_CHAT_ID;
     
-    console.log(`[Signing Boundary] Awaiting ${action} approval for ${tokenAddress}...`);
+    console.log(`[Notification] Auto-Trade executed: ${action} for ${tokenAddress}. Hash: ${txHash}`);
     
     if (chatId) {
+      let msg = `🤖 *AUTO-TRADE EXECUTED*\n\nAction: **${action}**\nToken: \`${tokenAddress}\``;
+      if (txHash !== "FAILED") {
+        msg += `\n\n✅ Transaction Hash:\n\`${txHash}\``;
+      } else {
+        msg += `\n\n❌ Transaction Failed (Reverted/Error)`;
+      }
+
       this.bot.api.sendMessage(
         chatId,
-        `🚨 *New Signal Detected!*\n\nAction: **${action}**\nToken: \`${tokenAddress}\`\n\nApprove execution?`,
+        msg,
         { parse_mode: "Markdown" }
       ).catch(err => console.error("[Trader] Failed to send Telegram message", err));
     } else {
-      console.warn("[Trader] TELEGRAM_CHAT_ID is not set in .env! Cannot send approval message.");
+      console.warn("[Trader] TELEGRAM_CHAT_ID is not set in .env! Cannot send execution message.");
     }
   }
 }
