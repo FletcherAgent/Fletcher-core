@@ -79,8 +79,8 @@ export class ScoutAgent {
       // --- Terminal Block Scanner Log ---
       wssClient.watchBlockNumber({
         onBlockNumber: (blockNumber) => {
-          // This creates a realistic "matrix-style" scanning effect in the terminal
-          console.log(`[Scout ⚡ WSS] Block ${blockNumber} scanned -> NOXA/UNI: Clear.`);
+          // Bypass global console.log hijacker by writing directly to stdout
+          process.stdout.write(`[Scout ⚡ WSS] Block ${blockNumber} scanned -> NOXA/UNI: Clear.\n`);
         },
         onError: (error) => {
           console.error(`[Scout] Block scanner error: ${error.message}`);
