@@ -1,4 +1,4 @@
-import { publicClient } from '../services/viem.js';
+import { publicClient, wssClient } from '../services/viem.js';
 import { Bot } from 'grammy';
 import { parseAbiItem, parseAbi } from 'viem';
 import { BlockscoutService } from '../services/blockscout.js';
@@ -27,11 +27,9 @@ export class ScoutAgent {
     try {
       // Setup listener for NOXA TokenCreated events (Mock ABI)
       if (NOXA_FACTORY !== '0x0000000000000000000000000000000000000000') {
-        publicClient.watchEvent({
+        wssClient.watchEvent({
           address: NOXA_FACTORY,
           event: parseAbiItem('event TokenCreated(address indexed token)'),
-          poll: true,
-          pollingInterval: 3000,
           onLogs: (logs) => {
             for (const log of logs) {
               this.lastSignalName = `🆕 NOXA TokenCreated (${log.args.token})`;
@@ -45,11 +43,9 @@ export class ScoutAgent {
         });
 
         // Setup listener for NOXA TokenGraduated events
-        publicClient.watchEvent({
+        wssClient.watchEvent({
           address: NOXA_FACTORY,
           event: parseAbiItem('event TokenGraduated(address indexed token)'),
-          poll: true,
-          pollingInterval: 3000,
           onLogs: (logs) => {
             for (const log of logs) {
               this.lastSignalName = `🎓 NOXA Graduated (${log.args.token})`;
@@ -64,11 +60,9 @@ export class ScoutAgent {
       }
 
       // Setup listener for PoolCreated events (Uniswap V3)
-      publicClient.watchEvent({
+      wssClient.watchEvent({
         address: UNISWAP_V3_FACTORY,
         event: parseAbiItem('event PoolCreated(address indexed token0, address indexed token1, uint24 fee, int24 tickSpacing, address pool)'),
-        poll: true,
-        pollingInterval: 3000,
         onLogs: (logs) => {
           for (const log of logs) {
             this.lastSignalName = `💧 UNI V3 Pool (${log.args.token0})`;
@@ -87,7 +81,7 @@ export class ScoutAgent {
         const chatId = process.env.TELEGRAM_CHAT_ID;
         const initMsg = await this.bot.api.sendMessage(
           chatId,
-          `📡 *Scout Agent Polling Started*\n\nStatus: 🟢 Active\nInterval: 3s (Batched)\nPoll Count: 0\nLast Signal: None`,
+          `📡 *Scout Agent WebSocket Started*\n\nStatus: 🟢 Active\nConnection: Real-time (WSS)\nUptime: 0s\nLast Signal: None`,
           { parse_mode: 'Markdown' }
         );
         this.statusMessageId = initMsg.message_id;
@@ -101,7 +95,7 @@ export class ScoutAgent {
             await this.bot!.api.editMessageText(
               chatId,
               this.statusMessageId,
-              `📡 *Scout Agent Polling Dashboard*\n\nStatus: 🟢 Active\nInterval: 3s (Batched)\nPoll Count: \`${this.pollCounter}x\`\nLast Check: \`${now} UTC\`\nLatest Signal: \`${this.lastSignalName}\`\n\n_Watching NOXA Factory & Uniswap V3..._`,
+              `📡 *Scout Agent WSS Dashboard*\n\nStatus: 🟢 Active\nConnection: Real-time (WSS)\nUptime: \`${this.pollCounter * 3}s\`\nLast Check: \`${now} UTC\`\nLatest Signal: \`${this.lastSignalName}\`\n\n_Watching NOXA Factory & Uniswap V3..._`,
               { parse_mode: 'Markdown' }
             );
           } catch (e) {

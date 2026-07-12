@@ -1,4 +1,4 @@
-import { createPublicClient, createWalletClient, http, defineChain } from 'viem';
+import { createPublicClient, createWalletClient, http, defineChain, webSocket } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import * as dotenv from "dotenv";
 
@@ -31,6 +31,11 @@ export const publicClient = createPublicClient({
   transport: http(rpcUrl, {
     batch: true,
   }),
+});
+
+export const wssClient = createPublicClient({
+  chain: robinhoodChain,
+  transport: webSocket(process.env.ROBINHOOD_WSS_URL),
 });
 
 export const account = process.env.PRIVATE_KEY 
