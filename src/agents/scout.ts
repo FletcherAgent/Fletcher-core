@@ -24,7 +24,7 @@ export class ScoutAgent {
           address: NOXA_FACTORY,
           event: parseAbiItem('event TokenCreated(address indexed token)'),
           poll: true,
-          pollingInterval: 3000,
+          pollingInterval: 15000,
           onLogs: (logs) => {
             for (const log of logs) {
               console.log(`[Scout] 🆕 NOXA TokenCreated Detected! Token: ${log.args.token}`);
@@ -41,7 +41,7 @@ export class ScoutAgent {
           address: NOXA_FACTORY,
           event: parseAbiItem('event TokenGraduated(address indexed token)'),
           poll: true,
-          pollingInterval: 3000,
+          pollingInterval: 15000,
           onLogs: (logs) => {
             for (const log of logs) {
               console.log(`[Scout] 🎓 NOXA TokenGraduated Detected! Token: ${log.args.token}`);
@@ -59,7 +59,7 @@ export class ScoutAgent {
         address: UNISWAP_V3_FACTORY,
         event: parseAbiItem('event PoolCreated(address indexed token0, address indexed token1, uint24 fee, int24 tickSpacing, address pool)'),
         poll: true,
-        pollingInterval: 3000,
+        pollingInterval: 15000,
         onLogs: (logs) => {
           for (const log of logs) {
             console.log(`[Scout] New Pool Detected! Token0: ${log.args.token0}, Token1: ${log.args.token1}`);
