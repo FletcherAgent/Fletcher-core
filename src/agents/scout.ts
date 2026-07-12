@@ -1,12 +1,18 @@
-import { publicClient, wssClient } from '../services/viem.js';
+import { publicClient } from '../services/viem.js';
+import { Bot } from 'grammy';
 import { parseAbiItem, parseAbi } from 'viem';
 import { BlockscoutService } from '../services/blockscout.js';
 
 export class ScoutAgent {
   public onSignal?: (tokenAddress: string) => void;
   private blockscout = new BlockscoutService();
+  private bot?: Bot;
+  private statusMessageId?: number;
+  private lastSignalName: string = "None";
 
-  constructor() {}
+  constructor(bot?: Bot) {
+    this.bot = bot;
+  }
 
   /**
    * Start monitoring the blockchain for new tokens.
@@ -20,12 +26,15 @@ export class ScoutAgent {
     try {
       // Setup listener for NOXA TokenCreated events (Mock ABI)
       if (NOXA_FACTORY !== '0x0000000000000000000000000000000000000000') {
-        wssClient.watchEvent({
+        publicClient.watchEvent({
           address: NOXA_FACTORY,
           event: parseAbiItem('event TokenCreated(address indexed token)'),
+          poll: true,
+          pollingInterval: 3000,
           onLogs: (logs) => {
             for (const log of logs) {
-              console.log(`[Scout] 🆕 NOXA TokenCreated Detected! Token: ${log.args.token}`);
+              this.lastSignalName = `🆕 NOXA TokenCreated (${log.args.token})`;
+              console.log(`[Scout] ${this.lastSignalName}`);
               if (log.args.token) this.scoreLaunch(log.args.token, false);
             }
           },
@@ -35,12 +44,15 @@ export class ScoutAgent {
         });
 
         // Setup listener for NOXA TokenGraduated events
-        wssClient.watchEvent({
+        publicClient.watchEvent({
           address: NOXA_FACTORY,
           event: parseAbiItem('event TokenGraduated(address indexed token)'),
+          poll: true,
+          pollingInterval: 3000,
           onLogs: (logs) => {
             for (const log of logs) {
-              console.log(`[Scout] 🎓 NOXA TokenGraduated Detected! Token: ${log.args.token}`);
+              this.lastSignalName = `🎓 NOXA Graduated (${log.args.token})`;
+              console.log(`[Scout] ${this.lastSignalName}`);
               if (log.args.token) this.scoreLaunch(log.args.token, true);
             }
           },
@@ -51,11 +63,14 @@ export class ScoutAgent {
       }
 
       // Setup listener for PoolCreated events (Uniswap V3)
-      wssClient.watchEvent({
+      publicClient.watchEvent({
         address: UNISWAP_V3_FACTORY,
         event: parseAbiItem('event PoolCreated(address indexed token0, address indexed token1, uint24 fee, int24 tickSpacing, address pool)'),
+        poll: true,
+        pollingInterval: 3000,
         onLogs: (logs) => {
           for (const log of logs) {
+            this.lastSignalName = `💧 UNI V3 Pool (${log.args.token0})`;
             console.log(`[Scout] New Pool Detected! Token0: ${log.args.token0}, Token1: ${log.args.token1}`);
             // Call scoring function here
             if (log.args.token0) this.scoreLaunch(log.args.token0, false);
@@ -65,6 +80,34 @@ export class ScoutAgent {
           console.error("[Scout] ❌ Uniswap V3 PoolCreated watchEvent Error:", error.message);
         }
       });
+
+      // --- Telegram Live Dashboard ---
+      if (this.bot && process.env.TELEGRAM_CHAT_ID) {
+        const chatId = process.env.TELEGRAM_CHAT_ID;
+        const initMsg = await this.bot.api.sendMessage(
+          chatId,
+          `📡 *Scout Agent Polling Started*\n\nStatus: 🟢 Active\nInterval: 3s (Batched)\nLast Signal: None`,
+          { parse_mode: 'Markdown' }
+        );
+        this.statusMessageId = initMsg.message_id;
+
+        // Update dashboard every 15 seconds
+        setInterval(async () => {
+          if (!this.statusMessageId) return;
+          try {
+            const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
+            await this.bot!.api.editMessageText(
+              chatId,
+              this.statusMessageId,
+              `📡 *Scout Agent Polling Dashboard*\n\nStatus: 🟢 Active\nInterval: 3s (Batched)\nLast Check: \`${now} UTC\`\nLatest Signal: \`${this.lastSignalName}\`\n\n_Watching NOXA Factory & Uniswap V3..._`,
+              { parse_mode: 'Markdown' }
+            );
+          } catch (e) {
+            // Ignore (likely rate limit or identical message)
+          }
+        }, 15000);
+      }
+
     } catch (error) {
       console.error("🔴 Scout Agent: Failed to start watchEvent", error);
     }

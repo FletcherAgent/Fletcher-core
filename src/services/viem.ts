@@ -1,11 +1,10 @@
-import { createPublicClient, createWalletClient, http, webSocket, defineChain } from 'viem';
+import { createPublicClient, createWalletClient, http, defineChain } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import * as dotenv from "dotenv";
 
 dotenv.config();
 
 const rpcUrl = process.env.ROBINHOOD_RPC_URL || 'https://rpc.mainnet.chain.robinhood.com';
-const wssUrl = process.env.ROBINHOOD_WSS_URL || 'wss://rpc.mainnet.chain.robinhood.com';
 
 // Define custom Robinhood Chain configuration
 export const robinhoodChain = defineChain({
@@ -20,23 +19,18 @@ export const robinhoodChain = defineChain({
   rpcUrls: {
     default: {
       http: [rpcUrl],
-      webSocket: [wssUrl]
     },
     public: {
       http: [rpcUrl],
-      webSocket: [wssUrl]
     },
   },
 });
 
 export const publicClient = createPublicClient({
   chain: robinhoodChain,
-  transport: http(rpcUrl),
-});
-
-export const wssClient = createPublicClient({
-  chain: robinhoodChain,
-  transport: webSocket(wssUrl),
+  transport: http(rpcUrl, {
+    batch: true,
+  }),
 });
 
 export const account = process.env.PRIVATE_KEY 

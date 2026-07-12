@@ -15,7 +15,7 @@ export class Orchestrator {
   private guardian: GuardianAgent;
 
   constructor(bot: Bot) {
-    this.scout = new ScoutAgent();
+    this.scout = new ScoutAgent(bot);
     this.trader = new TraderAgent(bot);
     this.lpManager = new LpManagerAgent();
     this.riskWarden = new RiskWardenAgent();
