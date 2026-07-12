@@ -1,4 +1,4 @@
-import { publicClient } from '../services/viem.js';
+import { publicClient, wssClient } from '../services/viem.js';
 import { parseAbiItem, parseAbi } from 'viem';
 import { BlockscoutService } from '../services/blockscout.js';
 
@@ -20,11 +20,9 @@ export class ScoutAgent {
     try {
       // Setup listener for NOXA TokenCreated events (Mock ABI)
       if (NOXA_FACTORY !== '0x0000000000000000000000000000000000000000') {
-        publicClient.watchEvent({
+        wssClient.watchEvent({
           address: NOXA_FACTORY,
           event: parseAbiItem('event TokenCreated(address indexed token)'),
-          poll: true,
-          pollingInterval: 15000,
           onLogs: (logs) => {
             for (const log of logs) {
               console.log(`[Scout] 🆕 NOXA TokenCreated Detected! Token: ${log.args.token}`);
@@ -37,11 +35,9 @@ export class ScoutAgent {
         });
 
         // Setup listener for NOXA TokenGraduated events
-        publicClient.watchEvent({
+        wssClient.watchEvent({
           address: NOXA_FACTORY,
           event: parseAbiItem('event TokenGraduated(address indexed token)'),
-          poll: true,
-          pollingInterval: 15000,
           onLogs: (logs) => {
             for (const log of logs) {
               console.log(`[Scout] 🎓 NOXA TokenGraduated Detected! Token: ${log.args.token}`);
@@ -55,11 +51,9 @@ export class ScoutAgent {
       }
 
       // Setup listener for PoolCreated events (Uniswap V3)
-      publicClient.watchEvent({
+      wssClient.watchEvent({
         address: UNISWAP_V3_FACTORY,
         event: parseAbiItem('event PoolCreated(address indexed token0, address indexed token1, uint24 fee, int24 tickSpacing, address pool)'),
-        poll: true,
-        pollingInterval: 15000,
         onLogs: (logs) => {
           for (const log of logs) {
             console.log(`[Scout] New Pool Detected! Token0: ${log.args.token0}, Token1: ${log.args.token1}`);
