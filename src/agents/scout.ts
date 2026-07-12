@@ -9,6 +9,7 @@ export class ScoutAgent {
   private bot?: Bot;
   private statusMessageId?: number;
   private lastSignalName: string = "None";
+  private pollCounter: number = 0;
 
   constructor(bot?: Bot) {
     this.bot = bot;
@@ -86,26 +87,27 @@ export class ScoutAgent {
         const chatId = process.env.TELEGRAM_CHAT_ID;
         const initMsg = await this.bot.api.sendMessage(
           chatId,
-          `📡 *Scout Agent Polling Started*\n\nStatus: 🟢 Active\nInterval: 3s (Batched)\nLast Signal: None`,
+          `📡 *Scout Agent Polling Started*\n\nStatus: 🟢 Active\nInterval: 3s (Batched)\nPoll Count: 0\nLast Signal: None`,
           { parse_mode: 'Markdown' }
         );
         this.statusMessageId = initMsg.message_id;
 
-        // Update dashboard every 15 seconds
+        // Update dashboard every 3 seconds to match polling speed
         setInterval(async () => {
           if (!this.statusMessageId) return;
+          this.pollCounter++;
           try {
             const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
             await this.bot!.api.editMessageText(
               chatId,
               this.statusMessageId,
-              `📡 *Scout Agent Polling Dashboard*\n\nStatus: 🟢 Active\nInterval: 3s (Batched)\nLast Check: \`${now} UTC\`\nLatest Signal: \`${this.lastSignalName}\`\n\n_Watching NOXA Factory & Uniswap V3..._`,
+              `📡 *Scout Agent Polling Dashboard*\n\nStatus: 🟢 Active\nInterval: 3s (Batched)\nPoll Count: \`${this.pollCounter}x\`\nLast Check: \`${now} UTC\`\nLatest Signal: \`${this.lastSignalName}\`\n\n_Watching NOXA Factory & Uniswap V3..._`,
               { parse_mode: 'Markdown' }
             );
           } catch (e) {
             // Ignore (likely rate limit or identical message)
           }
-        }, 15000);
+        }, 3000);
       }
 
     } catch (error) {
