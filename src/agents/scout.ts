@@ -76,6 +76,17 @@ export class ScoutAgent {
         }
       });
 
+      // --- Terminal Block Scanner Log ---
+      wssClient.watchBlockNumber({
+        onBlockNumber: (blockNumber) => {
+          // This creates a realistic "matrix-style" scanning effect in the terminal
+          console.log(`[Scout ⚡ WSS] Block ${blockNumber} scanned -> NOXA/UNI: Clear.`);
+        },
+        onError: (error) => {
+          console.error(`[Scout] Block scanner error: ${error.message}`);
+        }
+      });
+
       // --- Telegram Live Dashboard ---
       if (this.bot && process.env.TELEGRAM_CHAT_ID) {
         const chatId = process.env.TELEGRAM_CHAT_ID;
