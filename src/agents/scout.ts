@@ -94,29 +94,33 @@ export class ScoutAgent {
       // --- Telegram Live Dashboard ---
       if (this.bot && process.env.TELEGRAM_CHAT_ID) {
         const chatId = process.env.TELEGRAM_CHAT_ID;
-        const initMsg = await this.bot.api.sendMessage(
-          chatId,
-          `📡 *Scout Agent WebSocket Started*\n\nStatus: 🟢 Active\nConnection: Real-time (WSS)\nUptime: 0s\nLast Signal: None`,
-          { parse_mode: 'Markdown' }
-        );
-        this.statusMessageId = initMsg.message_id;
+        try {
+          const initMsg = await this.bot.api.sendMessage(
+            chatId,
+            `📡 *Scout Agent WebSocket Started*\n\nStatus: 🟢 Active\nConnection: Real-time (WSS)\nUptime: 0s\nLast Signal: None`,
+            { parse_mode: 'Markdown' }
+          );
+          this.statusMessageId = initMsg.message_id;
 
-        // Update dashboard every 3 seconds to match polling speed
-        setInterval(async () => {
-          if (!this.statusMessageId) return;
-          this.pollCounter++;
-          try {
-            const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
-            await this.bot!.api.editMessageText(
-              chatId,
-              this.statusMessageId,
-              `📡 *Scout Agent WSS Dashboard*\n\nStatus: 🟢 Active\nConnection: Real-time (WSS)\nUptime: \`${this.pollCounter * 3}s\`\nLast Check: \`${now} UTC\`\nLatest Signal: \`${this.lastSignalName}\`\n\n_Watching NOXA Factory & Uniswap V3..._`,
-              { parse_mode: 'Markdown' }
-            );
-          } catch (e) {
-            // Ignore (likely rate limit or identical message)
-          }
-        }, 3000);
+          // Update dashboard every 10 seconds to prevent Telegram 429 Rate Limit
+          setInterval(async () => {
+            if (!this.statusMessageId) return;
+            this.pollCounter++;
+            try {
+              const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
+              await this.bot!.api.editMessageText(
+                chatId,
+                this.statusMessageId,
+                `📡 *Scout Agent WSS Dashboard*\n\nStatus: 🟢 Active\nConnection: Real-time (WSS)\nUptime: \`${this.pollCounter * 10}s\`\nLast Check: \`${now} UTC\`\nLatest Signal: \`${this.lastSignalName}\`\n\n_Watching NOXA Factory & Uniswap V3..._`,
+                { parse_mode: 'Markdown' }
+              );
+            } catch (e) {
+              // Ignore rate limits
+            }
+          }, 10000);
+        } catch (dashboardErr) {
+          console.warn("[Scout] Could not start live dashboard due to Telegram rate limits, but agent is still running.");
+        }
       }
 
     } catch (error) {
