@@ -406,16 +406,26 @@ export class TraderAgent {
               else if (newWinRate >= 55 && wallet.tier > 1) newTier = 1;
             }
 
+            let newConsecutiveLosses = isWin ? 0 : wallet.consecutiveLosses + 1;
+            let newStatus = wallet.status;
+
+            if (newConsecutiveLosses >= 3) {
+              newStatus = 'PAUSED';
+              console.error(`[Trader] 🚨 EMERGENCY: Wallet ${wallet.address} hit 3 consecutive losses! Status set to PAUSED.`);
+            }
+
             await prisma.trackedWallet.update({
               where: { address: wallet.address },
               data: {
                 totalSignals: newTotal,
                 winRate: newWinRate,
                 avgPnlR: newAvgPnl,
-                tier: newTier
+                tier: newTier,
+                consecutiveLosses: newConsecutiveLosses,
+                status: newStatus
               }
             });
-            console.log(`[Trader] 📊 Updated stats for wallet ${wallet.address}: WinRate ${newWinRate.toFixed(2)}%, Avg PNL ${newAvgPnl.toFixed(4)}. Tier is now ${newTier}`);
+            console.log(`[Trader] 📊 Updated stats for wallet ${wallet.address}: WinRate ${newWinRate.toFixed(2)}%, Avg PNL ${newAvgPnl.toFixed(4)}. Tier is now ${newTier}, Status: ${newStatus}`);
           }
         }
       }

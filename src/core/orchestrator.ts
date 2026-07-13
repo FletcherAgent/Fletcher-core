@@ -216,5 +216,27 @@ export class Orchestrator {
     
     // Start tracking wallets via webhook
     this.tracker.startListening();
+
+    // Start Dormant cleanup cronjob (every 12 hours)
+    setInterval(async () => {
+      try {
+        console.log('[Orchestrator] 🧹 Running Dormant Wallet cleanup...');
+        const fourteenDaysAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
+        
+        const dormantWallets = await prisma.trackedWallet.updateMany({
+          where: {
+            status: { not: 'DORMANT' },
+            lastTradeAt: { lt: fourteenDaysAgo }
+          },
+          data: { status: 'DORMANT' }
+        });
+        
+        if (dormantWallets.count > 0) {
+          console.log(`[Orchestrator] 💤 Marked ${dormantWallets.count} wallets as DORMANT.`);
+        }
+      } catch (e) {
+        console.error('[Orchestrator] Error in dormant cleanup', e);
+      }
+    }, 12 * 60 * 60 * 1000);
   }
 }

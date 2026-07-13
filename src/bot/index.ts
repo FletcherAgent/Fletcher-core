@@ -84,6 +84,7 @@ bot.command("help", (ctx) => {
 /track <address> [label] [tier] - Menambah wallet untuk di-copy.
 /untrack <address> - Berhenti copy wallet.
 /wallets - Lihat daftar wallet terdaftar.
+/wallet <address> - Lihat profil detail & statistik dari satu wallet.
 /copyexit on|off - Aktifkan/matikan fitur copy-exit.
 
 🧪 **Pengujian (Developer)**
@@ -180,6 +181,38 @@ bot.command("wallets", async (ctx) => {
     ctx.reply(msg, { parse_mode: "Markdown" });
   } catch (e) {
     ctx.reply("❌ Failed to fetch wallets.");
+  }
+});
+
+bot.command("wallet", async (ctx) => {
+  const address = ctx.match?.toLowerCase().trim();
+  if (!address) return ctx.reply("❌ Usage: `/wallet <address>`", { parse_mode: "Markdown" });
+
+  try {
+    const w = await prisma.trackedWallet.findUnique({ where: { address } });
+    if (!w) return ctx.reply(`❌ Wallet \`${address}\` not found in registry.`, { parse_mode: "Markdown" });
+
+    const msg = `
+🔍 **Wallet Detail**
+- **Address:** \`${w.address}\`
+- **Label:** ${w.label || '-'}
+- **Tier:** ${w.tier}
+- **Status:** ${w.status}
+- **Bundle ID:** ${w.bundleId || 'None'}
+
+📊 **Performance Stats**
+- **Total Signals:** ${w.totalSignals}
+- **Win Rate:** ${w.winRate ? w.winRate.toFixed(2) + '%' : 'N/A'}
+- **Avg PNL:** ${w.avgPnlR ? w.avgPnlR.toFixed(4) + ' R' : 'N/A'}
+- **Consecutive Losses:** ${w.consecutiveLosses}
+
+🕒 **Activity**
+- **Last Trade:** ${w.lastTradeAt ? w.lastTradeAt.toLocaleString() : 'Never'}
+- **Registered:** ${w.createdAt.toLocaleString()}
+    `;
+    ctx.reply(msg.trim(), { parse_mode: "Markdown" });
+  } catch (e) {
+    ctx.reply("❌ Failed to fetch wallet details.");
   }
 });
 
