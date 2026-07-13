@@ -73,7 +73,7 @@ export class TrackerAgent {
     });
 
     this.server.listen(listenPort, '0.0.0.0', () => {
-      console.log(`[Tracker] 🟢 Webhook Server is actively listening on port ${listenPort} (/webhook/alchemy)`);
+      console.log(`[Tracker] 🟢 Webhook Server is actively listening for Alchemy events (/webhook/alchemy)`);
     });
   }
 
