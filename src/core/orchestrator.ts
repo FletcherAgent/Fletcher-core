@@ -57,11 +57,26 @@ export class Orchestrator {
     this.scout.onSignal = async (tokenAddress) => {
       console.log(`[Orchestrator] Received signal for ${tokenAddress}, consulting Risk Warden...`);
       
+      // Save Signal to DB
+      try {
+        await prisma.signal.create({
+          data: {
+            tokenAddress,
+            score: 100, // Hardcoded for now based on Scout heuristic passing
+            passed: true,
+            rawContext: { source: 'SCOUT' },
+            source: 'SCOUT'
+          }
+        });
+      } catch (e) {
+        console.error(`[Orchestrator] Failed to save SCOUT signal to DB`, e);
+      }
+
       const riskEvaluation = await this.riskWarden.evaluateSignal(tokenAddress);
       
       if (riskEvaluation.approved) {
         console.log(`[Orchestrator] Risk Warden approved. Forwarding to Trader with size ${riskEvaluation.recommendedSize}...`);
-        this.trader.processSignal(tokenAddress, riskEvaluation.recommendedSize);
+        this.trader.processSignal(tokenAddress, riskEvaluation.recommendedSize, 'SCOUT');
         
         // Simulating the post-fill workflow: Start Guardian monitoring immediately
         this.guardian.startMonitoring(tokenAddress, riskEvaluation.recommendedSize);
@@ -74,6 +89,22 @@ export class Orchestrator {
     this.tracker.onCopyBuySignal = async (wallet, token, amount, tier, bundleId) => {
       console.log(`[Orchestrator] 🎯 CopyBuy Signal received for ${token} from ${wallet} (Tier: ${tier})`);
       
+      // Save Signal to DB
+      try {
+        await prisma.signal.create({
+          data: {
+            tokenAddress: token,
+            score: 100,
+            passed: true,
+            rawContext: { source: 'COPYTRADE', wallet, tier, bundleId, amount: amount.toString() },
+            source: 'COPYTRADE',
+            copiedFrom: wallet
+          }
+        });
+      } catch (e) {
+        console.error(`[Orchestrator] Failed to save COPYTRADE signal to DB`, e);
+      }
+
       // Basic Chase Guard (v1): check market cap growth here if needed.
       // For now, pass to risk warden with tier sizing
       const riskEvaluation = await this.riskWarden.evaluateSignal(token);
@@ -88,7 +119,7 @@ export class Orchestrator {
         }
 
         console.log(`[Orchestrator] Forwarding CopyBuy to Trader. Size: ${finalSize}...`);
-        this.trader.processSignal(token, finalSize);
+        this.trader.processSignal(token, finalSize, 'COPYTRADE', wallet);
         this.guardian.startMonitoring(token, finalSize);
       } else {
         console.warn(`[Orchestrator] CopyBuy Risk Warden VETO for ${token}: ${riskEvaluation.reason}`);

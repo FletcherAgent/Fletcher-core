@@ -18,6 +18,8 @@ model Position {
   size         Float
   exitPrice    Float?
   tokenId      String?  // Storage for Uniswap V3 LP NFT
+  source       String   @default("SCOUT") // "SCOUT" or "COPYTRADE"
+  copiedFrom   String?  // Wallet address if source is COPYTRADE
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 }
@@ -28,6 +30,8 @@ model Signal {
   score        Float
   passed       Boolean
   rawContext   Json
+  source       String   @default("SCOUT") // "SCOUT" or "COPYTRADE"
+  copiedFrom   String?  // Wallet address if source is COPYTRADE
   createdAt    DateTime @default(now())
 }
 

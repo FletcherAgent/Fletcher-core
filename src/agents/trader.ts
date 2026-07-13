@@ -6,7 +6,7 @@ import { publicClient, walletClient, account } from '../services/viem.js';
 export class TraderAgent {
   private bot: Bot;
   public executionMode: 'AUTO' | 'CONFIRM' = 'AUTO';
-  private pendingTrades: Map<string, { calldata: string, value: bigint, toAddress: `0x${string}`, amountOutMinimum: bigint, tokenAddress: string, sizeInWeth: bigint, timeoutId: NodeJS.Timeout }> = new Map();
+  private pendingTrades: Map<string, { calldata: string, value: bigint, toAddress: `0x${string}`, amountOutMinimum: bigint, tokenAddress: string, sizeInWeth: bigint, timeoutId: NodeJS.Timeout, source: string, copiedFrom?: string }> = new Map();
 
   constructor(bot: Bot) {
     this.bot = bot;
@@ -25,7 +25,7 @@ export class TraderAgent {
     });
   }
 
-  public async processSignal(tokenAddress: string, sizeInWeth: bigint) {
+  public async processSignal(tokenAddress: string, sizeInWeth: bigint, source: string = "SCOUT", copiedFrom?: string) {
     if (!walletClient || !account) {
       console.error("[Trader] Auto-trading disabled (no PRIVATE_KEY). Aborting trade.");
       return;
@@ -44,7 +44,8 @@ export class TraderAgent {
 
           this.pendingTrades.set(tradeId, { 
             calldata: calldataResult.calldata, value: calldataResult.value, toAddress: calldataResult.toAddress, 
-            amountOutMinimum: calldataResult.amountOutMinimum, tokenAddress, sizeInWeth, timeoutId 
+            amountOutMinimum: calldataResult.amountOutMinimum, tokenAddress, sizeInWeth, timeoutId,
+            source, copiedFrom
           });
 
           const keyboard = new InlineKeyboard()
@@ -71,7 +72,7 @@ export class TraderAgent {
           this.emitToSigningBoundary(tokenAddress, txHash, 'BUY EXECUTED');
 
           const estimatedEntryPrice = Number(sizeInWeth) / Number(amountOutMinimum);
-          await this.registerPosition(tokenAddress, estimatedEntryPrice, Number(sizeInWeth) / 1e18);
+          await this.registerPosition(tokenAddress, estimatedEntryPrice, Number(sizeInWeth) / 1e18, source, copiedFrom);
         } else {
           throw new Error('Transaction reverted by network');
         }
@@ -111,7 +112,7 @@ export class TraderAgent {
         this.emitToSigningBoundary(trade.tokenAddress, txHash, 'BUY EXECUTED');
 
         const estimatedEntryPrice = Number(trade.sizeInWeth) / Number(trade.amountOutMinimum || 1n); // Prevent division by zero if amountOutMin is 0
-        await this.registerPosition(trade.tokenAddress, estimatedEntryPrice, Number(trade.sizeInWeth) / 1e18);
+        await this.registerPosition(trade.tokenAddress, estimatedEntryPrice, Number(trade.sizeInWeth) / 1e18, trade.source, trade.copiedFrom);
         if (chatId) await this.bot.api.sendMessage(chatId, `✅ **Trade Confirmed!**\nBlock: ${receipt.blockNumber}`);
       } else {
         throw new Error('Transaction reverted by network');
@@ -343,7 +344,7 @@ export class TraderAgent {
   /**
    * Registers the position in the database after successful execution.
    */
-  public async registerPosition(tokenAddress: string, entryPrice: number, size: number) {
+  public async registerPosition(tokenAddress: string, entryPrice: number, size: number, source: string = "SCOUT", copiedFrom?: string) {
     try {
       const position = await prisma.position.create({
         data: {
@@ -351,7 +352,9 @@ export class TraderAgent {
           type: 'TRENCH',
           status: 'OPEN',
           entryPrice,
-          size
+          size,
+          source,
+          copiedFrom
         }
       });
       console.log(`[Trader] 💾 DB UPDATE: Position registered -> ID: ${position.id}`);
