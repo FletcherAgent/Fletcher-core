@@ -380,11 +380,44 @@ export class TraderAgent {
         orderBy: { createdAt: 'desc' }
       });
       if (position) {
+        const pnlRatio = (exitPrice - position.entryPrice) / position.entryPrice;
+        
         await prisma.position.update({
           where: { id: position.id },
-          data: { status: 'CLOSED', exitPrice }
+          data: { status: 'CLOSED', exitPrice, pnl: pnlRatio }
         });
-        console.log(`[Trader] 💾 DB UPDATE: Position ${position.id} CLOSED in DB.`);
+        console.log(`[Trader] 💾 DB UPDATE: Position ${position.id} CLOSED in DB. PNL: ${(pnlRatio*100).toFixed(2)}%`);
+
+        if (position.source === 'COPYTRADE' && position.copiedFrom) {
+          const isWin = pnlRatio > 0;
+          
+          const wallet = await prisma.trackedWallet.findUnique({ where: { address: position.copiedFrom } });
+          if (wallet) {
+            const newTotal = wallet.totalSignals + 1;
+            const currentWins = ((wallet.winRate || 0) / 100) * wallet.totalSignals;
+            const newWinRate = ((currentWins + (isWin ? 1 : 0)) / newTotal) * 100;
+            
+            const currentAvgPnl = wallet.avgPnlR || 0;
+            const newAvgPnl = ((currentAvgPnl * wallet.totalSignals) + pnlRatio) / newTotal;
+
+            let newTier = wallet.tier;
+            if (newTotal >= 5) {
+              if (newWinRate < 35 && wallet.tier < 3) newTier = 3;
+              else if (newWinRate >= 55 && wallet.tier > 1) newTier = 1;
+            }
+
+            await prisma.trackedWallet.update({
+              where: { address: wallet.address },
+              data: {
+                totalSignals: newTotal,
+                winRate: newWinRate,
+                avgPnlR: newAvgPnl,
+                tier: newTier
+              }
+            });
+            console.log(`[Trader] 📊 Updated stats for wallet ${wallet.address}: WinRate ${newWinRate.toFixed(2)}%, Avg PNL ${newAvgPnl.toFixed(4)}. Tier is now ${newTier}`);
+          }
+        }
       }
     } catch (e) {
       console.error("[Trader] Failed to update position in DB", e);

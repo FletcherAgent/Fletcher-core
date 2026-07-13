@@ -3,10 +3,11 @@ import { parseAbi, decodeFunctionData, Hex } from 'viem';
 import { prisma } from '../core/db.js';
 
 export class TrackerAgent {
-  public onCopyBuySignal?: (wallet: string, token: string, amount: bigint, tier: number, bundleId: string | null) => void;
-  public onCopySellSignal?: (wallet: string, token: string, amount: bigint, tier: number, bundleId: string | null) => void;
+  public onCopyBuySignal?: (wallet: string, token: string, amount: bigint, tier: number, bundleId: string | null, timestamp: number) => void;
+  public onCopySellSignal?: (wallet: string, token: string, amount: bigint, tier: number, bundleId: string | null, timestamp: number) => void;
 
   private server: any;
+  private lastBuyTime: Map<string, number> = new Map(); // For anti-farm: wallet-token -> timestamp
 
   constructor() {}
 
@@ -98,13 +99,14 @@ export class TrackerAgent {
     if (!calldata || calldata.length < 10) return;
 
     try {
-      this.decodeAndClassifySwap(calldata, fromAddress, toAddress, trackedWallet);
+      const activityTime = activity.timestamp ? new Date(activity.timestamp).getTime() : Date.now();
+      this.decodeAndClassifySwap(calldata, fromAddress, toAddress, trackedWallet, activityTime);
     } catch (e) {
       console.error(`[Tracker] Failed to decode calldata for wallet ${fromAddress}`, e);
     }
   }
 
-  private decodeAndClassifySwap(calldata: Hex, walletAddress: string, routerAddress: string | undefined, trackedWallet: any) {
+  private decodeAndClassifySwap(calldata: Hex, walletAddress: string, routerAddress: string | undefined, trackedWallet: any, timestamp: number) {
     // ABI for Universal Router and SwapRouter02
     const routerAbi = parseAbi([
       // SwapRouter02 exactInputSingle
@@ -132,7 +134,7 @@ export class TrackerAgent {
         const tokenOut = params.tokenOut.toLowerCase();
         const amountIn = BigInt(params.amountIn);
 
-        this.emitSignal(tokenIn, tokenOut, amountIn, walletAddress, trackedWallet);
+        this.emitSignal(tokenIn, tokenOut, amountIn, walletAddress, trackedWallet, timestamp);
       } else if (decoded.functionName === 'multicall') {
         const multicallData = decoded.args[0] as Hex[];
         for (const data of multicallData) {
@@ -143,7 +145,7 @@ export class TrackerAgent {
               const tokenIn = params.tokenIn.toLowerCase();
               const tokenOut = params.tokenOut.toLowerCase();
               const amountIn = BigInt(params.amountIn);
-              this.emitSignal(tokenIn, tokenOut, amountIn, walletAddress, trackedWallet);
+              this.emitSignal(tokenIn, tokenOut, amountIn, walletAddress, trackedWallet, timestamp);
             }
           } catch (err) {
             // multicall might contain non-exactInputSingle commands (like refundETH), ignore
@@ -160,21 +162,36 @@ export class TrackerAgent {
     }
   }
 
-  private emitSignal(tokenIn: string, tokenOut: string, amountIn: bigint, walletAddress: string, trackedWallet: any) {
+  private emitSignal(tokenIn: string, tokenOut: string, amountIn: bigint, walletAddress: string, trackedWallet: any, timestamp: number) {
     const WETH_ADDRESS = (process.env.WETH_ADDRESS || '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2').toLowerCase();
     
     // Classification
     if (tokenIn === WETH_ADDRESS) {
       // BUY tokenOut
       console.log(`[Tracker] 🛒 BUY Signal: ${walletAddress} bought ${tokenOut}`);
+      
+      // Track buy time for anti-farm
+      this.lastBuyTime.set(`${walletAddress}-${tokenOut}`, timestamp);
+
       if (this.onCopyBuySignal) {
-        this.onCopyBuySignal(walletAddress, tokenOut, amountIn, trackedWallet.tier, trackedWallet.bundleId);
+        this.onCopyBuySignal(walletAddress, tokenOut, amountIn, trackedWallet.tier, trackedWallet.bundleId, timestamp);
       }
     } else if (tokenOut === WETH_ADDRESS) {
       // SELL tokenIn
       console.log(`[Tracker] 💥 SELL Signal: ${walletAddress} sold ${tokenIn}`);
+      
+      // Anti-farm check
+      const buyTime = this.lastBuyTime.get(`${walletAddress}-${tokenIn}`);
+      if (buyTime && (timestamp - buyTime < 120000)) {
+        console.warn(`[Tracker] 🚨 ANTI-FARM TRIGGERED: ${walletAddress} bought and sold ${tokenIn} within 2 mins! Demoting to Tier 3.`);
+        prisma.trackedWallet.update({
+          where: { address: walletAddress },
+          data: { tier: 3 }
+        }).catch(e => console.error("Failed to demote wallet", e));
+      }
+
       if (this.onCopySellSignal) {
-        this.onCopySellSignal(walletAddress, tokenIn, amountIn, trackedWallet.tier, trackedWallet.bundleId);
+        this.onCopySellSignal(walletAddress, tokenIn, amountIn, trackedWallet.tier, trackedWallet.bundleId, timestamp);
       }
     }
   }

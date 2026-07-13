@@ -12,6 +12,10 @@ export class GuardianAgent {
 
   constructor() {}
 
+  public isMonitoring(tokenAddress: string): boolean {
+    return this.activeIntervals.has(tokenAddress);
+  }
+
   /**
    * Starts an interval loop to continuously monitor an open position using real Quoter data.
    */

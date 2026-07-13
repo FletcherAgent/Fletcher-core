@@ -88,9 +88,30 @@ export class Orchestrator {
     };
 
     // Tracker Events
-    this.tracker.onCopyBuySignal = async (wallet, token, amount, tier, bundleId) => {
+    // Tracker Events
+    this.tracker.onCopyBuySignal = async (wallet, token, amount, tier, bundleId, timestamp) => {
       console.log(`[Orchestrator] 🎯 CopyBuy Signal received for ${token} from ${wallet} (Tier: ${tier})`);
       
+      // 1. Freshness Filter (max 60 seconds)
+      const ageMs = Date.now() - timestamp;
+      if (ageMs > 60000) {
+        console.warn(`[Orchestrator] 🚫 Signal rejected: Stale signal (${Math.floor(ageMs/1000)}s old)`);
+        return;
+      }
+
+      // 2. Min Buy Size Filter (0.05 ETH)
+      const minBuy = 50000000000000000n; // 0.05 ETH
+      if (amount < minBuy) {
+        console.warn(`[Orchestrator] 🚫 Signal rejected: Buy amount too small (${Number(amount)/1e18} ETH < 0.05)`);
+        return;
+      }
+
+      // 3. Dedup Filter (already monitoring)
+      if (this.guardian.isMonitoring(token)) {
+        console.log(`[Orchestrator] ℹ️ Dedup: Already monitoring position for ${token}, ignoring extra signal.`);
+        return;
+      }
+
       // Save Signal to DB
       try {
         await prisma.signal.create({
@@ -107,7 +128,7 @@ export class Orchestrator {
         console.error(`[Orchestrator] Failed to save COPYTRADE signal to DB`, e);
       }
 
-      // Basic Chase Guard (v1): check market cap growth here if needed.
+      // 4. Chase Guard (Proxy via Freshness for v1, as precise entry mcap requires full log parsing)
       // For now, pass to risk warden with tier sizing
       const riskEvaluation = await this.riskWarden.evaluateSignal(token);
       
@@ -147,7 +168,7 @@ export class Orchestrator {
       }
     };
 
-    this.tracker.onCopySellSignal = async (wallet, token, amount, tier, bundleId) => {
+    this.tracker.onCopySellSignal = async (wallet, token, amount, tier, bundleId, timestamp) => {
       console.log(`[Orchestrator] 💥 CopySell Signal received for ${token} from ${wallet}`);
       
       const chatId = process.env.TELEGRAM_CHAT_ID;
