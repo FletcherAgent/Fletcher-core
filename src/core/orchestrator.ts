@@ -16,8 +16,10 @@ export class Orchestrator {
   private riskWarden: RiskWardenAgent;
   private guardian: GuardianAgent;
   private tracker: TrackerAgent;
+  private bot: Bot;
 
   constructor(bot: Bot) {
+    this.bot = bot;
     this.scout = new ScoutAgent(bot);
     this.trader = new TraderAgent(bot);
     this.lpManager = new LpManagerAgent();
@@ -108,11 +110,23 @@ export class Orchestrator {
       // Basic Chase Guard (v1): check market cap growth here if needed.
       // For now, pass to risk warden with tier sizing
       const riskEvaluation = await this.riskWarden.evaluateSignal(token);
+      
+      const chatId = process.env.TELEGRAM_CHAT_ID;
+      
       if (riskEvaluation.approved) {
         let sizeModifier = 1n; // Tier 1
         if (tier === 2) sizeModifier = 2n; // divide by 2 for Tier 2
 
         const finalSize = riskEvaluation.recommendedSize / sizeModifier;
+        
+        if (chatId) {
+          this.bot.api.sendMessage(
+            chatId,
+            `🎯 *COPYBUY SIGNAL*\n\nWallet: \`${wallet}\` (Tier ${tier})\nToken: \`${token}\`\n\n✅ Risk Warden Approved.\nForwarding to Trader with size: \`${Number(finalSize) / 1e18} WETH\``,
+            { parse_mode: 'Markdown' }
+          ).catch(console.error);
+        }
+
         if (tier === 3 || finalSize === 0n) {
           console.log(`[Orchestrator] 📄 Paper-trade only for this tier/size.`);
           return;
@@ -123,13 +137,32 @@ export class Orchestrator {
         this.guardian.startMonitoring(token, finalSize);
       } else {
         console.warn(`[Orchestrator] CopyBuy Risk Warden VETO for ${token}: ${riskEvaluation.reason}`);
+        if (chatId) {
+          this.bot.api.sendMessage(
+            chatId,
+            `🎯 *COPYBUY SIGNAL*\n\nWallet: \`${wallet}\` (Tier ${tier})\nToken: \`${token}\`\n\n🚨 *RISK WARDEN VETO*\nReason: ${riskEvaluation.reason}`,
+            { parse_mode: 'Markdown' }
+          ).catch(console.error);
+        }
       }
     };
 
     this.tracker.onCopySellSignal = async (wallet, token, amount, tier, bundleId) => {
       console.log(`[Orchestrator] 💥 CopySell Signal received for ${token} from ${wallet}`);
       
-      const config = await prisma.systemConfig.findUnique({ where: { key: 'copyExitEnabled' } });
+      const chatId = process.env.TELEGRAM_CHAT_ID;
+      if (chatId) {
+        this.bot.api.sendMessage(
+          chatId,
+          `💥 *COPYSELL SIGNAL*\n\nWallet: \`${wallet}\` (Tier ${tier})\nToken: \`${token}\`\n\nProcessing exit protocol...`,
+          { parse_mode: 'Markdown' }
+        ).catch(console.error);
+      }
+      
+      // Feature Flag check for CopyExit
+      const config = await prisma.systemConfig.findUnique({
+        where: { key: 'copyExitEnabled' }
+      });
       if (config && config.value === 'true') {
         console.log(`[Orchestrator] Copy-Exit is ON. Forcing Guardian to trigger exit...`);
         // We reuse the guardian exit logic which forwards to trader
