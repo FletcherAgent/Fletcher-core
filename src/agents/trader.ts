@@ -189,9 +189,12 @@ export class TraderAgent {
       'function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external returns (uint256 amountOut)'
     ]);
 
-    // WETH address on Robinhood Chain (Placeholder, assume standard WETH for now)
-    const WETH_ADDRESS = process.env.WETH_ADDRESS!; 
-    const QUOTER_ADDRESS = process.env.QUOTER_ADDRESS!; // Uniswap V3 QuoterV2 (Standard)
+    const WETH_ADDRESS = process.env.WETH_ADDRESS; 
+    const QUOTER_ADDRESS = process.env.QUOTER_ADDRESS;
+
+    if (!WETH_ADDRESS || !QUOTER_ADDRESS || !process.env.ROUTER_ADDRESS) {
+      throw new Error("❌ CRITICAL: WETH_ADDRESS, QUOTER_ADDRESS, or ROUTER_ADDRESS missing in .env");
+    }
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 5); // 5 mins
 
     let amountOutMinimum = 0n;
@@ -210,7 +213,7 @@ export class TraderAgent {
         console.warn(`[Trader] Could not fetch totalSupply for ${tokenOut}`);
       }
 
-      // 2. Simulate via QuoterV2 to get exact output
+      // 2. Fetch live quote via QuoterV2 to get exact output
       let expectedOut = 0n;
       try {
         expectedOut = await publicClient.readContract({
@@ -287,14 +290,18 @@ export class TraderAgent {
       'function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external returns (uint256 amountOut)'
     ]);
 
-    const WETH_ADDRESS = process.env.WETH_ADDRESS!; 
-    const QUOTER_ADDRESS = process.env.QUOTER_ADDRESS!;
+    const WETH_ADDRESS = process.env.WETH_ADDRESS; 
+    const QUOTER_ADDRESS = process.env.QUOTER_ADDRESS;
+
+    if (!WETH_ADDRESS || !QUOTER_ADDRESS || !process.env.ROUTER_ADDRESS) {
+      throw new Error("❌ CRITICAL: WETH_ADDRESS, QUOTER_ADDRESS, or ROUTER_ADDRESS missing in .env");
+    }
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 5); // 5 mins
 
     let amountOutMinimum = 0n;
 
     try {
-      // Simulate via QuoterV2 to get exact output
+      // Fetch live quote via QuoterV2 to get exact output
       let expectedOut = 0n;
       try {
         expectedOut = await publicClient.readContract({

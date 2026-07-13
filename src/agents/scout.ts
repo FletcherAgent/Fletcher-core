@@ -21,11 +21,15 @@ export class ScoutAgent {
   public async startListening() {
     console.log("🟢 Scout Agent: Starting monitoring for NOXA Factory & Uniswap V3 PoolCreated...");
 
-    const UNISWAP_V3_FACTORY = (process.env.UNISWAP_V3_FACTORY_ADDRESS || '0x1F98431c8aD98523631AE4a59f267346ea31F984') as `0x${string}`;
-    const NOXA_FACTORY = (process.env.NOXA_FACTORY_ADDRESS || '0x0000000000000000000000000000000000000000') as `0x${string}`;
+    const UNISWAP_V3_FACTORY = process.env.UNISWAP_V3_FACTORY_ADDRESS as `0x${string}`;
+    const NOXA_FACTORY = process.env.NOXA_FACTORY_ADDRESS as `0x${string}`;
+
+    if (!UNISWAP_V3_FACTORY || !NOXA_FACTORY) {
+      throw new Error("❌ CRITICAL: UNISWAP_V3_FACTORY_ADDRESS or NOXA_FACTORY_ADDRESS is missing in .env");
+    }
 
     try {
-      // Setup listener for NOXA TokenCreated events (Mock ABI)
+      // Setup listener for NOXA TokenCreated events
       if (NOXA_FACTORY !== '0x0000000000000000000000000000000000000000') {
         wssClient.watchEvent({
           address: NOXA_FACTORY,
