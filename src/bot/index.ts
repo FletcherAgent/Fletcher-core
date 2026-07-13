@@ -130,10 +130,6 @@ bot.command("mode", (ctx) => {
   }
 });
 
-// Log Chat ID for every incoming message
-bot.on("message", (ctx) => {
-  console.log(`[Telegram] New message received! Your Chat ID is: ${ctx.chat.id}`);
-});
 
 // --- NEW COMMANDS: Copy-Trade ---
 bot.command("track", async (ctx) => {
