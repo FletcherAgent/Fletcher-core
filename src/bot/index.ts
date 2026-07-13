@@ -80,6 +80,12 @@ bot.command("help", (ctx) => {
 /mode auto - (Sniper Mode) Bot otomatis membeli koin baru tanpa konfirmasi (Sangat Cepat).
 /mode confirm - (Manual Mode) Bot akan mengirim tombol [Confirm] / [Reject] ke Telegram sebelum membeli.
 
+🎯 **Copy-Trade (Smart Money)**
+/track <address> [label] [tier] - Menambah wallet untuk di-copy.
+/untrack <address> - Berhenti copy wallet.
+/wallets - Lihat daftar wallet terdaftar.
+/copyexit on|off - Aktifkan/matikan fitur copy-exit.
+
 🧪 **Pengujian (Developer)**
 /dryrun <Alamat_Token> - Memaksa bot memasukkan token tertentu ke dalam antrean (Inject Signal) untuk testing eksekusi.
 `;
@@ -126,6 +132,74 @@ bot.command("mode", (ctx) => {
 // Log Chat ID for every incoming message
 bot.on("message", (ctx) => {
   console.log(`[Telegram] New message received! Your Chat ID is: ${ctx.chat.id}`);
+});
+
+// --- NEW COMMANDS: Copy-Trade ---
+bot.command("track", async (ctx) => {
+  const params = ctx.match?.trim().split(/\s+/);
+  if (!params || params.length === 0 || !params[0]) {
+    return ctx.reply("❌ Usage: `/track <address> [label] [tier]`", { parse_mode: "Markdown" });
+  }
+  const address = params[0].toLowerCase();
+  const label = params[1] || "tracked";
+  const tier = parseInt(params[2] || "2");
+
+  try {
+    await prisma.trackedWallet.upsert({
+      where: { address },
+      update: { label, tier, status: 'ACTIVE' },
+      create: { address, label, tier, status: 'ACTIVE' }
+    });
+    ctx.reply(`✅ Wallet \`${address}\` tracked as **${label}** (Tier: ${tier}).`, { parse_mode: "Markdown" });
+  } catch (e) {
+    ctx.reply("❌ Failed to track wallet.");
+  }
+});
+
+bot.command("untrack", async (ctx) => {
+  const address = ctx.match?.toLowerCase().trim();
+  if (!address) return ctx.reply("❌ Usage: `/untrack <address>`", { parse_mode: "Markdown" });
+
+  try {
+    await prisma.trackedWallet.delete({ where: { address } });
+    ctx.reply(`✅ Wallet \`${address}\` removed from tracking.`, { parse_mode: "Markdown" });
+  } catch (e) {
+    ctx.reply("❌ Failed to remove or not found.");
+  }
+});
+
+bot.command("wallets", async (ctx) => {
+  try {
+    const wallets = await prisma.trackedWallet.findMany();
+    if (wallets.length === 0) return ctx.reply("📭 No tracked wallets found.");
+    
+    let msg = "🎯 **Tracked Smart Money:**\n\n";
+    for (const w of wallets) {
+      msg += `- \`${w.address.substring(0, 8)}...\` | ${w.label} | Tier: ${w.tier} | Status: ${w.status}\n`;
+    }
+    ctx.reply(msg, { parse_mode: "Markdown" });
+  } catch (e) {
+    ctx.reply("❌ Failed to fetch wallets.");
+  }
+});
+
+bot.command("copyexit", async (ctx) => {
+  const param = ctx.match?.toLowerCase().trim();
+  if (param === 'on' || param === 'off') {
+    const value = param === 'on' ? 'true' : 'false';
+    try {
+      await prisma.systemConfig.upsert({
+        where: { key: 'copyExitEnabled' },
+        update: { value },
+        create: { key: 'copyExitEnabled', value }
+      });
+      ctx.reply(`✅ Copy-Exit is now **${param.toUpperCase()}**.`, { parse_mode: "Markdown" });
+    } catch (e) {
+      ctx.reply("❌ Failed to update config.");
+    }
+  } else {
+    ctx.reply("❌ Usage: `/copyexit on` or `/copyexit off`", { parse_mode: "Markdown" });
+  }
 });
 
 const orchestrator = new Orchestrator(bot);

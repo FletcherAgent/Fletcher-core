@@ -6,6 +6,8 @@ import { TraderAgent } from '../agents/trader.js';
 import { LpManagerAgent } from '../agents/lp.js';
 import { RiskWardenAgent } from '../agents/risk.js';
 import { GuardianAgent } from '../agents/guardian.js';
+import { TrackerAgent } from '../agents/tracker.js';
+import { prisma } from './db.js';
 
 export class Orchestrator {
   private scout: ScoutAgent;
@@ -13,6 +15,7 @@ export class Orchestrator {
   private lpManager: LpManagerAgent;
   private riskWarden: RiskWardenAgent;
   private guardian: GuardianAgent;
+  private tracker: TrackerAgent;
 
   constructor(bot: Bot) {
     this.scout = new ScoutAgent(bot);
@@ -20,6 +23,7 @@ export class Orchestrator {
     this.lpManager = new LpManagerAgent();
     this.riskWarden = new RiskWardenAgent();
     this.guardian = new GuardianAgent();
+    this.tracker = new TrackerAgent();
 
     // Wire up events
     this.guardian.onExitSignal = async (tokenAddress, reason) => {
@@ -65,6 +69,44 @@ export class Orchestrator {
         console.warn(`[Orchestrator] Risk Warden rejected signal for ${tokenAddress}. Reason: ${riskEvaluation.reason}`);
       }
     };
+
+    // Tracker Events
+    this.tracker.onCopyBuySignal = async (wallet, token, amount, tier, bundleId) => {
+      console.log(`[Orchestrator] 🎯 CopyBuy Signal received for ${token} from ${wallet} (Tier: ${tier})`);
+      
+      // Basic Chase Guard (v1): check market cap growth here if needed.
+      // For now, pass to risk warden with tier sizing
+      const riskEvaluation = await this.riskWarden.evaluateSignal(token);
+      if (riskEvaluation.approved) {
+        let sizeModifier = 1n; // Tier 1
+        if (tier === 2) sizeModifier = 2n; // divide by 2 for Tier 2
+
+        const finalSize = riskEvaluation.recommendedSize / sizeModifier;
+        if (tier === 3 || finalSize === 0n) {
+          console.log(`[Orchestrator] 📄 Paper-trade only for this tier/size.`);
+          return;
+        }
+
+        console.log(`[Orchestrator] Forwarding CopyBuy to Trader. Size: ${finalSize}...`);
+        this.trader.processSignal(token, finalSize);
+        this.guardian.startMonitoring(token, finalSize);
+      } else {
+        console.warn(`[Orchestrator] CopyBuy Risk Warden VETO for ${token}: ${riskEvaluation.reason}`);
+      }
+    };
+
+    this.tracker.onCopySellSignal = async (wallet, token, amount, tier, bundleId) => {
+      console.log(`[Orchestrator] 💥 CopySell Signal received for ${token} from ${wallet}`);
+      
+      const config = await prisma.systemConfig.findUnique({ where: { key: 'copyExitEnabled' } });
+      if (config && config.value === 'true') {
+        console.log(`[Orchestrator] Copy-Exit is ON. Forcing Guardian to trigger exit...`);
+        // We reuse the guardian exit logic which forwards to trader
+        this.guardian.onExitSignal!(token, `COPY_EXIT_TRIGGERED_BY_${wallet}`);
+      } else {
+        console.log(`[Orchestrator] Copy-Exit is OFF. Ignoring sell signal.`);
+      }
+    };
   }
 
   /**
@@ -86,5 +128,8 @@ export class Orchestrator {
     
     // Start monitoring for new token launches
     await this.scout.startListening();
+    
+    // Start tracking wallets via webhook
+    this.tracker.startListening();
   }
 }

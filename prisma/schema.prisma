@@ -38,3 +38,24 @@ model Log {
   meta      Json?
   createdAt DateTime @default(now())
 }
+
+model TrackedWallet {
+  id            String   @id @default(uuid())
+  address       String   @unique
+  label         String?
+  tier          Int      @default(2)
+  bundleId      String?
+  status        String   @default("ACTIVE") // ACTIVE, PAUSED, DEMOTED
+  entrySource   String?
+  totalSignals  Int      @default(0)
+  copiedSignals Int      @default(0)
+  winRate       Float?
+  avgPnlR       Float?
+  lastTradeAt   DateTime?
+  createdAt     DateTime @default(now())
+}
+
+model SystemConfig {
+  key   String @id
+  value String
+}

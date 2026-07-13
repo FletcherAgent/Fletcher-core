@@ -196,12 +196,57 @@ export class TraderAgent {
     let amountOutMinimum = 0n;
 
     try {
-      // Direct Sniper execution: Set amountOutMinimum to 0 to bypass all quote simulations and guarantee execution.
-      // (100% Slippage Tolerance)
-      amountOutMinimum = 0n;
-      console.log(`[Trader] 🎯 Pure Sniper execution: Setting amountOutMinimum to 0 (No slippage protection)`);
+      // 1. Fetch Total Supply for NOXA 2% Cap limit
+      const erc20Abi = parseAbi(['function totalSupply() view returns (uint256)']);
+      let totalSupply = 0n;
+      try {
+        totalSupply = await publicClient.readContract({
+          address: tokenOut as `0x${string}`,
+          abi: erc20Abi,
+          functionName: 'totalSupply'
+        }) as bigint;
+      } catch (e) {
+        console.warn(`[Trader] Could not fetch totalSupply for ${tokenOut}`);
+      }
 
-      // 3. Encode actual tx
+      // 2. Simulate via QuoterV2 to get exact output
+      let expectedOut = 0n;
+      try {
+        expectedOut = await publicClient.readContract({
+          address: QUOTER_ADDRESS as `0x${string}`,
+          abi: quoterAbi,
+          functionName: 'quoteExactInputSingle',
+          args: [WETH_ADDRESS as `0x${string}`, tokenOut as `0x${string}`, 3000, amountIn, 0n]
+        }) as bigint;
+        console.log(`[Trader] QuoterV2 expected output: ${expectedOut}`);
+      } catch (e) {
+        console.warn(`[Trader] QuoterV2 simulation failed. Falling back to Sniper Mode.`);
+        expectedOut = 0n;
+      }
+
+      // 3. NOXA 2% Cap Clamping
+      if (totalSupply > 0n && expectedOut > 0n) {
+        const twoPercent = (totalSupply * 2n) / 100n;
+        if (expectedOut > twoPercent) {
+          console.warn(`[Trader] 🚨 2% CAP HIT! Expected ${expectedOut} > Max ${twoPercent}. Clamping size...`);
+          // Proportional scale down of amountIn
+          amountIn = (amountIn * twoPercent) / expectedOut;
+          expectedOut = twoPercent;
+          console.log(`[Trader] Adjusted amountIn: ${amountIn}`);
+        }
+      }
+
+      // 4. Slippage Protection (1%)
+      if (expectedOut > 0n) {
+        amountOutMinimum = (expectedOut * 99n) / 100n;
+        console.log(`[Trader] 🛡️ Slippage protection set. Min out: ${amountOutMinimum}`);
+      } else {
+        // Fallback
+        amountOutMinimum = 0n;
+        console.log(`[Trader] 🎯 Sniper fallback: amountOutMinimum = 0`);
+      }
+
+      // 5. Encode actual tx
       const calldata = encodeFunctionData({
         abi: exactInputSingleAbi,
         functionName: 'exactInputSingle',
@@ -248,10 +293,28 @@ export class TraderAgent {
     let amountOutMinimum = 0n;
 
     try {
-      // Direct Sniper execution: Set amountOutMinimum to 0 to bypass all quote simulations and guarantee execution.
-      // (100% Slippage Tolerance)
-      amountOutMinimum = 0n;
-      console.log(`[Trader] 🎯 Pure Sniper SELL execution: Setting amountOutMinimum to 0 (No slippage protection)`);
+      // Simulate via QuoterV2 to get exact output
+      let expectedOut = 0n;
+      try {
+        expectedOut = await publicClient.readContract({
+          address: QUOTER_ADDRESS as `0x${string}`,
+          abi: quoterAbi,
+          functionName: 'quoteExactInputSingle',
+          args: [tokenIn as `0x${string}`, WETH_ADDRESS as `0x${string}`, 3000, amountIn, 0n]
+        }) as bigint;
+        console.log(`[Trader] QuoterV2 expected output (SELL): ${expectedOut}`);
+      } catch (e) {
+        console.warn(`[Trader] QuoterV2 SELL simulation failed.`);
+        expectedOut = 0n;
+      }
+
+      if (expectedOut > 0n) {
+        amountOutMinimum = (expectedOut * 99n) / 100n; // 1% slippage for sells too
+        console.log(`[Trader] 🛡️ SELL Slippage protection set. Min out: ${amountOutMinimum}`);
+      } else {
+        amountOutMinimum = 0n;
+        console.log(`[Trader] 🎯 Pure Sniper SELL fallback: amountOutMinimum = 0`);
+      }
 
       const calldata = encodeFunctionData({
         abi: exactInputSingleAbi,
