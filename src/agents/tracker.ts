@@ -161,8 +161,12 @@ export class TrackerAgent {
         // Full Universal Router parsing can be added as a separate module
         console.log(`[Tracker] Universal Router 'execute' detected but not fully decoded in this version.`);
       }
-    } catch (error) {
-      console.warn(`[Tracker] Unrecognized SwapRouter calldata: ${error}`);
+    } catch (error: any) {
+      if (error.name === 'AbiFunctionSignatureNotFoundError' || (error.message && error.message.includes('not found on ABI'))) {
+        // Ignored: Non-swap router call
+      } else {
+        console.warn(`[Tracker] Unrecognized SwapRouter calldata: ${error}`);
+      }
     }
   }
 

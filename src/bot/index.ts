@@ -69,28 +69,28 @@ bot.command("start", (ctx) => {
 
 bot.command("help", (ctx) => {
   const helpText = `
-🤖 **Fletcher Bot Commands** 🤖
+🤖 <b>Fletcher Bot Commands</b> 🤖
 
-🚀 **Core System**
+🚀 <b>Core System</b>
 /start - Start the bot and show initial status.
 /status - Show agent status, network, and active positions.
 /help - Show this guide and command list.
 
-🕹️ **Operation Mode**
-/mode auto - (Sniper Mode) Bot automatically buys new tokens without confirmation (Very Fast).
-/mode confirm - (Manual Mode) Bot sends [Confirm] / [Reject] buttons to Telegram before buying.
+🕹️ <b>Operation Mode</b>
+/mode auto - (Sniper Mode) Bot automatically buys new tokens without confirmation.
+/mode confirm - (Manual Mode) Bot sends [Confirm] / [Reject] buttons before buying.
 
-🎯 **Copy-Trade (Smart Money)**
-/track <address> [label] [tier] - Add a wallet to copy-trade.
-/untrack <address> - Stop copying a wallet.
+🎯 <b>Copy-Trade (Smart Money)</b>
+/track &lt;address&gt; [label] [tier] - Add a wallet to copy-trade.
+/untrack &lt;address&gt; - Stop copying a wallet.
 /wallets - View the list of tracked wallets.
-/wallet <address> - View detailed profile & stats of a specific wallet.
+/wallet &lt;address&gt; - View detailed profile &amp; stats of a specific wallet.
 /copyexit on|off - Enable/disable the copy-exit feature.
 
-🧪 **Testing (Developer)**
-/dryrun <Token_Address> - Force the bot to queue a specific token (Inject Signal) for execution testing.
+🧪 <b>Testing (Developer)</b>
+/dryrun &lt;TokenAddress&gt; - Force the bot to queue a specific token for execution testing.
 `;
-  ctx.reply(helpText, { parse_mode: "Markdown" });
+  ctx.reply(helpText, { parse_mode: "HTML" }).catch(e => console.error("Error sending help:", e));
 });
 
 bot.command("status", async (ctx) => {
