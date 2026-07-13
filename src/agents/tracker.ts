@@ -101,8 +101,12 @@ export class TrackerAgent {
     try {
       const activityTime = activity.timestamp ? new Date(activity.timestamp).getTime() : Date.now();
       this.decodeAndClassifySwap(calldata, fromAddress, toAddress, trackedWallet, activityTime);
-    } catch (e) {
-      console.error(`[Tracker] Failed to decode calldata for wallet ${fromAddress}`, e);
+    } catch (e: any) {
+      if (e.name === 'AbiFunctionSignatureNotFoundError' || (e.message && e.message.includes('not found on ABI'))) {
+        // Ignored: The wallet called a function on the router that we don't track (e.g. approve, unwrapWETH, etc)
+      } else {
+        console.error(`[Tracker] Failed to decode calldata for wallet ${fromAddress}`, e);
+      }
     }
   }
 

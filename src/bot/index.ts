@@ -64,31 +64,31 @@ setInterval(() => {
 // -----------------------
 
 bot.command("start", (ctx) => {
-  ctx.reply("🟢 Fletcher Agent Core is online.\nRobinhood Chain Active Range Manager.\n\nKetik /help untuk melihat daftar perintah.");
+  ctx.reply("🟢 Fletcher Agent Core is online.\nRobinhood Chain Active Range Manager.\n\nType /help to see the list of commands.");
 });
 
 bot.command("help", (ctx) => {
   const helpText = `
 🤖 **Fletcher Bot Commands** 🤖
 
-🚀 **Sistem Utama**
-/start - Memulai bot dan menampilkan status awal.
-/status - Menampilkan status agen, jaringan, dan posisi aktif.
-/help - Menampilkan panduan dan daftar perintah ini.
+🚀 **Core System**
+/start - Start the bot and show initial status.
+/status - Show agent status, network, and active positions.
+/help - Show this guide and command list.
 
-🕹️ **Mode Operasi**
-/mode auto - (Sniper Mode) Bot otomatis membeli koin baru tanpa konfirmasi (Sangat Cepat).
-/mode confirm - (Manual Mode) Bot akan mengirim tombol [Confirm] / [Reject] ke Telegram sebelum membeli.
+🕹️ **Operation Mode**
+/mode auto - (Sniper Mode) Bot automatically buys new tokens without confirmation (Very Fast).
+/mode confirm - (Manual Mode) Bot sends [Confirm] / [Reject] buttons to Telegram before buying.
 
 🎯 **Copy-Trade (Smart Money)**
-/track <address> [label] [tier] - Menambah wallet untuk di-copy.
-/untrack <address> - Berhenti copy wallet.
-/wallets - Lihat daftar wallet terdaftar.
-/wallet <address> - Lihat profil detail & statistik dari satu wallet.
-/copyexit on|off - Aktifkan/matikan fitur copy-exit.
+/track <address> [label] [tier] - Add a wallet to copy-trade.
+/untrack <address> - Stop copying a wallet.
+/wallets - View the list of tracked wallets.
+/wallet <address> - View detailed profile & stats of a specific wallet.
+/copyexit on|off - Enable/disable the copy-exit feature.
 
-🧪 **Pengujian (Developer)**
-/dryrun <Alamat_Token> - Memaksa bot memasukkan token tertentu ke dalam antrean (Inject Signal) untuk testing eksekusi.
+🧪 **Testing (Developer)**
+/dryrun <Token_Address> - Force the bot to queue a specific token (Inject Signal) for execution testing.
 `;
   ctx.reply(helpText, { parse_mode: "Markdown" });
 });
@@ -98,7 +98,7 @@ bot.command("status", async (ctx) => {
     const openPositions = await prisma.position.count({ where: { status: 'OPEN' } });
     ctx.reply(`📊 Status:\n- Network: Robinhood Chain (4663)\n- Active Agents: 5\n- Positions: ${openPositions} OPEN`);
   } catch (e) {
-    ctx.reply("❌ Gagal mengambil status dari database.");
+    ctx.reply("❌ Failed to fetch status from the database.");
   }
 });
 
