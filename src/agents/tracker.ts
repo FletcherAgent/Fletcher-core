@@ -15,7 +15,32 @@ export class TrackerAgent {
     console.log(`🎯 Tracker Agent: Starting Webhook server on port ${listenPort}...`);
 
     this.server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-      if (req.method === 'POST' && req.url === '/webhook/alchemy') {
+      // CORS Headers
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+      if (req.method === 'OPTIONS') {
+        res.writeHead(200);
+        res.end();
+        return;
+      }
+
+      if (req.method === 'GET' && req.url === '/api/dashboard') {
+        try {
+          const [wallets, signals, positions] = await Promise.all([
+            prisma.trackedWallet.findMany({ orderBy: { createdAt: 'desc' } }),
+            prisma.signal.findMany({ orderBy: { createdAt: 'desc' }, take: 20 }),
+            prisma.position.findMany({ orderBy: { createdAt: 'desc' }, take: 20 }),
+          ]);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ wallets, signals, positions }));
+        } catch (e) {
+          console.error(`[Tracker] API error:`, e);
+          res.writeHead(500);
+          res.end();
+        }
+      } else if (req.method === 'POST' && req.url === '/webhook/alchemy') {
         let body = '';
         req.on('data', chunk => {
           body += chunk.toString();
