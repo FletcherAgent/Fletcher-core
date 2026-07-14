@@ -83,22 +83,22 @@ export class TrackerAgent {
   }
 
   private async processActivity(activity: any) {
-    if (activity.category !== 'external' || !activity.rawContract) return; // Basic filtering
+    // Allow 'external' (standard calls), 'token' (ERC20/ETH transfers), 'internal' (contract-to-contract)
+    // Reject only: no activity hash, no fromAddress, or pure ERC20 approve/transfer noise
+    if (!activity.hash || !activity.fromAddress) return;
 
     const fromAddress = activity.fromAddress.toLowerCase();
     const toAddress = activity.toAddress?.toLowerCase(); // Target contract
 
     // ── Router Whitelist Filter ───────────────────────────────────────────────
     // Only process transactions sent to a KNOWN swap router.
-    // This prevents NFT purchases (Seaport), token approvals, and other
-    // non-swap calls from reaching the decoder.
     const KNOWN_ROUTERS = new Set([
       (process.env.ROUTER_ADDRESS || '').toLowerCase(),          // Universal Router v4
       '0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45',              // SwapRouter02 (legacy fallback)
     ].filter(Boolean));
 
-    if (toAddress && !KNOWN_ROUTERS.has(toAddress)) {
-      // Silently skip — we don't care about non-swap txns
+    if (!toAddress || !KNOWN_ROUTERS.has(toAddress)) {
+      // Silently skip — not sent to a known router
       return;
     }
     // ─────────────────────────────────────────────────────────────────────────
