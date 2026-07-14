@@ -2,7 +2,6 @@ import { publicClient } from '../services/viem.js';
 import { prisma } from '../core/db.js';
 import { dbLogger } from '../services/logger.js';
 export class RiskWardenAgent {
-    activeTradesCount = 0;
     MAX_HEAT = 5; // Max 5 active trades at once
     RISK_FRACTION = 0.005; // 0.5% risk per trade
     MAX_DAILY_DRAWDOWN = 0.15; // 15% max daily drawdown
@@ -13,8 +12,11 @@ export class RiskWardenAgent {
     async evaluateSignal(tokenAddress) {
         console.log(`[Risk Warden] Evaluating signal for ${tokenAddress}`);
         // 1. Check Portfolio Heat (Circuit Breaker)
-        if (this.activeTradesCount >= this.MAX_HEAT) {
-            const msg = `Signal rejected: Portfolio Heat Cap Reached (${this.activeTradesCount}/${this.MAX_HEAT})`;
+        const activePositionsCount = await prisma.position.count({
+            where: { status: 'OPEN' }
+        });
+        if (activePositionsCount >= this.MAX_HEAT) {
+            const msg = `Signal rejected: Portfolio Heat Cap Reached (${activePositionsCount}/${this.MAX_HEAT})`;
             console.warn(`[Risk Warden] 🚨 ` + msg);
             dbLogger.warn(msg, { token: tokenAddress, reason: 'PORTFOLIO_HEAT_CAP_EXCEEDED' });
             return { approved: false, recommendedSize: 0n, reason: 'PORTFOLIO_HEAT_CAP_EXCEEDED' };
@@ -77,8 +79,6 @@ export class RiskWardenAgent {
         const fractionBps = BigInt(Math.floor(this.RISK_FRACTION * 10000)); // 50
         const recommendedSize = (currentBalance * fractionBps) / 10000n;
         console.log(`[Risk Warden] ✅ APPROVED: Risk gates passed. Assigned size: ${recommendedSize} wei (from total balance ${currentBalance})`);
-        // Increment heat temporarily (in a real system, this is decremented on exit)
-        this.activeTradesCount++;
         return {
             approved: true,
             recommendedSize,
