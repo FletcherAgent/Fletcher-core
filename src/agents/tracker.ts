@@ -368,11 +368,17 @@ export class TrackerAgent {
         const itemLength = parseInt(hex.substring(itemOffset, itemOffset + 64), 16) * 2;
         params.push(hex.substring(itemOffset + 64, itemOffset + 64 + itemLength));
       }
+
+      // Log all found action bytes for diagnostics
+      const actHexList = actionBytes.map(b => '0x' + b.toString(16).padStart(2, '0')).join(', ');
+      console.log(`[Tracker] 🔬 V4 Action Bytes: [${actHexList}] (${actionBytes.length} actions, ${params.length} params) | TX: https://robinhoodchain.blockscout.com/tx/${txHash}`);
       
       for (let i = 0; i < actionBytes.length; i++) {
         const act = actionBytes[i];
-        if (act === 0x06 && params[i]) {
-          // V4_SWAP_EXACT_IN_SINGLE
+        // 0x06 = V4_SWAP_EXACT_IN_SINGLE, 0x07 = V4_SWAP_EXACT_OUT_SINGLE
+        // 0x08 = V4_SWAP_EXACT_IN (multi-hop), 0x09 = V4_SWAP_EXACT_OUT (multi-hop)
+        if ((act === 0x06 || act === 0x07) && params[i]) {
+          const isExactOut = act === 0x07;
           const paramHex = params[i].replace('0x', '');
           
           if (paramHex.length < 448) {
@@ -399,8 +405,15 @@ export class TrackerAgent {
           
           const amountIn = BigInt('0x' + amountInStr);
 
+          // For EXACT_IN_SINGLE: zeroForOne=true means c0→c1 (c0=tokenIn, c1=tokenOut)
+          // For EXACT_OUT_SINGLE: direction is logically reversed
           let tokenInStr = zeroForOne ? c0Str : c1Str;
           let tokenOutStr = zeroForOne ? c1Str : c0Str;
+          if (isExactOut) {
+            const tmp = tokenInStr;
+            tokenInStr = tokenOutStr;
+            tokenOutStr = tmp;
+          }
 
           let tokenIn = '0x' + tokenInStr.toLowerCase();
           let tokenOut = '0x' + tokenOutStr.toLowerCase();
@@ -415,8 +428,11 @@ export class TrackerAgent {
             tokenOut = WETH;
           }
 
-          console.log(`[Tracker] 🔍 Universal Router V4 Swap decoded: ${tokenIn} → ${tokenOut} (amountIn: ${amountIn})`);
+          console.log(`[Tracker] 🔍 Universal Router V4 Swap decoded (act 0x${act.toString(16)}): ${tokenIn} → ${tokenOut} (amountIn: ${amountIn})`);
           this.emitSignal(tokenIn, tokenOut, amountIn, walletAddress, trackedWallet, timestamp, txHash);
+        } else if (act !== 0x0b && act !== 0x0c && act !== 0x04 && act !== 0x0d) {
+          // Log unknown V4 actions (exclude known non-swap ones: SETTLE, TAKE, CLOSE_CURRENCY, SWEEP)
+          console.log(`[Tracker] ℹ️ V4 Unhandled action: 0x${act.toString(16)} | TX: https://robinhoodchain.blockscout.com/tx/${txHash}`);
         }
       }
     } catch (err: any) {
@@ -432,6 +448,18 @@ export class TrackerAgent {
       // BUY tokenOut
       console.log(`[Tracker] 🛒 BUY Signal: ${walletAddress} bought ${tokenOut} | TX: https://robinhoodchain.blockscout.com/tx/${txHash}`);
       dbLogger.info(`BUY Signal detected`, { wallet: trackedWallet.label || walletAddress, token: tokenOut, amountWei: amountIn.toString(), tier: trackedWallet.tier, txHash });
+
+      // Save BUY signal to DB
+      prisma.signal.create({
+        data: {
+          tokenAddress: tokenOut,
+          score: 90,
+          passed: true,
+          source: 'COPYTRADE',
+          copiedFrom: walletAddress,
+          rawContext: { type: 'BUY', wallet: trackedWallet.label || walletAddress, tier: trackedWallet.tier, amountWei: amountIn.toString(), txHash }
+        }
+      }).catch(e => console.error('[Tracker] Failed to save BUY signal to DB', e));
       
       // Async trigger for on-chain profiling
       WalletProfiler.processBuy(walletAddress, tokenOut, txHash);
@@ -446,6 +474,18 @@ export class TrackerAgent {
       // SELL tokenIn
       console.log(`[Tracker] 💥 SELL Signal: ${walletAddress} sold ${tokenIn} | TX: https://robinhoodchain.blockscout.com/tx/${txHash}`);
       dbLogger.info(`SELL Signal detected`, { wallet: trackedWallet.label || walletAddress, token: tokenIn, amountWei: amountIn.toString(), tier: trackedWallet.tier, txHash });
+
+      // Save SELL signal to DB
+      prisma.signal.create({
+        data: {
+          tokenAddress: tokenIn,
+          score: 90,
+          passed: true,
+          source: 'COPYTRADE',
+          copiedFrom: walletAddress,
+          rawContext: { type: 'SELL', wallet: trackedWallet.label || walletAddress, tier: trackedWallet.tier, amountWei: amountIn.toString(), txHash }
+        }
+      }).catch(e => console.error('[Tracker] Failed to save SELL signal to DB', e));
       
       // Async trigger for on-chain profiling
       WalletProfiler.processSell(walletAddress, tokenIn, txHash);
