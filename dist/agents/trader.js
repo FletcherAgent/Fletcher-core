@@ -1,139 +1,279 @@
-import { encodeFunctionData, parseAbi } from 'viem';
+import { encodeFunctionData, encodeAbiParameters, parseAbiParameters, parseAbi } from 'viem';
+import { detectBestFee } from '../services/poolFeeDetector.js';
+import { dbLogger } from '../services/logger.js';
+import { InlineKeyboard } from 'grammy';
 import { prisma } from '../core/db.js';
-import { publicClient } from '../services/viem.js';
+import { publicClient, walletClient, account } from '../services/viem.js';
 export class TraderAgent {
     bot;
+    executionMode = 'AUTO';
+    pendingTrades = new Map();
     constructor(bot) {
         this.bot = bot;
+        this.bot.on("callback_query:data", async (ctx) => {
+            const data = ctx.callbackQuery.data;
+            if (data.startsWith('confirm_')) {
+                const tradeId = data.replace('confirm_', '');
+                await ctx.answerCallbackQuery({ text: "Executing Trade..." });
+                await this.executePendingTrade(tradeId, ctx.chat?.id);
+            }
+            else if (data.startsWith('reject_')) {
+                const tradeId = data.replace('reject_', '');
+                await ctx.answerCallbackQuery({ text: "Trade Rejected" });
+                this.cancelPendingTrade(tradeId, ctx.chat?.id, "Manually rejected by user.");
+            }
+        });
     }
-    async processSignal(tokenAddress, sizeInWeth) {
+    async processSignal(tokenAddress, sizeInWeth, source = "SCOUT", copiedFrom) {
+        if (!walletClient || !account) {
+            console.error("[Trader] Auto-trading disabled (no PRIVATE_KEY). Aborting trade.");
+            return;
+        }
         const calldataResult = await this.constructUnsignedSwapTx(tokenAddress, sizeInWeth);
         if (calldataResult) {
-            const { calldata, amountOutMinimum } = calldataResult;
-            this.emitToSigningBoundary(tokenAddress, calldata, 'BUY');
-            // Simulate successful trade execution and save to DB
-            const estimatedEntryPrice = Number(sizeInWeth) / Number(amountOutMinimum);
-            await this.registerPosition(tokenAddress, estimatedEntryPrice, Number(sizeInWeth) / 1e18);
+            const { calldata, amountOutMinimum, toAddress, value } = calldataResult;
+            try {
+                if (this.executionMode === 'CONFIRM' && process.env.TELEGRAM_CHAT_ID) {
+                    const tradeId = Math.random().toString(36).substring(7);
+                    const timeoutId = setTimeout(() => {
+                        this.cancelPendingTrade(tradeId, Number(process.env.TELEGRAM_CHAT_ID), "Timeout (5 mins) reached.");
+                    }, 5 * 60 * 1000);
+                    this.pendingTrades.set(tradeId, {
+                        calldata: calldataResult.calldata, value: calldataResult.value, toAddress: calldataResult.toAddress,
+                        amountOutMinimum: calldataResult.amountOutMinimum, tokenAddress, sizeInWeth, timeoutId,
+                        source, copiedFrom
+                    });
+                    const keyboard = new InlineKeyboard()
+                        .text("✅ Confirm Buy", `confirm_${tradeId}`)
+                        .text("❌ Reject", `reject_${tradeId}`);
+                    await this.bot.api.sendMessage(process.env.TELEGRAM_CHAT_ID, `🚨 **PENDING BUY**\nToken: \`${tokenAddress}\`\nSize: \`${Number(sizeInWeth) / 1e18} WETH\`\n\nDo you want to execute this trade?`, { parse_mode: 'Markdown', reply_markup: keyboard });
+                    return;
+                }
+                console.log(`[Trader] ⚡ Broadcasting BUY transaction for ${tokenAddress}...`);
+                const txHash = await walletClient.sendTransaction({
+                    account,
+                    to: toAddress,
+                    data: calldata,
+                    value: value
+                });
+                console.log(`[Trader] ✅ BUY TX Broadcasted: ${txHash}. Waiting for confirmation...`);
+                const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+                if (receipt.status === 'success') {
+                    console.log(`[Trader] 🎯 BUY TX Confirmed in block ${receipt.blockNumber}`);
+                    dbLogger.info(`BUY TX Confirmed`, { txHash, token: tokenAddress, block: receipt.blockNumber.toString(), sizeEth: (Number(sizeInWeth) / 1e18).toFixed(6) });
+                    this.emitToSigningBoundary(tokenAddress, txHash, 'BUY EXECUTED');
+                    const estimatedEntryPrice = Number(sizeInWeth) / Number(amountOutMinimum);
+                    await this.registerPosition(tokenAddress, estimatedEntryPrice, Number(sizeInWeth) / 1e18, source, copiedFrom);
+                }
+                else {
+                    throw new Error('Transaction reverted by network');
+                }
+            }
+            catch (error) {
+                console.error(`[Trader] ❌ BUY TX Failed:`, error);
+                dbLogger.error(`BUY TX Failed`, { token: tokenAddress, error: String(error) });
+                this.emitToSigningBoundary(tokenAddress, "FAILED", 'BUY REJECTED');
+            }
+        }
+    }
+    async executePendingTrade(tradeId, chatId) {
+        const trade = this.pendingTrades.get(tradeId);
+        if (!trade) {
+            if (chatId)
+                await this.bot.api.sendMessage(chatId, `❌ Trade ${tradeId} not found or expired.`);
+            return;
+        }
+        clearTimeout(trade.timeoutId);
+        this.pendingTrades.delete(tradeId);
+        try {
+            console.log(`[Trader] ⚡ Broadcasting CONFIRMED BUY transaction for ${trade.tokenAddress}...`);
+            const txHash = await walletClient.sendTransaction({
+                account: account,
+                to: trade.toAddress,
+                data: trade.calldata,
+                value: trade.value
+            });
+            console.log(`[Trader] ✅ BUY TX Broadcasted: ${txHash}. Waiting for confirmation...`);
+            if (chatId)
+                await this.bot.api.sendMessage(chatId, `🚀 **TX Broadcasted!**\nHash: \`${txHash}\`\nWaiting for block confirmation...`, { parse_mode: 'Markdown' });
+            const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+            if (receipt.status === 'success') {
+                console.log(`[Trader] 🎯 BUY TX Confirmed in block ${receipt.blockNumber}`);
+                this.emitToSigningBoundary(trade.tokenAddress, txHash, 'BUY EXECUTED');
+                const estimatedEntryPrice = Number(trade.sizeInWeth) / Number(trade.amountOutMinimum || 1n); // Prevent division by zero if amountOutMin is 0
+                await this.registerPosition(trade.tokenAddress, estimatedEntryPrice, Number(trade.sizeInWeth) / 1e18, trade.source, trade.copiedFrom);
+                if (chatId)
+                    await this.bot.api.sendMessage(chatId, `✅ **Trade Confirmed!**\nBlock: ${receipt.blockNumber}`);
+            }
+            else {
+                throw new Error('Transaction reverted by network');
+            }
+        }
+        catch (error) {
+            console.error(`[Trader] ❌ BUY TX Failed:`, error);
+            this.emitToSigningBoundary(trade.tokenAddress, "FAILED", 'BUY REJECTED');
+            if (chatId)
+                await this.bot.api.sendMessage(chatId, `❌ **Trade Failed!**\nReason: ${error.message}`);
+        }
+    }
+    cancelPendingTrade(tradeId, chatId, reason) {
+        const trade = this.pendingTrades.get(tradeId);
+        if (trade) {
+            clearTimeout(trade.timeoutId);
+            this.pendingTrades.delete(tradeId);
+            if (chatId) {
+                this.bot.api.sendMessage(chatId, `🗑️ Trade Cancelled.\nReason: ${reason || 'Unknown'}`).catch(console.error);
+            }
         }
     }
     async processExitSignal(tokenAddress, amountInToken, reason) {
+        if (!walletClient || !account) {
+            console.error("[Trader] Auto-trading disabled (no PRIVATE_KEY). Aborting trade.");
+            return;
+        }
         const calldataResult = await this.constructUnsignedSellTx(tokenAddress, amountInToken);
         if (calldataResult) {
-            const { calldata, amountOutMinimum } = calldataResult;
-            this.emitToSigningBoundary(tokenAddress, calldata, `SELL [${reason}]`);
-            // Simulate successful sell execution and update DB
-            const estimatedExitPrice = Number(amountOutMinimum) / Number(amountInToken);
-            await this.updatePositionStatus(tokenAddress, estimatedExitPrice);
+            const { calldata, amountOutMinimum, toAddress } = calldataResult;
+            try {
+                console.log(`[Trader] ⚡ Broadcasting SELL transaction for ${tokenAddress}...`);
+                const txHash = await walletClient.sendTransaction({
+                    account,
+                    to: toAddress,
+                    data: calldata
+                });
+                console.log(`[Trader] ✅ SELL TX Broadcasted: ${txHash}. Waiting for confirmation...`);
+                const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+                if (receipt.status === 'success') {
+                    console.log(`[Trader] 🎯 SELL TX Confirmed in block ${receipt.blockNumber}`);
+                    dbLogger.info(`SELL TX Confirmed`, { txHash, token: tokenAddress, block: receipt.blockNumber.toString(), reason });
+                    this.emitToSigningBoundary(tokenAddress, txHash, `SELL EXECUTED [${reason}]`);
+                    const estimatedExitPrice = Number(amountOutMinimum) / Number(amountInToken);
+                    await this.updatePositionStatus(tokenAddress, estimatedExitPrice);
+                }
+                else {
+                    throw new Error('Transaction reverted by network');
+                }
+            }
+            catch (error) {
+                console.error(`[Trader] ❌ SELL TX Failed:`, error);
+                dbLogger.error(`SELL TX Failed`, { token: tokenAddress, reason, error: String(error) });
+                this.emitToSigningBoundary(tokenAddress, "FAILED", `SELL REJECTED [${reason}]`);
+            }
         }
     }
     /**
-     * Constructs an unsigned transaction payload for the user/vault to sign.
-     * using Uniswap V3 SwapRouter exactInputSingle
+     * Constructs a BUY transaction payload using Universal Router v4 execute().
+     * Command 0x00 = V3_SWAP_EXACT_IN: WETH -> tokenOut
      */
     async constructUnsignedSwapTx(tokenOut, amountIn) {
-        console.log(`[Trader] Constructing exactInputSingle calldata for WETH -> ${tokenOut}...`);
-        // Uniswap V3 exactInputSingle signature
-        const exactInputSingleAbi = parseAbi([
-            'struct ExactInputSingleParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 deadline; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }',
-            'function exactInputSingle(ExactInputSingleParams params) external payable returns (uint256 amountOut)'
-        ]);
-        const quoterAbi = parseAbi([
-            'function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external returns (uint256 amountOut)'
-        ]);
-        // WETH address on Robinhood Chain (Placeholder, assume standard WETH for now)
+        console.log(`[Trader] Constructing Universal Router BUY calldata for WETH -> ${tokenOut}...`);
         const WETH_ADDRESS = process.env.WETH_ADDRESS;
-        const QUOTER_ADDRESS = process.env.QUOTER_ADDRESS; // Uniswap V3 QuoterV2 (Standard)
+        const QUOTER_ADDRESS = process.env.QUOTER_ADDRESS;
+        const ROUTER_ADDRESS = process.env.ROUTER_ADDRESS;
+        const USER_WALLET = process.env.USER_WALLET_ADDRESS;
+        if (!WETH_ADDRESS || !QUOTER_ADDRESS || !ROUTER_ADDRESS || !USER_WALLET) {
+            throw new Error('❌ CRITICAL: WETH_ADDRESS, QUOTER_ADDRESS, ROUTER_ADDRESS, or USER_WALLET_ADDRESS missing in .env');
+        }
         const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 5); // 5 mins
-        let amountOutMinimum = 0n;
         try {
-            // 1. Fetch real quote from Quoter
-            const { result } = await publicClient.simulateContract({
-                address: QUOTER_ADDRESS,
-                abi: quoterAbi,
-                functionName: 'quoteExactInputSingle',
-                args: [WETH_ADDRESS, tokenOut, 3000, amountIn, 0n]
-            });
-            console.log(`[Trader] Real quote received: ${result} wei out`);
-            // 2. Apply 1% Slippage tolerance
-            amountOutMinimum = (result * 99n) / 100n;
-            console.log(`[Trader] Setting amountOutMinimum (1% slippage): ${amountOutMinimum}`);
-            // 3. Encode actual tx
+            // 1. Fetch Total Supply for 2% Cap check
+            const erc20Abi = parseAbi(['function totalSupply() view returns (uint256)']);
+            let totalSupply = 0n;
+            try {
+                totalSupply = await publicClient.readContract({
+                    address: tokenOut,
+                    abi: erc20Abi,
+                    functionName: 'totalSupply'
+                });
+            }
+            catch {
+                console.warn(`[Trader] Could not fetch totalSupply for ${tokenOut}`);
+            }
+            // 2. Detect best pool fee tier dynamically
+            const { fee: POOL_FEE, expectedOut: rawExpectedOut } = await detectBestFee(WETH_ADDRESS, tokenOut, amountIn);
+            let expectedOut = rawExpectedOut;
+            // 3. 2% Supply Cap
+            if (totalSupply > 0n && expectedOut > 0n) {
+                const twoPercent = (totalSupply * 2n) / 100n;
+                if (expectedOut > twoPercent) {
+                    console.warn(`[Trader] 🚨 2% CAP HIT! Clamping size...`);
+                    amountIn = (amountIn * twoPercent) / expectedOut;
+                    expectedOut = twoPercent;
+                }
+            }
+            // 4. Slippage Protection (1%)
+            const amountOutMinimum = expectedOut > 0n ? (expectedOut * 99n) / 100n : 0n;
+            console.log(`[Trader] 🛡️ BUY amountOutMinimum: ${amountOutMinimum}`);
+            // 5. Encode Universal Router execute() payload
+            // Path encoding for V3: tokenIn (20 bytes) + fee (3 bytes) + tokenOut (20 bytes)
+            const feeHex = POOL_FEE.toString(16).padStart(6, '0'); // 3 bytes = 6 hex chars
+            const path = `0x${WETH_ADDRESS.replace('0x', '')}${feeHex}${tokenOut.replace('0x', '')}`;
+            // Encode the swap input tuple: (address recipient, uint256 amountIn, uint256 amountOutMin, bytes path, bool payerIsUser)
+            const swapInput = encodeAbiParameters(parseAbiParameters('address, uint256, uint256, bytes, bool'), [USER_WALLET, amountIn, amountOutMinimum, path, false]);
+            // commands: 0x00 = V3_SWAP_EXACT_IN
+            const commands = '0x00';
+            const universalRouterAbi = parseAbi([
+                'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
+            ]);
             const calldata = encodeFunctionData({
-                abi: exactInputSingleAbi,
-                functionName: 'exactInputSingle',
-                args: [{
-                        tokenIn: WETH_ADDRESS,
-                        tokenOut: tokenOut,
-                        fee: 3000, // standard 0.3% pool fee, should be dynamic
-                        recipient: '0x0000000000000000000000000000000000000000', // Replaced with user's vault at signing boundary
-                        deadline,
-                        amountIn: amountIn,
-                        amountOutMinimum,
-                        sqrtPriceLimitX96: 0n
-                    }]
+                abi: universalRouterAbi,
+                functionName: 'execute',
+                args: [commands, [swapInput], deadline]
             });
-            console.log(`[Trader] Unsigned BUY Calldata generated: ${calldata}`);
-            return { calldata, amountOutMinimum };
+            console.log(`[Trader] ✅ BUY Calldata (Universal Router): ${calldata.substring(0, 66)}...`);
+            return { calldata, amountOutMinimum, toAddress: ROUTER_ADDRESS, value: amountIn };
         }
         catch (error) {
-            console.error("[Trader] Failed to build calldata or fetch quote", error);
+            console.error('[Trader] Failed to build BUY calldata:', error);
             return null;
         }
     }
     /**
-     * Constructs an unsigned transaction payload to sell the token back to WETH.
+     * Constructs a SELL transaction payload using Universal Router v4 execute().
+     * Command 0x00 = V3_SWAP_EXACT_IN: tokenIn -> WETH
      */
     async constructUnsignedSellTx(tokenIn, amountIn) {
-        console.log(`[Trader] Constructing exactInputSingle calldata for ${tokenIn} -> WETH...`);
-        const exactInputSingleAbi = parseAbi([
-            'struct ExactInputSingleParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 deadline; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }',
-            'function exactInputSingle(ExactInputSingleParams params) external payable returns (uint256 amountOut)'
-        ]);
-        const quoterAbi = parseAbi([
-            'function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external returns (uint256 amountOut)'
-        ]);
+        console.log(`[Trader] Constructing Universal Router SELL calldata for ${tokenIn} -> WETH...`);
         const WETH_ADDRESS = process.env.WETH_ADDRESS;
         const QUOTER_ADDRESS = process.env.QUOTER_ADDRESS;
-        const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 5); // 5 mins
-        let amountOutMinimum = 0n;
+        const ROUTER_ADDRESS = process.env.ROUTER_ADDRESS;
+        const USER_WALLET = process.env.USER_WALLET_ADDRESS;
+        if (!WETH_ADDRESS || !QUOTER_ADDRESS || !ROUTER_ADDRESS || !USER_WALLET) {
+            throw new Error('❌ CRITICAL: Missing env variables for SELL tx construction.');
+        }
+        const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 5);
         try {
-            // 1. Fetch real quote for exit
-            const { result } = await publicClient.simulateContract({
-                address: QUOTER_ADDRESS,
-                abi: quoterAbi,
-                functionName: 'quoteExactInputSingle',
-                args: [tokenIn, WETH_ADDRESS, 3000, amountIn, 0n]
-            });
-            console.log(`[Trader] Real SELL quote received: ${result} WETH out`);
-            // 2. Apply 1% Slippage tolerance
-            amountOutMinimum = (result * 99n) / 100n;
-            console.log(`[Trader] Setting SELL amountOutMinimum (1% slippage): ${amountOutMinimum}`);
+            // 1. Detect best pool fee tier dynamically
+            const { fee: POOL_FEE, expectedOut } = await detectBestFee(tokenIn, WETH_ADDRESS, amountIn);
+            // 2. Slippage Protection (1%)
+            const amountOutMinimum = expectedOut > 0n ? (expectedOut * 99n) / 100n : 0n;
+            console.log(`[Trader] 🛡️ SELL amountOutMinimum: ${amountOutMinimum}`);
+            // 3. Encode path: tokenIn + fee + WETH
+            const feeHex = POOL_FEE.toString(16).padStart(6, '0');
+            const path = `0x${tokenIn.replace('0x', '')}${feeHex}${WETH_ADDRESS.replace('0x', '')}`;
+            // 4. Encode swap input tuple
+            const swapInput = encodeAbiParameters(parseAbiParameters('address, uint256, uint256, bytes, bool'), [USER_WALLET, amountIn, amountOutMinimum, path, false]);
+            const commands = '0x00';
+            const universalRouterAbi = parseAbi([
+                'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
+            ]);
             const calldata = encodeFunctionData({
-                abi: exactInputSingleAbi,
-                functionName: 'exactInputSingle',
-                args: [{
-                        tokenIn: tokenIn,
-                        tokenOut: WETH_ADDRESS,
-                        fee: 3000,
-                        recipient: '0x0000000000000000000000000000000000000000',
-                        deadline,
-                        amountIn: amountIn,
-                        amountOutMinimum,
-                        sqrtPriceLimitX96: 0n
-                    }]
+                abi: universalRouterAbi,
+                functionName: 'execute',
+                args: [commands, [swapInput], deadline]
             });
-            console.log(`[Trader] Unsigned SELL Calldata generated: ${calldata}`);
-            return { calldata, amountOutMinimum };
+            console.log(`[Trader] ✅ SELL Calldata (Universal Router): ${calldata.substring(0, 66)}...`);
+            return { calldata, amountOutMinimum, toAddress: ROUTER_ADDRESS };
         }
         catch (error) {
-            console.error("[Trader] Failed to build sell calldata or fetch quote", error);
+            console.error('[Trader] Failed to build SELL calldata:', error);
             return null;
         }
     }
     /**
      * Registers the position in the database after successful execution.
      */
-    async registerPosition(tokenAddress, entryPrice, size) {
+    async registerPosition(tokenAddress, entryPrice, size, source = "SCOUT", copiedFrom) {
         try {
             const position = await prisma.position.create({
                 data: {
@@ -141,7 +281,9 @@ export class TraderAgent {
                     type: 'TRENCH',
                     status: 'OPEN',
                     entryPrice,
-                    size
+                    size,
+                    source,
+                    copiedFrom
                 }
             });
             console.log(`[Trader] 💾 DB UPDATE: Position registered -> ID: ${position.id}`);
@@ -160,26 +302,71 @@ export class TraderAgent {
                 orderBy: { createdAt: 'desc' }
             });
             if (position) {
+                const pnlRatio = (exitPrice - position.entryPrice) / position.entryPrice;
                 await prisma.position.update({
                     where: { id: position.id },
-                    data: { status: 'CLOSED', exitPrice }
+                    data: { status: 'CLOSED', exitPrice, pnl: pnlRatio }
                 });
-                console.log(`[Trader] 💾 DB UPDATE: Position ${position.id} CLOSED in DB.`);
+                console.log(`[Trader] 💾 DB UPDATE: Position ${position.id} CLOSED in DB. PNL: ${(pnlRatio * 100).toFixed(2)}%`);
+                if (position.source === 'COPYTRADE' && position.copiedFrom) {
+                    const isWin = pnlRatio > 0;
+                    const wallet = await prisma.trackedWallet.findUnique({ where: { address: position.copiedFrom } });
+                    if (wallet) {
+                        const newTotal = wallet.totalSignals + 1;
+                        const currentWins = ((wallet.winRate || 0) / 100) * wallet.totalSignals;
+                        const newWinRate = ((currentWins + (isWin ? 1 : 0)) / newTotal) * 100;
+                        const currentAvgPnl = wallet.avgPnlR || 0;
+                        const newAvgPnl = ((currentAvgPnl * wallet.totalSignals) + pnlRatio) / newTotal;
+                        let newTier = wallet.tier;
+                        if (newTotal >= 5) {
+                            if (newWinRate < 35 && wallet.tier < 3)
+                                newTier = 3;
+                            else if (newWinRate >= 55 && wallet.tier > 1)
+                                newTier = 1;
+                        }
+                        let newConsecutiveLosses = isWin ? 0 : wallet.consecutiveLosses + 1;
+                        let newStatus = wallet.status;
+                        if (newConsecutiveLosses >= 3) {
+                            newStatus = 'PAUSED';
+                            const emergencyMsg = `EMERGENCY: Wallet ${wallet.address} hit 3 consecutive losses. Status set to PAUSED.`;
+                            console.error(`[Trader] 🚨 ` + emergencyMsg);
+                            dbLogger.error(emergencyMsg, { wallet: wallet.address, consecutiveLosses: newConsecutiveLosses });
+                        }
+                        await prisma.trackedWallet.update({
+                            where: { address: wallet.address },
+                            data: {
+                                totalSignals: newTotal,
+                                winRate: newWinRate,
+                                avgPnlR: newAvgPnl,
+                                tier: newTier,
+                                consecutiveLosses: newConsecutiveLosses,
+                                status: newStatus
+                            }
+                        });
+                        console.log(`[Trader] 📊 Updated stats for wallet ${wallet.address}: WinRate ${newWinRate.toFixed(2)}%, Avg PNL ${newAvgPnl.toFixed(4)}. Tier is now ${newTier}, Status: ${newStatus}`);
+                    }
+                }
             }
         }
         catch (e) {
             console.error("[Trader] Failed to update position in DB", e);
         }
     }
-    emitToSigningBoundary(tokenAddress, calldata, action) {
-        // Integration point for the Telegram bot
+    emitToSigningBoundary(tokenAddress, txHash, action) {
         const chatId = process.env.TELEGRAM_CHAT_ID;
-        console.log(`[Signing Boundary] Awaiting ${action} approval for ${tokenAddress}...`);
+        console.log(`[Notification] Auto-Trade executed: ${action} for ${tokenAddress}. Hash: ${txHash}`);
         if (chatId) {
-            this.bot.api.sendMessage(chatId, `🚨 *New Signal Detected!*\n\nAction: **${action}**\nToken: \`${tokenAddress}\`\n\nApprove execution?`, { parse_mode: "Markdown" }).catch(err => console.error("[Trader] Failed to send Telegram message", err));
+            let msg = `🤖 *AUTO-TRADE EXECUTED*\n\nAction: **${action}**\nToken: \`${tokenAddress}\``;
+            if (txHash !== "FAILED") {
+                msg += `\n\n✅ Transaction Hash:\n\`${txHash}\``;
+            }
+            else {
+                msg += `\n\n❌ Transaction Failed (Reverted/Error)`;
+            }
+            this.bot.api.sendMessage(chatId, msg, { parse_mode: "Markdown" }).catch(err => console.error("[Trader] Failed to send Telegram message", err));
         }
         else {
-            console.warn("[Trader] TELEGRAM_CHAT_ID is not set in .env! Cannot send approval message.");
+            console.warn("[Trader] TELEGRAM_CHAT_ID is not set in .env! Cannot send execution message.");
         }
     }
 }

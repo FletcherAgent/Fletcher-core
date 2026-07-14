@@ -9,6 +9,7 @@ export class TrackerAgent {
   public onCopySellSignal?: (wallet: string, token: string, amount: bigint, tier: number, bundleId: string | null, timestamp: number, txHash: string) => void;
 
   private server: any;
+  private processedTxHashes: Set<string> = new Set<string>();
   private lastBuyTime: Map<string, number> = new Map(); // For anti-farm: wallet-token -> timestamp
 
   constructor() {}
@@ -123,23 +124,35 @@ export class TrackerAgent {
     console.log(`[Tracker] 🚨 Swap activity detected from: ${trackedWallet.label || fromAddress} → ${toAddress} | TX: https://robinhoodchain.blockscout.com/tx/${activity.hash}`);
     dbLogger.info(`Swap activity detected from: ${trackedWallet.label || fromAddress} → ${toAddress}`, { txHash: activity.hash, wallet: trackedWallet.label || fromAddress });
 
-    const calldata = activity.rawContract?.rawValue as Hex;
-    if (!calldata || calldata.length < 10) {
-      console.warn(`[Tracker] ⚠️ No calldata in webhook payload for TX: https://robinhoodchain.blockscout.com/tx/${activity.hash} | rawContract: ${JSON.stringify(activity.rawContract)?.substring(0, 100)}`);
-      // Fallback: fetch calldata on-chain
-      const { publicClient } = await import('../services/viem.js');
-      try {
-        const tx = await publicClient.getTransaction({ hash: activity.hash as `0x${string}` });
-        if (!tx.input || tx.input.length < 10) {
-          console.warn(`[Tracker] ⚠️ On-chain fallback also returned empty input for TX: ${activity.hash}`);
-          return;
-        }
-        console.log(`[Tracker] 🔄 Using on-chain fallback calldata for TX: ${activity.hash}`);
-        const activityTime = activity.timestamp ? new Date(activity.timestamp).getTime() : Date.now();
-        await this.decodeAndClassifySwap(tx.input as Hex, fromAddress, toAddress, trackedWallet, activityTime, activity.hash, tx.value);
-      } catch (fetchErr: any) {
-        console.error(`[Tracker] ❌ On-chain fallback failed for ${activity.hash}: ${fetchErr.message}`);
+    // Deduplicate by txHash to avoid processing the same transaction multiple times
+    // (Alchemy webhooks send one activity per transfer, so a single swap tx has multiple activities)
+    if (this.processedTxHashes?.has(activity.hash)) {
+      return;
+    }
+    if (!this.processedTxHashes) {
+      this.processedTxHashes = new Set<string>();
+    }
+    this.processedTxHashes.add(activity.hash);
+    
+    // Clean up old hashes to prevent memory leak
+    if (this.processedTxHashes.size > 10000) {
+      this.processedTxHashes.clear();
+      this.processedTxHashes.add(activity.hash);
+    }
+
+    // Always fetch calldata on-chain because activity.rawContract?.rawValue is the transfer amount, not the tx input!
+    let calldata: Hex = '0x';
+    const { publicClient } = await import('../services/viem.js');
+    try {
+      const tx = await publicClient.getTransaction({ hash: activity.hash as `0x${string}` });
+      if (!tx.input || tx.input.length < 10) {
+        console.warn(`[Tracker] ⚠️ On-chain fallback returned empty input for TX: ${activity.hash}`);
+        return;
       }
+      calldata = tx.input as Hex;
+      console.log(`[Tracker] 🔄 Fetched on-chain calldata for TX: ${activity.hash}`);
+    } catch (fetchErr: any) {
+      console.error(`[Tracker] ❌ On-chain fallback failed for ${activity.hash}: ${fetchErr.message}`);
       return;
     }
 

@@ -1,4 +1,5 @@
-import { createPublicClient, http, defineChain } from 'viem';
+import { createPublicClient, createWalletClient, http, defineChain, webSocket } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
 import * as dotenv from "dotenv";
 dotenv.config();
 const rpcUrl = process.env.ROBINHOOD_RPC_URL || 'https://rpc.mainnet.chain.robinhood.com';
@@ -9,8 +10,8 @@ export const robinhoodChain = defineChain({
     network: 'robinhood',
     nativeCurrency: {
         decimals: 18,
-        name: 'Robinhood',
-        symbol: 'RHD', // Using RHD or native gas token for Robinhood
+        name: 'Ether',
+        symbol: 'ETH',
     },
     rpcUrls: {
         default: {
@@ -23,6 +24,27 @@ export const robinhoodChain = defineChain({
 });
 export const publicClient = createPublicClient({
     chain: robinhoodChain,
-    transport: http(),
+    transport: http(rpcUrl, {
+        batch: true,
+    }),
 });
+const wssUrl = process.env.ROBINHOOD_WSS_URL || 'wss://robinhood-mainnet.g.alchemy.com/v2/ubcuebFzxN1SaqLkuNrIJ';
+export const wssClient = createPublicClient({
+    chain: robinhoodChain,
+    transport: webSocket(wssUrl),
+});
+export const account = process.env.PRIVATE_KEY
+    ? privateKeyToAccount(process.env.PRIVATE_KEY)
+    : null;
+export const walletClient = account ? createWalletClient({
+    account,
+    chain: robinhoodChain,
+    transport: http(),
+}) : null;
 console.log("🔌 Viem Client: Connected to Robinhood Chain RPC");
+if (walletClient) {
+    console.log("🔐 Wallet Client: Auto-Trading Enabled (Private Key Loaded)");
+}
+else {
+    console.warn("⚠️ Wallet Client: PRIVATE_KEY missing! Auto-trading disabled.");
+}
