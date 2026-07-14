@@ -103,7 +103,8 @@ export class TrackerAgent {
       this.decodeAndClassifySwap(calldata, fromAddress, toAddress, trackedWallet, activityTime);
     } catch (e: any) {
       if (e.name === 'AbiFunctionSignatureNotFoundError' || (e.message && e.message.includes('not found on ABI'))) {
-        // Ignored: The wallet called a function on the router that we don't track (e.g. approve, unwrapWETH, etc)
+        const sig = calldata.substring(0, 10);
+        console.log(`[Tracker] ℹ️ Ignored non-swap activity from ${trackedWallet.label || fromAddress} (Signature: ${sig})`);
       } else {
         console.error(`[Tracker] Failed to decode calldata for wallet ${fromAddress}`, e);
       }
@@ -163,7 +164,8 @@ export class TrackerAgent {
       }
     } catch (error: any) {
       if (error.name === 'AbiFunctionSignatureNotFoundError' || (error.message && error.message.includes('not found on ABI'))) {
-        // Ignored: Non-swap router call
+        const sig = calldata.substring(0, 10);
+        console.log(`[Tracker] ℹ️ Ignored non-swap activity from ${trackedWallet.label || walletAddress} (Signature: ${sig})`);
       } else {
         console.warn(`[Tracker] Unrecognized SwapRouter calldata: ${error}`);
       }
@@ -201,6 +203,8 @@ export class TrackerAgent {
       if (this.onCopySellSignal) {
         this.onCopySellSignal(walletAddress, tokenIn, amountIn, trackedWallet.tier, trackedWallet.bundleId, timestamp);
       }
+    } else {
+      console.log(`[Tracker] 🔄 SWAP Signal: ${walletAddress} swapped ${tokenIn} for ${tokenOut}`);
     }
   }
 }
