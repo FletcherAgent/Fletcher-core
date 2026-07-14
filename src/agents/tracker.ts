@@ -249,28 +249,37 @@ export class TrackerAgent {
     txHash: string
   ) {
     try {
-      // Decode the ABI-encoded input tuple
-      // (address recipient, uint256 amountIn, uint256 amountOutMin, bytes path, bool payerIsUser)
-      const [, amountIn, , path] = decodeAbiParameters(
-        parseAbiParameters('address, uint256, uint256, bytes, bool'),
-        input
-      ) as [string, bigint, bigint, Hex, boolean];
+      // Robust manual parser for (address recipient, uint256 amountIn, uint256 amountOutMin, bytes path, bool payerIsUser)
+      const hex = input.startsWith('0x') ? input.substring(2) : input;
+      if (hex.length < 320) return; // Minimum 5 words for the tuple
 
-      // Decode path: each hop is 20 bytes (address) + 3 bytes (fee) + ... + 20 bytes (address)
-      // Minimum path: tokenIn (20) + fee (3) + tokenOut (20) = 43 bytes = 86 hex chars
-      const pathHex = (path as string).replace('0x', '');
-      if (pathHex.length < 86) return;
+      // Word 1: amountIn
+      const amountInStr = hex.substring(64, 128);
+      const amountIn = BigInt('0x' + amountInStr);
 
-      // For V3_SWAP_EXACT_IN: path is tokenIn -> fee -> tokenOut -> ...
-      // First token = bytes 0-19 (40 hex chars), last token = last 40 hex chars
-      const tokenIn  = ('0x' + pathHex.substring(0, 40)).toLowerCase();
-      const tokenOut = ('0x' + pathHex.substring(pathHex.length - 40)).toLowerCase();
+      // Word 3: offset to path
+      const pathOffset = parseInt(hex.substring(192, 256), 16) * 2;
+      
+      // Read path length and data
+      const pathLength = parseInt(hex.substring(pathOffset, pathOffset + 64), 16) * 2;
+      const pathHex = hex.substring(pathOffset + 64, pathOffset + 64 + pathLength);
+      
+      if (pathHex.length < 86) return; // Min path length = 43 bytes (86 chars)
 
-      console.log(`[Tracker] 🔍 Universal Router Swap decoded: ${tokenIn} → ${tokenOut} (amountIn: ${amountIn})`);
+      let tokenIn = ('0x' + pathHex.substring(0, 40)).toLowerCase();
+      let tokenOut = ('0x' + pathHex.substring(pathHex.length - 40)).toLowerCase();
+
+      // For EXACT_OUT (cmd 0x01), the path is reversed (tokenOut -> ... -> tokenIn)
+      if (cmd === 0x01) {
+        const temp = tokenIn;
+        tokenIn = tokenOut;
+        tokenOut = temp;
+      }
+
+      console.log(`[Tracker] 🔍 Universal Router V3 Swap decoded: ${tokenIn} → ${tokenOut} (amountIn: ${amountIn})`);
       this.emitSignal(tokenIn, tokenOut, amountIn, walletAddress, trackedWallet, timestamp, txHash);
-
     } catch (err: any) {
-      console.warn(`[Tracker] Could not decode UR swap input: ${err.message}`);
+      console.warn(`[Tracker] Could not decode UR V3 swap input: ${err.message}`);
     }
   }
 
@@ -287,15 +296,27 @@ export class TrackerAgent {
     txHash: string
   ) {
     try {
-      const [, amountIn, , path] = decodeAbiParameters(
-        parseAbiParameters('address, uint256, uint256, address[], bool'),
-        input
-      ) as [string, bigint, bigint, string[], boolean];
+      // Robust manual parser for (address recipient, uint256 amountIn, uint256 amountOutMin, address[] path, bool payerIsUser)
+      const hex = input.startsWith('0x') ? input.substring(2) : input;
+      if (hex.length < 320) return;
 
-      if (!path || path.length < 2) return;
+      const amountInStr = hex.substring(64, 128);
+      const amountIn = BigInt('0x' + amountInStr);
 
-      const tokenIn = path[0].toLowerCase();
-      const tokenOut = path[path.length - 1].toLowerCase();
+      const pathOffset = parseInt(hex.substring(192, 256), 16) * 2;
+      const pathLength = parseInt(hex.substring(pathOffset, pathOffset + 64), 16);
+
+      if (pathLength < 2) return;
+
+      let tokenIn = ('0x' + hex.substring(pathOffset + 64, pathOffset + 128).slice(-40)).toLowerCase();
+      let tokenOut = ('0x' + hex.substring(pathOffset + 64 + ((pathLength - 1) * 64), pathOffset + 64 + (pathLength * 64)).slice(-40)).toLowerCase();
+
+      // For EXACT_OUT (cmd 0x09), the logical input/output is reversed
+      if (cmd === 0x09) {
+        const temp = tokenIn;
+        tokenIn = tokenOut;
+        tokenOut = temp;
+      }
 
       console.log(`[Tracker] 🔍 Universal Router V2 Swap decoded: ${tokenIn} → ${tokenOut} (amountIn: ${amountIn})`);
       this.emitSignal(tokenIn, tokenOut, amountIn, walletAddress, trackedWallet, timestamp, txHash);
