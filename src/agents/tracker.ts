@@ -95,6 +95,7 @@ export class TrackerAgent {
     const KNOWN_ROUTERS = new Set([
       (process.env.ROUTER_ADDRESS || '').toLowerCase(),          // Universal Router v4
       '0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45',              // SwapRouter02 (legacy fallback)
+      '0xf193ede778a92dc37cb450a1ef1565ed1e8b7964',              // Sniper Bot Proxy Router (0xc1120e3d)
     ].filter(Boolean));
 
     if (!toAddress || !KNOWN_ROUTERS.has(toAddress)) {
@@ -138,7 +139,16 @@ export class TrackerAgent {
     console.log(`[Tracker] 🔎 Calldata found (${calldata.length} chars), decoding...`);
     try {
       const activityTime = activity.timestamp ? new Date(activity.timestamp).getTime() : Date.now();
-      await this.decodeAndClassifySwap(calldata, fromAddress, toAddress, trackedWallet, activityTime, activity.hash);
+      
+      // Parse tx value from Alchemy webhook (activity.value is in native tokens, e.g. 0.13662)
+      // Convert to Wei (BigInt). If missing, fallback to 0.
+      let txValueWei = 0n;
+      if (activity.value !== undefined && activity.value !== null) {
+        // activity.value is usually a float for native token (e.g., 0.13662)
+        txValueWei = BigInt(Math.floor(parseFloat(activity.value.toString()) * 1e18));
+      }
+
+      await this.decodeAndClassifySwap(calldata, fromAddress, toAddress, trackedWallet, activityTime, activity.hash, txValueWei);
     } catch (e: any) {
       if (e.name === 'AbiFunctionSignatureNotFoundError' || (e.message && e.message.includes('not found on ABI'))) {
         const sig = calldata.substring(0, 10);
@@ -149,10 +159,10 @@ export class TrackerAgent {
     }
   }
 
-  private async decodeAndClassifySwap(calldata: Hex, walletAddress: string, routerAddress: string | undefined, trackedWallet: any, timestamp: number, txHash: string) {
+  private async decodeAndClassifySwap(calldata: Hex, walletAddress: string, routerAddress: string | undefined, trackedWallet: any, timestamp: number, txHash: string, txValueWei: bigint = 0n) {
     // Known router addresses (lowercase) — only decode if the target IS a known router
     const UNIVERSAL_ROUTER = (process.env.ROUTER_ADDRESS || '').toLowerCase();
-    const WETH = (process.env.WETH_ADDRESS || '').toLowerCase();
+    const WETH = (process.env.WETH_ADDRESS || '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2').toLowerCase();
 
     // === ABI definitions ===
     const swapRouter02Abi = parseAbi([
@@ -167,6 +177,39 @@ export class TrackerAgent {
     ]);
 
     const funcSig = calldata.substring(0, 10).toLowerCase();
+
+    // ── Custom Bot Router (0xc1120e3d) ────────────────────────────────────────
+    if (funcSig === '0xc1120e3d') {
+      try {
+        // Layout:
+        // params[0]: Router
+        // params[1]: PoolManager
+        // params[2]: Token
+        // params[3]: isBuy (uint256)
+        // ...
+        const rawParams = calldata.substring(10);
+        const tokenParam = rawParams.substring(128, 192); // Param 3 (index 2)
+        const isBuyParam = rawParams.substring(192, 256); // Param 4 (index 3)
+        const amountParam = rawParams.substring(256, 320); // Param 5 (index 4) - might be amountIn for sell?
+
+        const targetToken = '0x' + tokenParam.substring(24).toLowerCase();
+        const isBuy = isBuyParam.endsWith('1');
+
+        if (isBuy) {
+          // BUY: ETH -> Token. Amount is the tx value!
+          console.log(`[Tracker] 🔍 Sniper Bot Swap decoded: BUY ${targetToken} (amountIn: ${txValueWei})`);
+          await this.emitSignal(WETH, targetToken, txValueWei, walletAddress, trackedWallet, timestamp, txHash);
+        } else {
+          // SELL: Token -> ETH. Amount is likely passed in Param 5 (index 4)
+          const amountIn = BigInt('0x' + amountParam);
+          console.log(`[Tracker] 🔍 Sniper Bot Swap decoded: SELL ${targetToken} (amountIn: ${amountIn})`);
+          await this.emitSignal(targetToken, WETH, amountIn, walletAddress, trackedWallet, timestamp, txHash);
+        }
+      } catch (err: any) {
+        console.warn(`[Tracker] Failed to decode Custom Bot Swap | TX: https://robinhoodchain.blockscout.com/tx/${txHash}: ${err.message}`);
+      }
+      return;
+    }
 
     // ── Universal Router execute() ────────────────────────────────────────────
     // Selector: 0x3593564c (execute with deadline) or 0x24856bc3 (execute without)
