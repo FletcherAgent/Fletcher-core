@@ -181,6 +181,10 @@ export class TrackerAgent {
           else if (cmd === 0x08 || cmd === 0x09) {
             await this.processUniversalRouterSwapV2(input, cmd, walletAddress, trackedWallet, timestamp, txHash);
           } 
+          // Command 0x10 = V4_SWAP
+          else if (cmd === 0x10) {
+            await this.processUniversalRouterSwapV4(input, cmd, walletAddress, trackedWallet, timestamp, txHash);
+          }
           else {
             // e.g. 0x0b (WRAP_ETH), 0x0c (UNWRAP_WETH), 0x04 (SWEEP), etc.
             console.log(`[Tracker] ℹ️ UR Ignored Command: 0x${cmd.toString(16)} [TX: ${txHash}]`);
@@ -297,6 +301,86 @@ export class TrackerAgent {
       this.emitSignal(tokenIn, tokenOut, amountIn, walletAddress, trackedWallet, timestamp, txHash);
     } catch (err: any) {
       console.warn(`[Tracker] Could not decode UR V2 swap input: ${err.message}`);
+    }
+  }
+
+  /**
+   * Decodes V4_SWAP input from Universal Router (Command 0x10).
+   * Parses actions and params to extract the tokens and amountIn for V4_SWAP_EXACT_IN_SINGLE (0x06).
+   */
+  private async processUniversalRouterSwapV4(
+    input: Hex,
+    cmd: number,
+    walletAddress: string,
+    trackedWallet: any,
+    timestamp: number,
+    txHash: string
+  ) {
+    try {
+      const [actions, params] = decodeAbiParameters(
+        parseAbiParameters('bytes, bytes[]'),
+        input
+      ) as [string, string[]];
+      
+      const actionBytes = (actions.replace('0x', '').match(/.{1,2}/g) || []).map(b => parseInt(b, 16));
+      
+      for (let i = 0; i < actionBytes.length; i++) {
+        const act = actionBytes[i];
+        if (act === 0x06 && params[i]) {
+          // V4_SWAP_EXACT_IN_SINGLE
+          const paramHex = params[i].replace('0x', '');
+          
+          // ExactInputSingleParams is ABI encoded. 
+          // However, Currency (address) seems to be left-aligned (bytes20) in some Universal Router integrations.
+          // The payload is standard ABI encoded but often has a 12-byte (24 hex char) misalignment 
+          // in how viem extracts the bytes array from Universal Router.
+          // Let's realign it if we detect the misalignment.
+          let alignedHex = paramHex;
+          if (paramHex.substring(paramHex.length - 24) === '000000000000000000000000') {
+             // It's misaligned. Prepend 24 zeros to shift everything right.
+             alignedHex = '000000000000000000000000' + paramHex;
+          }
+
+          // Universal Router tightly packs or offsets the V4 ExactInputSingleParams.
+          // Through raw byte analysis, we can extract the values at specific fixed positions:
+          // currency0 is at offset 64 (length 40)
+          // currency1 is at offset 128 (length 40)
+          // zeroForOne is at offset 384 (length 64)
+          // amountIn is at offset 448 (length 64, right-aligned but followed by 24 zeroes sometimes depending on abi decoding)
+          
+          const c0Str = paramHex.substring(64, 104);
+          const c1Str = paramHex.substring(128, 168);
+          
+          const zeroForOne = paramHex.substring(384, 448).includes('1');
+          
+          // Extract amountIn by stripping padding zeros
+          let amountInStr = paramHex.substring(448, 512).replace(/0+$/, '').replace(/^0+/, '');
+          if (!amountInStr) amountInStr = '0';
+          
+          const amountIn = BigInt('0x' + amountInStr);
+
+          let tokenInStr = zeroForOne ? c0Str : c1Str;
+          let tokenOutStr = zeroForOne ? c1Str : c0Str;
+
+          let tokenIn = '0x' + tokenInStr.toLowerCase();
+          let tokenOut = '0x' + tokenOutStr.toLowerCase();
+            
+          const WETH = (process.env.WETH_ADDRESS || '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2').toLowerCase();
+          
+          // In V4, native ETH is represented as address(0)
+          if (tokenIn === '0x0000000000000000000000000000000000000000' || tokenIn === '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee') {
+            tokenIn = WETH;
+          }
+          if (tokenOut === '0x0000000000000000000000000000000000000000' || tokenOut === '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee') {
+            tokenOut = WETH;
+          }
+
+          console.log(`[Tracker] 🔍 Universal Router V4 Swap decoded: ${tokenIn} → ${tokenOut} (amountIn: ${amountIn})`);
+          this.emitSignal(tokenIn, tokenOut, amountIn, walletAddress, trackedWallet, timestamp, txHash);
+        }
+      }
+    } catch (err: any) {
+      console.warn(`[Tracker] Could not decode UR V4 swap input [TX: ${txHash}]: ${err.message}`);
     }
   }
 
