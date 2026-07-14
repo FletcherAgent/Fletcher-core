@@ -312,11 +312,11 @@ export class TraderAgent {
                     const isWin = pnlRatio > 0;
                     const wallet = await prisma.trackedWallet.findUnique({ where: { address: position.copiedFrom } });
                     if (wallet) {
-                        const newTotal = wallet.totalSignals + 1;
-                        const currentWins = ((wallet.winRate || 0) / 100) * wallet.totalSignals;
+                        const newTotal = wallet.copiedSignals + 1;
+                        const currentWins = ((wallet.winRate || 0) / 100) * wallet.copiedSignals;
                         const newWinRate = ((currentWins + (isWin ? 1 : 0)) / newTotal) * 100;
                         const currentAvgPnl = wallet.avgPnlR || 0;
-                        const newAvgPnl = ((currentAvgPnl * wallet.totalSignals) + pnlRatio) / newTotal;
+                        const newAvgPnl = ((currentAvgPnl * wallet.copiedSignals) + pnlRatio) / newTotal;
                         let newTier = wallet.tier;
                         if (newTotal >= 5) {
                             if (newWinRate < 35 && wallet.tier < 3)
@@ -335,7 +335,7 @@ export class TraderAgent {
                         await prisma.trackedWallet.update({
                             where: { address: wallet.address },
                             data: {
-                                totalSignals: newTotal,
+                                copiedSignals: newTotal,
                                 winRate: newWinRate,
                                 avgPnlR: newAvgPnl,
                                 tier: newTier,

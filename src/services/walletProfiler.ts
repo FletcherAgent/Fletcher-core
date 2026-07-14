@@ -199,12 +199,12 @@ export class WalletProfiler {
     if (!wallet) return;
 
     const isWin = pnlRatio > 0;
-    const newTotal = wallet.totalSignals + 1;
-    const currentWins = ((wallet.winRate || 0) / 100) * wallet.totalSignals;
+    const newTotal = wallet.copiedSignals + 1;
+    const currentWins = ((wallet.winRate || 0) / 100) * wallet.copiedSignals;
     const newWinRate = ((currentWins + (isWin ? 1 : 0)) / newTotal) * 100;
     
     const currentAvgPnl = wallet.avgPnlR || 0;
-    const newAvgPnl = ((currentAvgPnl * wallet.totalSignals) + pnlRatio) / newTotal;
+    const newAvgPnl = ((currentAvgPnl * wallet.copiedSignals) + pnlRatio) / newTotal;
 
     let newTier = wallet.tier;
     let newConsecutiveLosses = isWin ? 0 : wallet.consecutiveLosses + 1;
@@ -233,7 +233,7 @@ export class WalletProfiler {
     await prisma.trackedWallet.update({
       where: { id: wallet.id },
       data: {
-        totalSignals: newTotal,
+        copiedSignals: newTotal,
         winRate: newWinRate,
         avgPnlR: newAvgPnl,
         consecutiveLosses: newConsecutiveLosses,

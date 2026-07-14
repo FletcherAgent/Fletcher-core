@@ -145,6 +145,16 @@ export class Orchestrator {
         console.error(`[Orchestrator] Failed to save COPYTRADE signal to DB`, e);
       }
 
+      // Update TrackedWallet totalSignals count
+      try {
+        await prisma.trackedWallet.update({
+          where: { address: wallet.toLowerCase() },
+          data: { totalSignals: { increment: 1 } }
+        });
+      } catch (e) {
+        console.error(`[Orchestrator] Failed to increment totalSignals for wallet ${wallet}`, e);
+      }
+
       // 4. Chase Guard (Proxy via Freshness for v1, as precise entry mcap requires full log parsing)
       // For now, pass to risk warden with tier sizing
       const riskEvaluation = await this.riskWarden.evaluateSignal(token);
