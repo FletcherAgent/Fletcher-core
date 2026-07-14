@@ -174,6 +174,15 @@ export class TrackerAgent {
           // Command 0x01 = V3_SWAP_EXACT_OUT
           if (cmd === 0x00 || cmd === 0x01) {
             await this.processUniversalRouterSwap(input, cmd, walletAddress, trackedWallet, timestamp, txHash);
+          } 
+          // Command 0x08 = V2_SWAP_EXACT_IN
+          // Command 0x09 = V2_SWAP_EXACT_OUT
+          else if (cmd === 0x08 || cmd === 0x09) {
+            await this.processUniversalRouterSwapV2(input, cmd, walletAddress, trackedWallet, timestamp, txHash);
+          } 
+          else {
+            // e.g. 0x0b (WRAP_ETH), 0x0c (UNWRAP_WETH), 0x04 (SWEEP), etc.
+            console.log(`[Tracker] ℹ️ UR Ignored Command: 0x${cmd.toString(16)}`);
           }
         }
       } catch (err: any) {
@@ -260,6 +269,35 @@ export class TrackerAgent {
     }
   }
 
+  /**
+   * Decodes a single V2_SWAP_EXACT_IN or V2_SWAP_EXACT_OUT input from Universal Router.
+   * Layout (ABI-encoded tuple): (address recipient, uint256 amountIn, uint256 amountOutMin, address[] path, bool payerIsUser)
+   */
+  private async processUniversalRouterSwapV2(
+    input: Hex,
+    cmd: number,
+    walletAddress: string,
+    trackedWallet: any,
+    timestamp: number,
+    txHash: string
+  ) {
+    try {
+      const [, amountIn, , path] = decodeAbiParameters(
+        parseAbiParameters('address, uint256, uint256, address[], bool'),
+        input
+      ) as [string, bigint, bigint, string[], boolean];
+
+      if (!path || path.length < 2) return;
+
+      const tokenIn = path[0].toLowerCase();
+      const tokenOut = path[path.length - 1].toLowerCase();
+
+      console.log(`[Tracker] 🔍 Universal Router V2 Swap decoded: ${tokenIn} → ${tokenOut} (amountIn: ${amountIn})`);
+      this.emitSignal(tokenIn, tokenOut, amountIn, walletAddress, trackedWallet, timestamp, txHash);
+    } catch (err: any) {
+      console.warn(`[Tracker] Could not decode UR V2 swap input: ${err.message}`);
+    }
+  }
 
   private emitSignal(tokenIn: string, tokenOut: string, amountIn: bigint, walletAddress: string, trackedWallet: any, timestamp: number, txHash: string) {
     const WETH_ADDRESS = (process.env.WETH_ADDRESS || '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2').toLowerCase();
