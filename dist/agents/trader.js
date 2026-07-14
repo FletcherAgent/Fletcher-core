@@ -53,7 +53,7 @@ export class TraderAgent {
                     console.log(`[Trader] 📄 PAPER TRADE: Simulating BUY for ${tokenAddress}...`);
                     dbLogger.info(`PAPER BUY Simulated`, { token: tokenAddress, sizeEth: (Number(sizeInWeth) / 1e18).toFixed(6) });
                     this.emitToSigningBoundary(tokenAddress, "0xPAPER_TX", 'BUY EXECUTED (PAPER)');
-                    const estimatedEntryPrice = Number(sizeInWeth) / Number(amountOutMinimum);
+                    const estimatedEntryPrice = Number(sizeInWeth) / Number(amountOutMinimum || 1n);
                     await this.registerPosition(tokenAddress, estimatedEntryPrice, Number(sizeInWeth) / 1e18, source, copiedFrom);
                     return;
                 }
@@ -72,7 +72,7 @@ export class TraderAgent {
                     console.log(`[Trader] 🎯 BUY TX Confirmed in block ${receipt.blockNumber}`);
                     dbLogger.info(`BUY TX Confirmed`, { txHash, token: tokenAddress, block: receipt.blockNumber.toString(), sizeEth: (Number(sizeInWeth) / 1e18).toFixed(6) });
                     this.emitToSigningBoundary(tokenAddress, txHash, 'BUY EXECUTED');
-                    const estimatedEntryPrice = Number(sizeInWeth) / Number(amountOutMinimum);
+                    const estimatedEntryPrice = Number(sizeInWeth) / Number(amountOutMinimum || 1n);
                     await this.registerPosition(tokenAddress, estimatedEntryPrice, Number(sizeInWeth) / 1e18, source, copiedFrom);
                 }
                 else {
