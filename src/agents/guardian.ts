@@ -8,6 +8,7 @@ export class GuardianAgent {
     intervalId: NodeJS.Timeout;
     initialQuote: bigint;
     highestQuote: bigint;
+    startedAt: number;
   }> = new Map();
 
   constructor() {}
@@ -44,6 +45,7 @@ export class GuardianAgent {
     }
 
     let highestQuote = initialQuote;
+    const startedAt = Date.now();
 
     // Polling every 10 seconds
     const intervalId = setInterval(async () => {
@@ -100,6 +102,15 @@ export class GuardianAgent {
           return;
         }
 
+        // 5. Max Holding Time (Time Limit)
+        const maxHoldMinutes = parseInt(process.env.MAX_HOLD_TIME_MINUTES || '30', 10);
+        const MAX_HOLD_TIME_MS = maxHoldMinutes * 60 * 1000;
+        if (Date.now() - startedAt > MAX_HOLD_TIME_MS) {
+          console.log(`[Guardian] ⏳ MAX HOLD TIME EXCEEDED (${maxHoldMinutes} Minutes) for ${tokenAddress}!`);
+          this.triggerExit(tokenAddress, "TIME_LIMIT_EXCEEDED");
+          return;
+        }
+
       } catch (err) {
         console.warn(`[Guardian] ⚠️ Failed to fetch current quote for ${tokenAddress} - pool might be rugged!`);
         this.triggerExit(tokenAddress, "EMERGENCY_RUG_NO_QUOTES");
@@ -107,7 +118,7 @@ export class GuardianAgent {
       
     }, 10000); // 10 seconds
 
-    this.activeIntervals.set(tokenAddress, { intervalId, initialQuote, highestQuote });
+    this.activeIntervals.set(tokenAddress, { intervalId, initialQuote, highestQuote, startedAt });
   }
 
   /**
