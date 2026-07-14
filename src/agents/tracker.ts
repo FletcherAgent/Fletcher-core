@@ -112,7 +112,7 @@ export class TrackerAgent {
       return; // Not tracked or not active
     }
 
-    console.log(`[Tracker] 🚨 Swap activity detected from: ${trackedWallet.label || fromAddress} → ${toAddress}`);
+    console.log(`[Tracker] 🚨 Swap activity detected from: ${trackedWallet.label || fromAddress} → ${toAddress} [TX: ${activity.hash}]`);
     dbLogger.info(`Swap activity detected from: ${trackedWallet.label || fromAddress} → ${toAddress}`, { txHash: activity.hash, wallet: trackedWallet.label || fromAddress });
 
     const calldata = activity.rawContract?.rawValue as Hex;
@@ -183,11 +183,11 @@ export class TrackerAgent {
           } 
           else {
             // e.g. 0x0b (WRAP_ETH), 0x0c (UNWRAP_WETH), 0x04 (SWEEP), etc.
-            console.log(`[Tracker] ℹ️ UR Ignored Command: 0x${cmd.toString(16)}`);
+            console.log(`[Tracker] ℹ️ UR Ignored Command: 0x${cmd.toString(16)} [TX: ${txHash}]`);
           }
         }
       } catch (err: any) {
-        console.warn(`[Tracker] Failed to decode Universal Router execute(): ${err.message}`);
+        console.warn(`[Tracker] Failed to decode Universal Router execute() [TX: ${txHash}]: ${err.message}`);
       }
       return;
     }
