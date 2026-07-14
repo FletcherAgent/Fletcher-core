@@ -116,8 +116,26 @@ export class TrackerAgent {
     dbLogger.info(`Swap activity detected from: ${trackedWallet.label || fromAddress} → ${toAddress}`, { txHash: activity.hash, wallet: trackedWallet.label || fromAddress });
 
     const calldata = activity.rawContract?.rawValue as Hex;
-    if (!calldata || calldata.length < 10) return;
+    if (!calldata || calldata.length < 10) {
+      console.warn(`[Tracker] ⚠️ No calldata in webhook payload for TX: https://robinhoodchain.blockscout.com/tx/${activity.hash} | rawContract: ${JSON.stringify(activity.rawContract)?.substring(0, 100)}`);
+      // Fallback: fetch calldata on-chain
+      const { publicClient } = await import('../services/viem.js');
+      try {
+        const tx = await publicClient.getTransaction({ hash: activity.hash as `0x${string}` });
+        if (!tx.input || tx.input.length < 10) {
+          console.warn(`[Tracker] ⚠️ On-chain fallback also returned empty input for TX: ${activity.hash}`);
+          return;
+        }
+        console.log(`[Tracker] 🔄 Using on-chain fallback calldata for TX: ${activity.hash}`);
+        const activityTime = activity.timestamp ? new Date(activity.timestamp).getTime() : Date.now();
+        await this.decodeAndClassifySwap(tx.input as Hex, fromAddress, toAddress, trackedWallet, activityTime, activity.hash);
+      } catch (fetchErr: any) {
+        console.error(`[Tracker] ❌ On-chain fallback failed for ${activity.hash}: ${fetchErr.message}`);
+      }
+      return;
+    }
 
+    console.log(`[Tracker] 🔎 Calldata found (${calldata.length} chars), decoding...`);
     try {
       const activityTime = activity.timestamp ? new Date(activity.timestamp).getTime() : Date.now();
       await this.decodeAndClassifySwap(calldata, fromAddress, toAddress, trackedWallet, activityTime, activity.hash);
