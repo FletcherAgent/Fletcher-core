@@ -33,9 +33,11 @@ export const publicClient = createPublicClient({
   }),
 });
 
+const wssUrl = process.env.ROBINHOOD_WSS_URL || 'wss://robinhood-mainnet.g.alchemy.com/v2/ubcuebFzxN1SaqLkuNrIJ';
+
 export const wssClient = createPublicClient({
   chain: robinhoodChain,
-  transport: webSocket(process.env.ROBINHOOD_WSS_URL),
+  transport: webSocket(wssUrl),
 });
 
 export const account = process.env.PRIVATE_KEY 
