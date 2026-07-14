@@ -317,44 +317,46 @@ export class TrackerAgent {
     txHash: string
   ) {
     try {
-      const [actions, params] = decodeAbiParameters(
-        parseAbiParameters('bytes, bytes[]'),
-        input
-      ) as [string, string[]];
+      const hex = input.startsWith('0x') ? input.substring(2) : input;
       
-      const actionBytes = (actions.replace('0x', '').match(/.{1,2}/g) || []).map(b => parseInt(b, 16));
+      const actionOffset = parseInt(hex.substring(0, 64), 16) * 2;
+      const actionLength = parseInt(hex.substring(actionOffset, actionOffset + 64), 16) * 2;
+      const actionsHex = hex.substring(actionOffset + 64, actionOffset + 64 + actionLength);
+      const actionBytes = (actionsHex.match(/.{1,2}/g) || []).map(b => parseInt(b, 16));
+
+      const paramsOffset = parseInt(hex.substring(64, 128), 16) * 2;
+      const paramsCount = parseInt(hex.substring(paramsOffset, paramsOffset + 64), 16);
+      const params: string[] = [];
+
+      for (let i = 0; i < paramsCount; i++) {
+        const itemOffsetRelative = parseInt(hex.substring(paramsOffset + 64 + (i * 64), paramsOffset + 64 + (i * 64) + 64), 16) * 2;
+        // Array offsets are relative to the start of the elements (after the 32-byte length word)
+        const itemOffset = paramsOffset + 64 + itemOffsetRelative;
+        const itemLength = parseInt(hex.substring(itemOffset, itemOffset + 64), 16) * 2;
+        params.push(hex.substring(itemOffset + 64, itemOffset + 64 + itemLength));
+      }
       
       for (let i = 0; i < actionBytes.length; i++) {
         const act = actionBytes[i];
         if (act === 0x06 && params[i]) {
           // V4_SWAP_EXACT_IN_SINGLE
           const paramHex = params[i].replace('0x', '');
-          
-          // ExactInputSingleParams is ABI encoded. 
-          // However, Currency (address) seems to be left-aligned (bytes20) in some Universal Router integrations.
-          // The payload is standard ABI encoded but often has a 12-byte (24 hex char) misalignment 
-          // in how viem extracts the bytes array from Universal Router.
-          // Let's realign it if we detect the misalignment.
-          let alignedHex = paramHex;
-          if (paramHex.substring(paramHex.length - 24) === '000000000000000000000000') {
-             // It's misaligned. Prepend 24 zeros to shift everything right.
-             alignedHex = '000000000000000000000000' + paramHex;
-          }
 
           // Universal Router tightly packs or offsets the V4 ExactInputSingleParams.
           // Through raw byte analysis, we can extract the values at specific fixed positions:
-          // currency0 is at offset 64 (length 40)
-          // currency1 is at offset 128 (length 40)
-          // zeroForOne is at offset 384 (length 64)
-          // amountIn is at offset 448 (length 64, right-aligned but followed by 24 zeroes sometimes depending on abi decoding)
+          // The param data starts with a 32-byte tuple offset (0x0020), so the first struct element starts at 64 chars
+          const c0Str = paramHex.substring(64, 128).slice(-40);
+          const c1Str = paramHex.substring(128, 192).slice(-40);
           
-          const c0Str = paramHex.substring(64, 104);
-          const c1Str = paramHex.substring(128, 168);
+          const zeroForOne = paramHex.substring(384, 448).endsWith('1');
           
-          const zeroForOne = paramHex.substring(384, 448).includes('1');
-          
-          // Extract amountIn by stripping padding zeros
-          let amountInStr = paramHex.substring(448, 512).replace(/0+$/, '').replace(/^0+/, '');
+          // Extract amountIn by finding the first non-zero chunk after zeroForOne
+          const amountChunk = paramHex.substring(448);
+          let amountInStr = '0';
+          const match = amountChunk.match(/[1-9a-f][0-9a-f]*/);
+          if (match) {
+             amountInStr = match[0];
+          }
           if (!amountInStr) amountInStr = '0';
           
           const amountIn = BigInt('0x' + amountInStr);
