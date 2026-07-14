@@ -99,10 +99,10 @@ export class Orchestrator {
                 console.warn(`[Orchestrator] 🚫 Signal rejected: Stale signal (${Math.floor(ageMs / 1000)}s old)`);
                 return;
             }
-            // 2. Min Buy Size Filter (0.05 ETH)
-            const minBuy = 50000000000000000n; // 0.05 ETH
+            // 2. Min Buy Size Filter (0.001 ETH)
+            const minBuy = 1000000000000000n; // 0.001 ETH
             if (amount < minBuy) {
-                console.warn(`[Orchestrator] 🚫 Signal rejected: Buy amount too small (${Number(amount) / 1e18} ETH < 0.05)`);
+                console.warn(`[Orchestrator] 🚫 Signal rejected: Buy amount too small (${Number(amount) / 1e18} ETH < 0.001)`);
                 return;
             }
             // 3. Dedup Filter (already monitoring)
