@@ -440,7 +440,7 @@ export class TrackerAgent {
     }
   }
 
-  private emitSignal(tokenIn: string, tokenOut: string, amountIn: bigint, walletAddress: string, trackedWallet: any, timestamp: number, txHash: string) {
+  private async emitSignal(tokenIn: string, tokenOut: string, amountIn: bigint, walletAddress: string, trackedWallet: any, timestamp: number, txHash: string) {
     const WETH_ADDRESS = (process.env.WETH_ADDRESS || '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2').toLowerCase();
     
     // Classification
@@ -450,16 +450,21 @@ export class TrackerAgent {
       dbLogger.info(`BUY Signal detected`, { wallet: trackedWallet.label || walletAddress, token: tokenOut, amountWei: amountIn.toString(), tier: trackedWallet.tier, txHash });
 
       // Save BUY signal to DB
-      prisma.signal.create({
-        data: {
-          tokenAddress: tokenOut,
-          score: 90,
-          passed: true,
-          source: 'COPYTRADE',
-          copiedFrom: walletAddress,
-          rawContext: { type: 'BUY', wallet: trackedWallet.label || walletAddress, tier: trackedWallet.tier, amountWei: amountIn.toString(), txHash }
-        }
-      }).catch(e => console.error('[Tracker] Failed to save BUY signal to DB', e));
+      try {
+        await prisma.signal.create({
+          data: {
+            tokenAddress: tokenOut,
+            score: 90,
+            passed: true,
+            source: 'COPYTRADE',
+            copiedFrom: walletAddress,
+            rawContext: { type: 'BUY', wallet: trackedWallet.label || walletAddress, tier: trackedWallet.tier, amountWei: amountIn.toString(), txHash }
+          }
+        });
+        console.log(`[Tracker] ✅ BUY signal saved to DB for ${tokenOut}`);
+      } catch (e: any) {
+        console.error(`[Tracker] ❌ Failed to save BUY signal to DB: ${e.message} | code: ${e.code}`);
+      }
       
       // Async trigger for on-chain profiling
       WalletProfiler.processBuy(walletAddress, tokenOut, txHash);
@@ -476,16 +481,21 @@ export class TrackerAgent {
       dbLogger.info(`SELL Signal detected`, { wallet: trackedWallet.label || walletAddress, token: tokenIn, amountWei: amountIn.toString(), tier: trackedWallet.tier, txHash });
 
       // Save SELL signal to DB
-      prisma.signal.create({
-        data: {
-          tokenAddress: tokenIn,
-          score: 90,
-          passed: true,
-          source: 'COPYTRADE',
-          copiedFrom: walletAddress,
-          rawContext: { type: 'SELL', wallet: trackedWallet.label || walletAddress, tier: trackedWallet.tier, amountWei: amountIn.toString(), txHash }
-        }
-      }).catch(e => console.error('[Tracker] Failed to save SELL signal to DB', e));
+      try {
+        await prisma.signal.create({
+          data: {
+            tokenAddress: tokenIn,
+            score: 90,
+            passed: true,
+            source: 'COPYTRADE',
+            copiedFrom: walletAddress,
+            rawContext: { type: 'SELL', wallet: trackedWallet.label || walletAddress, tier: trackedWallet.tier, amountWei: amountIn.toString(), txHash }
+          }
+        });
+        console.log(`[Tracker] ✅ SELL signal saved to DB for ${tokenIn}`);
+      } catch (e: any) {
+        console.error(`[Tracker] ❌ Failed to save SELL signal to DB: ${e.message} | code: ${e.code}`);
+      }
       
       // Async trigger for on-chain profiling
       WalletProfiler.processSell(walletAddress, tokenIn, txHash);
