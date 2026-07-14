@@ -1,5 +1,5 @@
 import { createServer, IncomingMessage, ServerResponse } from 'http';
-import { parseAbi, decodeFunctionData, Hex } from 'viem';
+import { parseAbi, decodeFunctionData, decodeAbiParameters, parseAbiParameters, Hex } from 'viem';
 import { prisma } from '../core/db.js';
 
 export class TrackerAgent {
@@ -100,7 +100,7 @@ export class TrackerAgent {
 
     try {
       const activityTime = activity.timestamp ? new Date(activity.timestamp).getTime() : Date.now();
-      this.decodeAndClassifySwap(calldata, fromAddress, toAddress, trackedWallet, activityTime);
+      await this.decodeAndClassifySwap(calldata, fromAddress, toAddress, trackedWallet, activityTime);
     } catch (e: any) {
       if (e.name === 'AbiFunctionSignatureNotFoundError' || (e.message && e.message.includes('not found on ABI'))) {
         const sig = calldata.substring(0, 10);
@@ -111,66 +111,135 @@ export class TrackerAgent {
     }
   }
 
-  private decodeAndClassifySwap(calldata: Hex, walletAddress: string, routerAddress: string | undefined, trackedWallet: any, timestamp: number) {
-    // ABI for Universal Router and SwapRouter02
-    const routerAbi = parseAbi([
-      // SwapRouter02 exactInputSingle
+  private async decodeAndClassifySwap(calldata: Hex, walletAddress: string, routerAddress: string | undefined, trackedWallet: any, timestamp: number) {
+    // Known router addresses (lowercase) — only decode if the target IS a known router
+    const UNIVERSAL_ROUTER = (process.env.ROUTER_ADDRESS || '').toLowerCase();
+    const WETH = (process.env.WETH_ADDRESS || '').toLowerCase();
+
+    // === ABI definitions ===
+    const swapRouter02Abi = parseAbi([
       'struct ExactInputSingleParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }',
       'function exactInputSingle(ExactInputSingleParams params) external payable returns (uint256 amountOut)',
       'function multicall(bytes[] data) external payable returns (bytes[] results)',
-      
-      // Universal Router execute
-      'function execute(bytes commands, bytes[] inputs) external payable',
-      'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
     ]);
 
-    const WETH_ADDRESS = (process.env.WETH_ADDRESS || '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2').toLowerCase();
-    const USDC_ADDRESS = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'; // Sample USDC for classification
+    const universalRouterAbi = parseAbi([
+      'function execute(bytes commands, bytes[] inputs) external payable',
+      'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable',
+    ]);
 
+    const funcSig = calldata.substring(0, 10).toLowerCase();
+
+    // ── Universal Router execute() ────────────────────────────────────────────
+    // Selector: 0x3593564c (execute with deadline) or 0x24856bc3 (execute without)
+    const isUniversalRouter =
+      funcSig === '0x3593564c' || funcSig === '0x24856bc3';
+
+    if (isUniversalRouter) {
+      try {
+        const decoded = decodeFunctionData({ abi: universalRouterAbi, data: calldata });
+        const commands = decoded.args[0] as Hex;   // bytes: each byte = 1 command
+        const inputs   = decoded.args[1] as Hex[]; // bytes[]: params for each command
+
+        // Convert commands hex string to array of command bytes
+        // Skip '0x' prefix, then every 2 chars = 1 byte = 1 command
+        const commandBytes = (commands.replace('0x', '').match(/.{1,2}/g) || [])
+          .map(b => parseInt(b, 16));
+
+        for (let i = 0; i < commandBytes.length; i++) {
+          const cmd = commandBytes[i] & 0x3f; // mask flag bits
+          const input = inputs[i];
+          if (!input) continue;
+
+          // Command 0x00 = V3_SWAP_EXACT_IN
+          // Command 0x01 = V3_SWAP_EXACT_OUT
+          if (cmd === 0x00 || cmd === 0x01) {
+            await this.processUniversalRouterSwap(input, cmd, walletAddress, trackedWallet, timestamp);
+          }
+        }
+      } catch (err: any) {
+        console.warn(`[Tracker] Failed to decode Universal Router execute(): ${err.message}`);
+      }
+      return;
+    }
+
+    // ── SwapRouter02 exactInputSingle / multicall ─────────────────────────────
     try {
-      const decoded = decodeFunctionData({
-        abi: routerAbi,
-        data: calldata
-      });
+      const decoded = decodeFunctionData({ abi: swapRouter02Abi, data: calldata });
 
       if (decoded.functionName === 'exactInputSingle') {
-        const params = (decoded.args[0] as any);
-        const tokenIn = params.tokenIn.toLowerCase();
-        const tokenOut = params.tokenOut.toLowerCase();
-        const amountIn = BigInt(params.amountIn);
+        const params = decoded.args[0] as any;
+        this.emitSignal(
+          params.tokenIn.toLowerCase(),
+          params.tokenOut.toLowerCase(),
+          BigInt(params.amountIn),
+          walletAddress, trackedWallet, timestamp
+        );
 
-        this.emitSignal(tokenIn, tokenOut, amountIn, walletAddress, trackedWallet, timestamp);
       } else if (decoded.functionName === 'multicall') {
         const multicallData = decoded.args[0] as Hex[];
         for (const data of multicallData) {
           try {
-            const innerDecoded = decodeFunctionData({ abi: routerAbi, data });
-            if (innerDecoded.functionName === 'exactInputSingle') {
-              const params = (innerDecoded.args[0] as any);
-              const tokenIn = params.tokenIn.toLowerCase();
-              const tokenOut = params.tokenOut.toLowerCase();
-              const amountIn = BigInt(params.amountIn);
-              this.emitSignal(tokenIn, tokenOut, amountIn, walletAddress, trackedWallet, timestamp);
+            const inner = decodeFunctionData({ abi: swapRouter02Abi, data });
+            if (inner.functionName === 'exactInputSingle') {
+              const params = inner.args[0] as any;
+              this.emitSignal(
+                params.tokenIn.toLowerCase(),
+                params.tokenOut.toLowerCase(),
+                BigInt(params.amountIn),
+                walletAddress, trackedWallet, timestamp
+              );
             }
-          } catch (err) {
-            // multicall might contain non-exactInputSingle commands (like refundETH), ignore
-          }
+          } catch { /* non-swap inner calls like refundETH — ignore */ }
         }
-      } else if (decoded.functionName === 'execute') {
-        // Universal Router (V3 Swap commands) - requires more complex parsing of `commands` bytes
-        // For simplicity in v1, we focus on SwapRouter02 exactInputSingle wrapper decoding
-        // Full Universal Router parsing can be added as a separate module
-        console.log(`[Tracker] Universal Router 'execute' detected but not fully decoded in this version.`);
       }
     } catch (error: any) {
       if (error.name === 'AbiFunctionSignatureNotFoundError' || (error.message && error.message.includes('not found on ABI'))) {
         const sig = calldata.substring(0, 10);
-        console.log(`[Tracker] ℹ️ Ignored non-swap activity from ${trackedWallet.label || walletAddress} (Signature: ${sig})`);
+        console.log(`[Tracker] ℹ️ Ignored non-swap tx from ${trackedWallet.label || walletAddress} (sig: ${sig})`);
       } else {
-        console.warn(`[Tracker] Unrecognized SwapRouter calldata: ${error}`);
+        console.warn(`[Tracker] Unrecognized calldata: ${error.message}`);
       }
     }
   }
+
+  /**
+   * Decodes a single V3_SWAP_EXACT_IN or V3_SWAP_EXACT_OUT input from Universal Router.
+   * Layout (ABI-encoded tuple): (address recipient, uint256 amountIn, uint256 amountOutMin, bytes path, bool payerIsUser)
+   */
+  private async processUniversalRouterSwap(
+    input: Hex,
+    cmd: number,
+    walletAddress: string,
+    trackedWallet: any,
+    timestamp: number
+  ) {
+    try {
+      // Decode the ABI-encoded input tuple
+      // (address recipient, uint256 amountIn, uint256 amountOutMin, bytes path, bool payerIsUser)
+      const [, amountIn, , path] = decodeAbiParameters(
+        parseAbiParameters('address, uint256, uint256, bytes, bool'),
+        input
+      ) as [string, bigint, bigint, Hex, boolean];
+
+      // Decode path: each hop is 20 bytes (address) + 3 bytes (fee) + ... + 20 bytes (address)
+      // Minimum path: tokenIn (20) + fee (3) + tokenOut (20) = 43 bytes = 86 hex chars
+      const pathHex = (path as string).replace('0x', '');
+      if (pathHex.length < 86) return;
+
+      // For V3_SWAP_EXACT_IN: path is tokenIn -> fee -> tokenOut -> ...
+      // First token = bytes 0-19 (40 hex chars), last token = last 40 hex chars
+      const tokenIn  = ('0x' + pathHex.substring(0, 40)).toLowerCase();
+      const tokenOut = ('0x' + pathHex.substring(pathHex.length - 40)).toLowerCase();
+
+      console.log(`[Tracker] 🔍 Universal Router Swap decoded: ${tokenIn} → ${tokenOut} (amountIn: ${amountIn})`);
+      this.emitSignal(tokenIn, tokenOut, amountIn, walletAddress, trackedWallet, timestamp);
+
+    } catch (err: any) {
+      console.warn(`[Tracker] Could not decode UR swap input: ${err.message}`);
+    }
+  }
+
 
   private emitSignal(tokenIn: string, tokenOut: string, amountIn: bigint, walletAddress: string, trackedWallet: any, timestamp: number) {
     const WETH_ADDRESS = (process.env.WETH_ADDRESS || '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2').toLowerCase();

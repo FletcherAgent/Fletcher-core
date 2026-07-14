@@ -1,4 +1,4 @@
-import { encodeFunctionData, parseAbi, parseEther } from 'viem';
+import { encodeFunctionData, encodeAbiParameters, parseAbiParameters, parseAbi, parseEther, concat, toHex, pad } from 'viem';
 import { Bot, InlineKeyboard } from 'grammy';
 import { prisma } from '../core/db.js';
 import { publicClient, walletClient, account } from '../services/viem.js';
@@ -173,34 +173,26 @@ export class TraderAgent {
   }
 
   /**
-   * Constructs an unsigned transaction payload for the user/vault to sign.
-   * using Uniswap V3 SwapRouter exactInputSingle
+   * Constructs a BUY transaction payload using Universal Router v4 execute().
+   * Command 0x00 = V3_SWAP_EXACT_IN: WETH -> tokenOut
    */
   public async constructUnsignedSwapTx(tokenOut: string, amountIn: bigint): Promise<{ calldata: string, amountOutMinimum: bigint, toAddress: `0x${string}`, value: bigint } | null> {
-    console.log(`[Trader] Constructing exactInputSingle calldata for WETH -> ${tokenOut}...`);
-    
-    // Uniswap V3 exactInputSingle signature
-    const exactInputSingleAbi = parseAbi([
-      'struct ExactInputSingleParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 deadline; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }',
-      'function exactInputSingle(ExactInputSingleParams params) external payable returns (uint256 amountOut)'
-    ]);
+    console.log(`[Trader] Constructing Universal Router BUY calldata for WETH -> ${tokenOut}...`);
 
-    const quoterAbi = parseAbi([
-      'function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external returns (uint256 amountOut)'
-    ]);
-
-    const WETH_ADDRESS = process.env.WETH_ADDRESS; 
+    const WETH_ADDRESS = process.env.WETH_ADDRESS;
     const QUOTER_ADDRESS = process.env.QUOTER_ADDRESS;
+    const ROUTER_ADDRESS = process.env.ROUTER_ADDRESS;
+    const USER_WALLET = process.env.USER_WALLET_ADDRESS;
 
-    if (!WETH_ADDRESS || !QUOTER_ADDRESS || !process.env.ROUTER_ADDRESS) {
-      throw new Error("❌ CRITICAL: WETH_ADDRESS, QUOTER_ADDRESS, or ROUTER_ADDRESS missing in .env");
+    if (!WETH_ADDRESS || !QUOTER_ADDRESS || !ROUTER_ADDRESS || !USER_WALLET) {
+      throw new Error('❌ CRITICAL: WETH_ADDRESS, QUOTER_ADDRESS, ROUTER_ADDRESS, or USER_WALLET_ADDRESS missing in .env');
     }
-    const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 5); // 5 mins
 
-    let amountOutMinimum = 0n;
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 5); // 5 mins
+    const POOL_FEE = 3000; // 0.3% — default fee tier
 
     try {
-      // 1. Fetch Total Supply for NOXA 2% Cap limit
+      // 1. Fetch Total Supply for 2% Cap check
       const erc20Abi = parseAbi(['function totalSupply() view returns (uint256)']);
       let totalSupply = 0n;
       try {
@@ -209,141 +201,132 @@ export class TraderAgent {
           abi: erc20Abi,
           functionName: 'totalSupply'
         }) as bigint;
-      } catch (e) {
-        console.warn(`[Trader] Could not fetch totalSupply for ${tokenOut}`);
-      }
+      } catch { console.warn(`[Trader] Could not fetch totalSupply for ${tokenOut}`); }
 
-      // 2. Fetch live quote via QuoterV2 to get exact output
+      // 2. Fetch live quote from Quoter
+      const quoterAbi = parseAbi(['function quoteExactInputSingle(address,address,uint24,uint256,uint160) external returns (uint256)']);
       let expectedOut = 0n;
       try {
         expectedOut = await publicClient.readContract({
           address: QUOTER_ADDRESS as `0x${string}`,
           abi: quoterAbi,
           functionName: 'quoteExactInputSingle',
-          args: [WETH_ADDRESS as `0x${string}`, tokenOut as `0x${string}`, 3000, amountIn, 0n]
+          args: [WETH_ADDRESS as `0x${string}`, tokenOut as `0x${string}`, POOL_FEE, amountIn, 0n]
         }) as bigint;
-        console.log(`[Trader] QuoterV2 expected output: ${expectedOut}`);
-      } catch (e) {
-        console.warn(`[Trader] QuoterV2 simulation failed. Falling back to Sniper Mode.`);
-        expectedOut = 0n;
-      }
+        console.log(`[Trader] QuoterV2 BUY expected output: ${expectedOut}`);
+      } catch { console.warn(`[Trader] Quoter BUY failed. Falling back to sniper (amountOutMin = 0).`); }
 
-      // 3. NOXA 2% Cap Clamping
+      // 3. 2% Supply Cap
       if (totalSupply > 0n && expectedOut > 0n) {
         const twoPercent = (totalSupply * 2n) / 100n;
         if (expectedOut > twoPercent) {
-          console.warn(`[Trader] 🚨 2% CAP HIT! Expected ${expectedOut} > Max ${twoPercent}. Clamping size...`);
-          // Proportional scale down of amountIn
+          console.warn(`[Trader] 🚨 2% CAP HIT! Clamping size...`);
           amountIn = (amountIn * twoPercent) / expectedOut;
           expectedOut = twoPercent;
-          console.log(`[Trader] Adjusted amountIn: ${amountIn}`);
         }
       }
 
       // 4. Slippage Protection (1%)
-      if (expectedOut > 0n) {
-        amountOutMinimum = (expectedOut * 99n) / 100n;
-        console.log(`[Trader] 🛡️ Slippage protection set. Min out: ${amountOutMinimum}`);
-      } else {
-        // Fallback
-        amountOutMinimum = 0n;
-        console.log(`[Trader] 🎯 Sniper fallback: amountOutMinimum = 0`);
-      }
+      const amountOutMinimum = expectedOut > 0n ? (expectedOut * 99n) / 100n : 0n;
+      console.log(`[Trader] 🛡️ BUY amountOutMinimum: ${amountOutMinimum}`);
 
-      // 5. Encode actual tx
+      // 5. Encode Universal Router execute() payload
+      // Path encoding for V3: tokenIn (20 bytes) + fee (3 bytes) + tokenOut (20 bytes)
+      const feeHex = POOL_FEE.toString(16).padStart(6, '0'); // 3 bytes = 6 hex chars
+      const path = `0x${WETH_ADDRESS.replace('0x', '')}${feeHex}${tokenOut.replace('0x', '')}` as `0x${string}`;
+
+      // Encode the swap input tuple: (address recipient, uint256 amountIn, uint256 amountOutMin, bytes path, bool payerIsUser)
+      const swapInput = encodeAbiParameters(
+        parseAbiParameters('address, uint256, uint256, bytes, bool'),
+        [USER_WALLET as `0x${string}`, amountIn, amountOutMinimum, path, false]
+      );
+
+      // commands: 0x00 = V3_SWAP_EXACT_IN
+      const commands = '0x00' as `0x${string}`;
+
+      const universalRouterAbi = parseAbi([
+        'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
+      ]);
+
       const calldata = encodeFunctionData({
-        abi: exactInputSingleAbi,
-        functionName: 'exactInputSingle',
-        args: [{
-          tokenIn: WETH_ADDRESS as `0x${string}`,
-          tokenOut: tokenOut as `0x${string}`,
-          fee: 3000, // standard 0.3% pool fee, should be dynamic
-          recipient: (process.env.USER_WALLET_ADDRESS || '0x0000000000000000000000000000000000000000') as `0x${string}`,
-          deadline,
-          amountIn: amountIn,
-          amountOutMinimum,
-          sqrtPriceLimitX96: 0n
-        }]
+        abi: universalRouterAbi,
+        functionName: 'execute',
+        args: [commands, [swapInput], deadline]
       });
 
-      console.log(`[Trader] Unsigned BUY Calldata generated: ${calldata}`);
-      return { calldata, amountOutMinimum, toAddress: process.env.ROUTER_ADDRESS! as `0x${string}`, value: amountIn };
+      console.log(`[Trader] ✅ BUY Calldata (Universal Router): ${calldata.substring(0, 66)}...`);
+      return { calldata, amountOutMinimum, toAddress: ROUTER_ADDRESS as `0x${string}`, value: amountIn };
 
     } catch (error) {
-      console.error("[Trader] Failed to build calldata or fetch quote", error);
+      console.error('[Trader] Failed to build BUY calldata:', error);
       return null;
     }
   }
 
   /**
-   * Constructs an unsigned transaction payload to sell the token back to WETH.
+   * Constructs a SELL transaction payload using Universal Router v4 execute().
+   * Command 0x00 = V3_SWAP_EXACT_IN: tokenIn -> WETH
    */
   public async constructUnsignedSellTx(tokenIn: string, amountIn: bigint): Promise<{ calldata: string, amountOutMinimum: bigint, toAddress: `0x${string}` } | null> {
-    console.log(`[Trader] Constructing exactInputSingle calldata for ${tokenIn} -> WETH...`);
-    
-    const exactInputSingleAbi = parseAbi([
-      'struct ExactInputSingleParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 deadline; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }',
-      'function exactInputSingle(ExactInputSingleParams params) external payable returns (uint256 amountOut)'
-    ]);
+    console.log(`[Trader] Constructing Universal Router SELL calldata for ${tokenIn} -> WETH...`);
 
-    const quoterAbi = parseAbi([
-      'function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external returns (uint256 amountOut)'
-    ]);
-
-    const WETH_ADDRESS = process.env.WETH_ADDRESS; 
+    const WETH_ADDRESS = process.env.WETH_ADDRESS;
     const QUOTER_ADDRESS = process.env.QUOTER_ADDRESS;
+    const ROUTER_ADDRESS = process.env.ROUTER_ADDRESS;
+    const USER_WALLET = process.env.USER_WALLET_ADDRESS;
 
-    if (!WETH_ADDRESS || !QUOTER_ADDRESS || !process.env.ROUTER_ADDRESS) {
-      throw new Error("❌ CRITICAL: WETH_ADDRESS, QUOTER_ADDRESS, or ROUTER_ADDRESS missing in .env");
+    if (!WETH_ADDRESS || !QUOTER_ADDRESS || !ROUTER_ADDRESS || !USER_WALLET) {
+      throw new Error('❌ CRITICAL: Missing env variables for SELL tx construction.');
     }
-    const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 5); // 5 mins
 
-    let amountOutMinimum = 0n;
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 5);
+    const POOL_FEE = 3000;
 
     try {
-      // Fetch live quote via QuoterV2 to get exact output
+      // 1. Fetch live quote from Quoter
+      const quoterAbi = parseAbi(['function quoteExactInputSingle(address,address,uint24,uint256,uint160) external returns (uint256)']);
       let expectedOut = 0n;
       try {
         expectedOut = await publicClient.readContract({
           address: QUOTER_ADDRESS as `0x${string}`,
           abi: quoterAbi,
           functionName: 'quoteExactInputSingle',
-          args: [tokenIn as `0x${string}`, WETH_ADDRESS as `0x${string}`, 3000, amountIn, 0n]
+          args: [tokenIn as `0x${string}`, WETH_ADDRESS as `0x${string}`, POOL_FEE, amountIn, 0n]
         }) as bigint;
-        console.log(`[Trader] QuoterV2 expected output (SELL): ${expectedOut}`);
-      } catch (e) {
-        console.warn(`[Trader] QuoterV2 SELL simulation failed.`);
-        expectedOut = 0n;
-      }
+        console.log(`[Trader] QuoterV2 SELL expected output: ${expectedOut}`);
+      } catch { console.warn(`[Trader] Quoter SELL failed. Falling back to sniper.`); }
 
-      if (expectedOut > 0n) {
-        amountOutMinimum = (expectedOut * 99n) / 100n; // 1% slippage for sells too
-        console.log(`[Trader] 🛡️ SELL Slippage protection set. Min out: ${amountOutMinimum}`);
-      } else {
-        amountOutMinimum = 0n;
-        console.log(`[Trader] 🎯 Pure Sniper SELL fallback: amountOutMinimum = 0`);
-      }
+      // 2. Slippage Protection (1%)
+      const amountOutMinimum = expectedOut > 0n ? (expectedOut * 99n) / 100n : 0n;
+      console.log(`[Trader] 🛡️ SELL amountOutMinimum: ${amountOutMinimum}`);
+
+      // 3. Encode path: tokenIn + fee + WETH
+      const feeHex = POOL_FEE.toString(16).padStart(6, '0');
+      const path = `0x${tokenIn.replace('0x', '')}${feeHex}${WETH_ADDRESS.replace('0x', '')}` as `0x${string}`;
+
+      // 4. Encode swap input tuple
+      const swapInput = encodeAbiParameters(
+        parseAbiParameters('address, uint256, uint256, bytes, bool'),
+        [USER_WALLET as `0x${string}`, amountIn, amountOutMinimum, path, false]
+      );
+
+      const commands = '0x00' as `0x${string}`;
+
+      const universalRouterAbi = parseAbi([
+        'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
+      ]);
 
       const calldata = encodeFunctionData({
-        abi: exactInputSingleAbi,
-        functionName: 'exactInputSingle',
-        args: [{
-          tokenIn: tokenIn as `0x${string}`,
-          tokenOut: WETH_ADDRESS as `0x${string}`,
-          fee: 3000,
-          recipient: (process.env.USER_WALLET_ADDRESS || '0x0000000000000000000000000000000000000000') as `0x${string}`,
-          deadline,
-          amountIn: amountIn,
-          amountOutMinimum,
-          sqrtPriceLimitX96: 0n
-        }]
+        abi: universalRouterAbi,
+        functionName: 'execute',
+        args: [commands, [swapInput], deadline]
       });
 
-      console.log(`[Trader] Unsigned SELL Calldata generated: ${calldata}`);
-      return { calldata, amountOutMinimum, toAddress: process.env.ROUTER_ADDRESS! as `0x${string}` };
+      console.log(`[Trader] ✅ SELL Calldata (Universal Router): ${calldata.substring(0, 66)}...`);
+      return { calldata, amountOutMinimum, toAddress: ROUTER_ADDRESS as `0x${string}` };
 
     } catch (error) {
-      console.error("[Trader] Failed to build sell calldata or fetch quote", error);
+      console.error('[Trader] Failed to build SELL calldata:', error);
       return null;
     }
   }
