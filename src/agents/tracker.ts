@@ -84,6 +84,21 @@ export class TrackerAgent {
     const fromAddress = activity.fromAddress.toLowerCase();
     const toAddress = activity.toAddress?.toLowerCase(); // Target contract
 
+    // ── Router Whitelist Filter ───────────────────────────────────────────────
+    // Only process transactions sent to a KNOWN swap router.
+    // This prevents NFT purchases (Seaport), token approvals, and other
+    // non-swap calls from reaching the decoder.
+    const KNOWN_ROUTERS = new Set([
+      (process.env.ROUTER_ADDRESS || '').toLowerCase(),          // Universal Router v4
+      '0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45',              // SwapRouter02 (legacy fallback)
+    ].filter(Boolean));
+
+    if (toAddress && !KNOWN_ROUTERS.has(toAddress)) {
+      // Silently skip — we don't care about non-swap txns
+      return;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     // Check if the fromAddress is in our registry
     const trackedWallet = await prisma.trackedWallet.findUnique({
       where: { address: fromAddress }
@@ -93,7 +108,7 @@ export class TrackerAgent {
       return; // Not tracked or not active
     }
 
-    console.log(`[Tracker] 🚨 Activity detected from tracked wallet: ${trackedWallet.label || fromAddress}`);
+    console.log(`[Tracker] 🚨 Swap activity detected from: ${trackedWallet.label || fromAddress} → ${toAddress}`);
 
     const calldata = activity.rawContract?.rawValue as Hex;
     if (!calldata || calldata.length < 10) return;
@@ -104,7 +119,7 @@ export class TrackerAgent {
     } catch (e: any) {
       if (e.name === 'AbiFunctionSignatureNotFoundError' || (e.message && e.message.includes('not found on ABI'))) {
         const sig = calldata.substring(0, 10);
-        console.log(`[Tracker] ℹ️ Ignored non-swap activity from ${trackedWallet.label || fromAddress} (Signature: ${sig})`);
+        console.log(`[Tracker] ℹ️ Ignored non-swap calldata from ${trackedWallet.label || fromAddress} (sig: ${sig})`);
       } else {
         console.error(`[Tracker] Failed to decode calldata for wallet ${fromAddress}`, e);
       }
