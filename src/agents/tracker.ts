@@ -31,14 +31,16 @@ export class TrackerAgent {
 
       if (req.method === 'GET' && req.url === '/api/dashboard') {
         try {
-          const [wallets, signals, positions, logs] = await Promise.all([
+          const [wallets, signals, positions, logs, totalSignals, openPositionsCount] = await Promise.all([
             prisma.trackedWallet.findMany({ orderBy: { createdAt: 'desc' } }),
             prisma.signal.findMany({ orderBy: { createdAt: 'desc' }, take: 20 }),
             prisma.position.findMany({ orderBy: { createdAt: 'desc' }, take: 20 }),
             prisma.log.findMany({ orderBy: { createdAt: 'desc' }, take: 50 }),
+            prisma.signal.count(),
+            prisma.position.count({ where: { status: 'OPEN' } }),
           ]);
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ wallets, signals, positions, logs }));
+          res.end(JSON.stringify({ wallets, signals, positions, logs, totalSignals, openPositionsCount }));
         } catch (e) {
           console.error(`[Tracker] API error:`, e);
           res.writeHead(500);
