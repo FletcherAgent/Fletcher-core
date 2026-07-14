@@ -1,4 +1,6 @@
 import { encodeFunctionData, encodeAbiParameters, parseAbiParameters, parseAbi, parseEther, concat, toHex, pad } from 'viem';
+import { detectBestFee } from '../services/poolFeeDetector.js';
+import { dbLogger } from '../services/logger.js';
 import { Bot, InlineKeyboard } from 'grammy';
 import { prisma } from '../core/db.js';
 import { publicClient, walletClient, account } from '../services/viem.js';
@@ -69,6 +71,7 @@ export class TraderAgent {
 
         if (receipt.status === 'success') {
           console.log(`[Trader] 🎯 BUY TX Confirmed in block ${receipt.blockNumber}`);
+          dbLogger.info(`BUY TX Confirmed`, { txHash, token: tokenAddress, block: receipt.blockNumber.toString(), sizeEth: (Number(sizeInWeth) / 1e18).toFixed(6) });
           this.emitToSigningBoundary(tokenAddress, txHash, 'BUY EXECUTED');
 
           const estimatedEntryPrice = Number(sizeInWeth) / Number(amountOutMinimum);
@@ -78,6 +81,7 @@ export class TraderAgent {
         }
       } catch (error) {
         console.error(`[Trader] ❌ BUY TX Failed:`, error);
+        dbLogger.error(`BUY TX Failed`, { token: tokenAddress, error: String(error) });
         this.emitToSigningBoundary(tokenAddress, "FAILED", 'BUY REJECTED');
       }
     }
@@ -189,7 +193,6 @@ export class TraderAgent {
     }
 
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 5); // 5 mins
-    const POOL_FEE = 3000; // 0.3% — default fee tier
 
     try {
       // 1. Fetch Total Supply for 2% Cap check
@@ -203,18 +206,11 @@ export class TraderAgent {
         }) as bigint;
       } catch { console.warn(`[Trader] Could not fetch totalSupply for ${tokenOut}`); }
 
-      // 2. Fetch live quote from Quoter
-      const quoterAbi = parseAbi(['function quoteExactInputSingle(address,address,uint24,uint256,uint160) external returns (uint256)']);
-      let expectedOut = 0n;
-      try {
-        expectedOut = await publicClient.readContract({
-          address: QUOTER_ADDRESS as `0x${string}`,
-          abi: quoterAbi,
-          functionName: 'quoteExactInputSingle',
-          args: [WETH_ADDRESS as `0x${string}`, tokenOut as `0x${string}`, POOL_FEE, amountIn, 0n]
-        }) as bigint;
-        console.log(`[Trader] QuoterV2 BUY expected output: ${expectedOut}`);
-      } catch { console.warn(`[Trader] Quoter BUY failed. Falling back to sniper (amountOutMin = 0).`); }
+      // 2. Detect best pool fee tier dynamically
+      const { fee: POOL_FEE, expectedOut: rawExpectedOut } = await detectBestFee(
+        WETH_ADDRESS, tokenOut, amountIn
+      );
+      let expectedOut = rawExpectedOut;
 
       // 3. 2% Supply Cap
       if (totalSupply > 0n && expectedOut > 0n) {
@@ -280,21 +276,12 @@ export class TraderAgent {
     }
 
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 5);
-    const POOL_FEE = 3000;
 
     try {
-      // 1. Fetch live quote from Quoter
-      const quoterAbi = parseAbi(['function quoteExactInputSingle(address,address,uint24,uint256,uint160) external returns (uint256)']);
-      let expectedOut = 0n;
-      try {
-        expectedOut = await publicClient.readContract({
-          address: QUOTER_ADDRESS as `0x${string}`,
-          abi: quoterAbi,
-          functionName: 'quoteExactInputSingle',
-          args: [tokenIn as `0x${string}`, WETH_ADDRESS as `0x${string}`, POOL_FEE, amountIn, 0n]
-        }) as bigint;
-        console.log(`[Trader] QuoterV2 SELL expected output: ${expectedOut}`);
-      } catch { console.warn(`[Trader] Quoter SELL failed. Falling back to sniper.`); }
+      // 1. Detect best pool fee tier dynamically
+      const { fee: POOL_FEE, expectedOut } = await detectBestFee(
+        tokenIn, WETH_ADDRESS, amountIn
+      );
 
       // 2. Slippage Protection (1%)
       const amountOutMinimum = expectedOut > 0n ? (expectedOut * 99n) / 100n : 0n;
@@ -394,7 +381,9 @@ export class TraderAgent {
 
             if (newConsecutiveLosses >= 3) {
               newStatus = 'PAUSED';
-              console.error(`[Trader] 🚨 EMERGENCY: Wallet ${wallet.address} hit 3 consecutive losses! Status set to PAUSED.`);
+              const emergencyMsg = `EMERGENCY: Wallet ${wallet.address} hit 3 consecutive losses. Status set to PAUSED.`;
+              console.error(`[Trader] 🚨 ` + emergencyMsg);
+              dbLogger.error(emergencyMsg, { wallet: wallet.address, consecutiveLosses: newConsecutiveLosses });
             }
 
             await prisma.trackedWallet.update({

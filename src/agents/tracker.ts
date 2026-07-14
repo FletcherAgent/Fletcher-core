@@ -1,6 +1,7 @@
 import { createServer, IncomingMessage, ServerResponse } from 'http';
 import { parseAbi, decodeFunctionData, decodeAbiParameters, parseAbiParameters, Hex } from 'viem';
 import { prisma } from '../core/db.js';
+import { dbLogger } from '../services/logger.js';
 
 export class TrackerAgent {
   public onCopyBuySignal?: (wallet: string, token: string, amount: bigint, tier: number, bundleId: string | null, timestamp: number) => void;
@@ -29,18 +30,20 @@ export class TrackerAgent {
 
       if (req.method === 'GET' && req.url === '/api/dashboard') {
         try {
-          const [wallets, signals, positions] = await Promise.all([
+          const [wallets, signals, positions, logs] = await Promise.all([
             prisma.trackedWallet.findMany({ orderBy: { createdAt: 'desc' } }),
             prisma.signal.findMany({ orderBy: { createdAt: 'desc' }, take: 20 }),
             prisma.position.findMany({ orderBy: { createdAt: 'desc' }, take: 20 }),
+            prisma.log.findMany({ orderBy: { createdAt: 'desc' }, take: 50 }),
           ]);
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ wallets, signals, positions }));
+          res.end(JSON.stringify({ wallets, signals, positions, logs }));
         } catch (e) {
           console.error(`[Tracker] API error:`, e);
           res.writeHead(500);
           res.end();
         }
+
       } else if (req.method === 'POST' && req.url === '/webhook/alchemy') {
         let body = '';
         req.on('data', chunk => {
@@ -263,6 +266,7 @@ export class TrackerAgent {
     if (tokenIn === WETH_ADDRESS) {
       // BUY tokenOut
       console.log(`[Tracker] 🛒 BUY Signal: ${walletAddress} bought ${tokenOut}`);
+      dbLogger.info(`BUY Signal detected`, { wallet: trackedWallet.label || walletAddress, token: tokenOut, amountWei: amountIn.toString(), tier: trackedWallet.tier });
       
       // Track buy time for anti-farm
       this.lastBuyTime.set(`${walletAddress}-${tokenOut}`, timestamp);
@@ -273,11 +277,14 @@ export class TrackerAgent {
     } else if (tokenOut === WETH_ADDRESS) {
       // SELL tokenIn
       console.log(`[Tracker] 💥 SELL Signal: ${walletAddress} sold ${tokenIn}`);
+      dbLogger.info(`SELL Signal detected`, { wallet: trackedWallet.label || walletAddress, token: tokenIn, amountWei: amountIn.toString(), tier: trackedWallet.tier });
       
       // Anti-farm check
       const buyTime = this.lastBuyTime.get(`${walletAddress}-${tokenIn}`);
       if (buyTime && (timestamp - buyTime < 120000)) {
-        console.warn(`[Tracker] 🚨 ANTI-FARM TRIGGERED: ${walletAddress} bought and sold ${tokenIn} within 2 mins! Demoting to Tier 3.`);
+        const msg = `Anti-farm triggered: ${trackedWallet.label || walletAddress} flipped ${tokenIn} in < 2 min. Demoting to Tier 3.`;
+        console.warn(`[Tracker] 🚨 ` + msg);
+        dbLogger.warn(msg, { wallet: walletAddress, token: tokenIn });
         prisma.trackedWallet.update({
           where: { address: walletAddress },
           data: { tier: 3 }

@@ -1,5 +1,6 @@
 import { publicClient } from '../services/viem.js';
 import { prisma } from '../core/db.js';
+import { dbLogger } from '../services/logger.js';
 
 export class RiskWardenAgent {
   private activeTradesCount: number = 0;
@@ -17,7 +18,9 @@ export class RiskWardenAgent {
 
     // 1. Check Portfolio Heat (Circuit Breaker)
     if (this.activeTradesCount >= this.MAX_HEAT) {
-      console.warn(`[Risk Warden] 🚨 REJECTED: Portfolio Heat Cap Reached (${this.activeTradesCount}/${this.MAX_HEAT}).`);
+      const msg = `Signal rejected: Portfolio Heat Cap Reached (${this.activeTradesCount}/${this.MAX_HEAT})`;
+      console.warn(`[Risk Warden] 🚨 ` + msg);
+      dbLogger.warn(msg, { token: tokenAddress, reason: 'PORTFOLIO_HEAT_CAP_EXCEEDED' });
       return { approved: false, recommendedSize: 0n, reason: 'PORTFOLIO_HEAT_CAP_EXCEEDED' };
     }
 
@@ -33,11 +36,14 @@ export class RiskWardenAgent {
       currentBalance = await publicClient.getBalance({ address: walletAddress as `0x${string}` });
     } catch (e) {
       console.error(`[Risk Warden] Failed to fetch balance for ${walletAddress}`, e);
+      dbLogger.error(`Risk: RPC error fetching wallet balance`, { wallet: walletAddress, error: String(e) });
       return { approved: false, recommendedSize: 0n, reason: 'RPC_ERROR_FETCHING_BALANCE' };
     }
 
     if (currentBalance === 0n) {
-      console.warn(`[Risk Warden] 🚨 REJECTED: Wallet balance is zero.`);
+      const msg = `Signal rejected: Wallet balance is zero`;
+      console.warn(`[Risk Warden] 🚨 ` + msg);
+      dbLogger.warn(msg, { token: tokenAddress, wallet: walletAddress });
       return { approved: false, recommendedSize: 0n, reason: 'INSUFFICIENT_FUNDS' };
     }
 
