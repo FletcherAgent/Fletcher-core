@@ -5,8 +5,8 @@ import { dbLogger } from '../services/logger.js';
 import { WalletProfiler } from '../services/walletProfiler.js';
 
 export class TrackerAgent {
-  public onCopyBuySignal?: (wallet: string, token: string, amount: bigint, tier: number, bundleId: string | null, timestamp: number) => void;
-  public onCopySellSignal?: (wallet: string, token: string, amount: bigint, tier: number, bundleId: string | null, timestamp: number) => void;
+  public onCopyBuySignal?: (wallet: string, token: string, amount: bigint, tier: number, bundleId: string | null, timestamp: number, txHash: string) => void;
+  public onCopySellSignal?: (wallet: string, token: string, amount: bigint, tier: number, bundleId: string | null, timestamp: number, txHash: string) => void;
 
   private server: any;
   private lastBuyTime: Map<string, number> = new Map(); // For anti-farm: wallet-token -> timestamp
@@ -544,7 +544,7 @@ export class TrackerAgent {
       this.lastBuyTime.set(`${walletAddress}-${tokenOut}`, timestamp);
 
       if (this.onCopyBuySignal) {
-        this.onCopyBuySignal(walletAddress, tokenOut, amountIn, trackedWallet.tier, trackedWallet.bundleId, timestamp);
+        this.onCopyBuySignal(walletAddress, tokenOut, amountIn, trackedWallet.tier, trackedWallet.bundleId, timestamp, txHash);
       }
     } else if (tokenOut === WETH_ADDRESS) {
       // SELL tokenIn
@@ -584,7 +584,7 @@ export class TrackerAgent {
       }
 
       if (this.onCopySellSignal) {
-        this.onCopySellSignal(walletAddress, tokenIn, amountIn, trackedWallet.tier, trackedWallet.bundleId, timestamp);
+        this.onCopySellSignal(walletAddress, tokenIn, amountIn, trackedWallet.tier, trackedWallet.bundleId, timestamp, txHash);
       }
     } else {
       console.log(`[Tracker] 🚫 Ignored SWAP (No WETH involved): ${walletAddress} swapped ${tokenIn} for ${tokenOut} | TX: https://robinhoodchain.blockscout.com/tx/${txHash}`);

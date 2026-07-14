@@ -89,9 +89,18 @@ export class Orchestrator {
 
     // Tracker Events
     // Tracker Events
-    this.tracker.onCopyBuySignal = async (wallet, token, amount, tier, bundleId, timestamp) => {
+    this.tracker.onCopyBuySignal = async (wallet, token, amount, tier, bundleId, timestamp, txHash) => {
       console.log(`[Orchestrator] 🎯 CopyBuy Signal received for ${token} from ${wallet} (Tier: ${tier})`);
       
+      const chatId = process.env.TELEGRAM_CHAT_ID;
+      if (chatId) {
+        this.bot.api.sendMessage(
+          chatId,
+          `🛒 <b>BUY SIGNAL DETECTED</b>\n\n👤 <b>Wallet:</b> <code>${wallet}</code> (Tier ${tier})\n🪙 <b>Token:</b> <code>${token}</code>\n💰 <b>Amount:</b> ${Number(amount) / 1e18} ETH\n🔗 <a href="https://robinhoodchain.blockscout.com/tx/${txHash}">View Transaction</a>`,
+          { parse_mode: 'HTML' }
+        ).catch(console.error);
+      }
+
       // 1. Freshness Filter (max 60 seconds)
       const ageMs = Date.now() - timestamp;
       if (ageMs > 60000) {
@@ -132,7 +141,6 @@ export class Orchestrator {
       // For now, pass to risk warden with tier sizing
       const riskEvaluation = await this.riskWarden.evaluateSignal(token);
       
-      const chatId = process.env.TELEGRAM_CHAT_ID;
       
       if (riskEvaluation.approved) {
         let sizeModifier = 1n; // Tier 1
@@ -143,8 +151,8 @@ export class Orchestrator {
         if (chatId) {
           this.bot.api.sendMessage(
             chatId,
-            `🎯 *COPYBUY SIGNAL*\n\nWallet: \`${wallet}\` (Tier ${tier})\nToken: \`${token}\`\n\n✅ Risk Warden Approved.\nForwarding to Trader with size: \`${Number(finalSize) / 1e18} WETH\``,
-            { parse_mode: 'Markdown' }
+            `✅ <b>Risk Warden Approved</b>\nForwarding BUY to Trader with size: <code>${Number(finalSize) / 1e18} WETH</code>`,
+            { parse_mode: 'HTML' }
           ).catch(console.error);
         }
 
@@ -161,22 +169,22 @@ export class Orchestrator {
         if (chatId) {
           this.bot.api.sendMessage(
             chatId,
-            `🎯 *COPYBUY SIGNAL*\n\nWallet: \`${wallet}\` (Tier ${tier})\nToken: \`${token}\`\n\n🚨 *RISK WARDEN VETO*\nReason: ${riskEvaluation.reason}`,
-            { parse_mode: 'Markdown' }
+            `🚨 <b>RISK WARDEN VETO</b>\nReason: ${riskEvaluation.reason}`,
+            { parse_mode: 'HTML' }
           ).catch(console.error);
         }
       }
     };
 
-    this.tracker.onCopySellSignal = async (wallet, token, amount, tier, bundleId, timestamp) => {
+    this.tracker.onCopySellSignal = async (wallet, token, amount, tier, bundleId, timestamp, txHash) => {
       console.log(`[Orchestrator] 💥 CopySell Signal received for ${token} from ${wallet}`);
       
       const chatId = process.env.TELEGRAM_CHAT_ID;
       if (chatId) {
         this.bot.api.sendMessage(
           chatId,
-          `💥 *COPYSELL SIGNAL*\n\nWallet: \`${wallet}\` (Tier ${tier})\nToken: \`${token}\`\n\nProcessing exit protocol...`,
-          { parse_mode: 'Markdown' }
+          `💥 <b>SELL SIGNAL DETECTED</b>\n\n👤 <b>Wallet:</b> <code>${wallet}</code> (Tier ${tier})\n🪙 <b>Token:</b> <code>${token}</code>\n🔗 <a href="https://robinhoodchain.blockscout.com/tx/${txHash}">View Transaction</a>\n\nProcessing exit protocol...`,
+          { parse_mode: 'HTML' }
         ).catch(console.error);
       }
       
