@@ -112,7 +112,7 @@ export class TrackerAgent {
       return; // Not tracked or not active
     }
 
-    console.log(`[Tracker] 🚨 Swap activity detected from: ${trackedWallet.label || fromAddress} → ${toAddress} [TX: ${activity.hash}]`);
+    console.log(`[Tracker] 🚨 Swap activity detected from: ${trackedWallet.label || fromAddress} → ${toAddress} | TX: https://robinhoodchain.blockscout.com/tx/${activity.hash}`);
     dbLogger.info(`Swap activity detected from: ${trackedWallet.label || fromAddress} → ${toAddress}`, { txHash: activity.hash, wallet: trackedWallet.label || fromAddress });
 
     const calldata = activity.rawContract?.rawValue as Hex;
@@ -187,11 +187,11 @@ export class TrackerAgent {
           }
           else {
             // e.g. 0x0b (WRAP_ETH), 0x0c (UNWRAP_WETH), 0x04 (SWEEP), etc.
-            console.log(`[Tracker] ℹ️ UR Ignored Command: 0x${cmd.toString(16)} [TX: ${txHash}]`);
+            console.log(`[Tracker] ℹ️ UR Ignored Command: 0x${cmd.toString(16)} | TX: https://robinhoodchain.blockscout.com/tx/${txHash}`);
           }
         }
       } catch (err: any) {
-        console.warn(`[Tracker] Failed to decode Universal Router execute() [TX: ${txHash}]: ${err.message}`);
+        console.warn(`[Tracker] Failed to decode Universal Router execute() | TX: https://robinhoodchain.blockscout.com/tx/${txHash}: ${err.message}`);
       }
       return;
     }
@@ -380,7 +380,7 @@ export class TrackerAgent {
         }
       }
     } catch (err: any) {
-      console.warn(`[Tracker] Could not decode UR V4 swap input [TX: ${txHash}]: ${err.message}`);
+      console.warn(`[Tracker] Could not decode UR V4 swap input | TX: https://robinhoodchain.blockscout.com/tx/${txHash}: ${err.message}`);
     }
   }
 
@@ -390,7 +390,7 @@ export class TrackerAgent {
     // Classification
     if (tokenIn === WETH_ADDRESS) {
       // BUY tokenOut
-      console.log(`[Tracker] 🛒 BUY Signal: ${walletAddress} bought ${tokenOut}`);
+      console.log(`[Tracker] 🛒 BUY Signal: ${walletAddress} bought ${tokenOut} | TX: https://robinhoodchain.blockscout.com/tx/${txHash}`);
       dbLogger.info(`BUY Signal detected`, { wallet: trackedWallet.label || walletAddress, token: tokenOut, amountWei: amountIn.toString(), tier: trackedWallet.tier, txHash });
       
       // Async trigger for on-chain profiling
@@ -404,7 +404,7 @@ export class TrackerAgent {
       }
     } else if (tokenOut === WETH_ADDRESS) {
       // SELL tokenIn
-      console.log(`[Tracker] 💥 SELL Signal: ${walletAddress} sold ${tokenIn}`);
+      console.log(`[Tracker] 💥 SELL Signal: ${walletAddress} sold ${tokenIn} | TX: https://robinhoodchain.blockscout.com/tx/${txHash}`);
       dbLogger.info(`SELL Signal detected`, { wallet: trackedWallet.label || walletAddress, token: tokenIn, amountWei: amountIn.toString(), tier: trackedWallet.tier, txHash });
       
       // Async trigger for on-chain profiling
