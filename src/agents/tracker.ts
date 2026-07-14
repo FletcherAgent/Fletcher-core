@@ -113,6 +113,7 @@ export class TrackerAgent {
     }
 
     console.log(`[Tracker] 🚨 Swap activity detected from: ${trackedWallet.label || fromAddress} → ${toAddress}`);
+    dbLogger.info(`Swap activity detected from: ${trackedWallet.label || fromAddress} → ${toAddress}`, { txHash: activity.hash, wallet: trackedWallet.label || fromAddress });
 
     const calldata = activity.rawContract?.rawValue as Hex;
     if (!calldata || calldata.length < 10) return;
@@ -306,7 +307,7 @@ export class TrackerAgent {
     if (tokenIn === WETH_ADDRESS) {
       // BUY tokenOut
       console.log(`[Tracker] 🛒 BUY Signal: ${walletAddress} bought ${tokenOut}`);
-      dbLogger.info(`BUY Signal detected`, { wallet: trackedWallet.label || walletAddress, token: tokenOut, amountWei: amountIn.toString(), tier: trackedWallet.tier });
+      dbLogger.info(`BUY Signal detected`, { wallet: trackedWallet.label || walletAddress, token: tokenOut, amountWei: amountIn.toString(), tier: trackedWallet.tier, txHash });
       
       // Async trigger for on-chain profiling
       WalletProfiler.processBuy(walletAddress, tokenOut, txHash);
@@ -320,7 +321,7 @@ export class TrackerAgent {
     } else if (tokenOut === WETH_ADDRESS) {
       // SELL tokenIn
       console.log(`[Tracker] 💥 SELL Signal: ${walletAddress} sold ${tokenIn}`);
-      dbLogger.info(`SELL Signal detected`, { wallet: trackedWallet.label || walletAddress, token: tokenIn, amountWei: amountIn.toString(), tier: trackedWallet.tier });
+      dbLogger.info(`SELL Signal detected`, { wallet: trackedWallet.label || walletAddress, token: tokenIn, amountWei: amountIn.toString(), tier: trackedWallet.tier, txHash });
       
       // Async trigger for on-chain profiling
       WalletProfiler.processSell(walletAddress, tokenIn, txHash);

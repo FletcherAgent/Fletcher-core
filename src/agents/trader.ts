@@ -162,6 +162,7 @@ export class TraderAgent {
 
         if (receipt.status === 'success') {
           console.log(`[Trader] 🎯 SELL TX Confirmed in block ${receipt.blockNumber}`);
+          dbLogger.info(`SELL TX Confirmed`, { txHash, token: tokenAddress, block: receipt.blockNumber.toString(), reason });
           this.emitToSigningBoundary(tokenAddress, txHash, `SELL EXECUTED [${reason}]`);
 
           const estimatedExitPrice = Number(amountOutMinimum) / Number(amountInToken);
@@ -171,6 +172,7 @@ export class TraderAgent {
         }
       } catch (error) {
         console.error(`[Trader] ❌ SELL TX Failed:`, error);
+        dbLogger.error(`SELL TX Failed`, { token: tokenAddress, reason, error: String(error) });
         this.emitToSigningBoundary(tokenAddress, "FAILED", `SELL REJECTED [${reason}]`);
       }
     }
