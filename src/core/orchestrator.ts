@@ -18,6 +18,9 @@ export class Orchestrator {
   private tracker: TrackerAgent;
   private bot: Bot;
 
+  // Anti-spam cooldown per token (1 hour)
+  private tokenCooldowns: Map<string, number> = new Map();
+
   constructor(bot: Bot) {
     this.bot = bot;
     this.scout = new ScoutAgent(bot);
@@ -116,6 +119,15 @@ export class Orchestrator {
         return;
       }
 
+      // 1.5. Token Cooldown Filter (1 Hour)
+      const COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
+      const lastBuyTime = this.tokenCooldowns.get(token) || 0;
+      if (Date.now() - lastBuyTime < COOLDOWN_MS) {
+        const remainingMins = Math.ceil((COOLDOWN_MS - (Date.now() - lastBuyTime)) / 60000);
+        console.warn(`[Orchestrator] 🚫 Signal rejected: Token ${token} is on cooldown for another ${remainingMins} minutes.`);
+        return;
+      }
+
       // 2. Min Buy Size Filter (0.001 ETH)
       const minBuy = 1000000000000000n; // 0.001 ETH
       if (amount < minBuy) {
@@ -181,6 +193,10 @@ export class Orchestrator {
 
         const isPaperTrade = tier === 3;
         console.log(`[Orchestrator] Forwarding CopyBuy to Trader. Size: ${finalSize}... Paper Trade: ${isPaperTrade}`);
+        
+        // Update cooldown
+        this.tokenCooldowns.set(token, Date.now());
+
         this.trader.processSignal(token, finalSize, 'COPYTRADE', wallet, isPaperTrade);
         this.guardian.startMonitoring(token, finalSize);
       } else {
