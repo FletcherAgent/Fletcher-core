@@ -8,7 +8,7 @@ import { publicClient, walletClient, account } from '../services/viem.js';
 export class TraderAgent {
   private bot: Bot;
   public executionMode: 'AUTO' | 'CONFIRM' = 'AUTO';
-  private pendingTrades: Map<string, { calldata: string, value: bigint, toAddress: `0x${string}`, amountOutMinimum: bigint, tokenAddress: string, sizeInWeth: bigint, timeoutId: NodeJS.Timeout, source: string, copiedFrom?: string }> = new Map();
+  private pendingTrades: Map<string, { calldata: string, value: bigint, toAddress: `0x${string}`, expectedOut: bigint, amountOutMinimum: bigint, tokenAddress: string, sizeInWeth: bigint, timeoutId: NodeJS.Timeout, source: string, copiedFrom?: string }> = new Map();
 
   constructor(bot: Bot) {
     this.bot = bot;
@@ -35,7 +35,7 @@ export class TraderAgent {
     
     const calldataResult = await this.constructUnsignedSwapTx(tokenAddress, sizeInWeth);
     if (calldataResult) {
-      const { calldata, amountOutMinimum, toAddress, value } = calldataResult;
+      const { calldata, amountOutMinimum, expectedOut, toAddress, value } = calldataResult;
       
       try {
         if (this.executionMode === 'CONFIRM' && process.env.TELEGRAM_CHAT_ID) {
@@ -45,8 +45,8 @@ export class TraderAgent {
           }, 5 * 60 * 1000);
 
           this.pendingTrades.set(tradeId, { 
-            calldata: calldataResult.calldata, value: calldataResult.value, toAddress: calldataResult.toAddress, 
-            amountOutMinimum: calldataResult.amountOutMinimum, tokenAddress, sizeInWeth, timeoutId,
+            calldata, value, toAddress, 
+            amountOutMinimum, expectedOut, tokenAddress, sizeInWeth, timeoutId,
             source, copiedFrom
           });
 
@@ -62,7 +62,7 @@ export class TraderAgent {
           console.log(`[Trader] 📄 PAPER TRADE: Simulating BUY for ${tokenAddress}...`);
           dbLogger.info(`PAPER BUY Simulated`, { token: tokenAddress, sizeEth: (Number(sizeInWeth) / 1e18).toFixed(6) });
           this.emitToSigningBoundary(tokenAddress, "0xPAPER_TX", 'BUY EXECUTED (PAPER)');
-          const estimatedEntryPrice = Number(sizeInWeth) / Number(amountOutMinimum || 1n);
+          const estimatedEntryPrice = Number(sizeInWeth) / Number(expectedOut || 1n);
           await this.registerPosition(tokenAddress, estimatedEntryPrice, Number(sizeInWeth) / 1e18, source, copiedFrom);
           return;
         }
@@ -84,7 +84,7 @@ export class TraderAgent {
           dbLogger.info(`BUY TX Confirmed`, { txHash, token: tokenAddress, block: receipt.blockNumber.toString(), sizeEth: (Number(sizeInWeth) / 1e18).toFixed(6) });
           this.emitToSigningBoundary(tokenAddress, txHash, 'BUY EXECUTED');
 
-          const estimatedEntryPrice = Number(sizeInWeth) / Number(amountOutMinimum || 1n);
+          const estimatedEntryPrice = Number(sizeInWeth) / Number(expectedOut || 1n);
           await this.registerPosition(tokenAddress, estimatedEntryPrice, Number(sizeInWeth) / 1e18, source, copiedFrom);
         } else {
           throw new Error('Transaction reverted by network');
@@ -125,7 +125,7 @@ export class TraderAgent {
         console.log(`[Trader] 🎯 BUY TX Confirmed in block ${receipt.blockNumber}`);
         this.emitToSigningBoundary(trade.tokenAddress, txHash, 'BUY EXECUTED');
 
-        const estimatedEntryPrice = Number(trade.sizeInWeth) / Number(trade.amountOutMinimum || 1n); // Prevent division by zero if amountOutMin is 0
+        const estimatedEntryPrice = Number(trade.sizeInWeth) / Number(trade.expectedOut || 1n); 
         await this.registerPosition(trade.tokenAddress, estimatedEntryPrice, Number(trade.sizeInWeth) / 1e18, trade.source, trade.copiedFrom);
         if (chatId) await this.bot.api.sendMessage(chatId, `✅ **Trade Confirmed!**\nBlock: ${receipt.blockNumber}`);
       } else {
@@ -157,7 +157,7 @@ export class TraderAgent {
     
     const calldataResult = await this.constructUnsignedSellTx(tokenAddress, amountInToken);
     if (calldataResult) {
-      const { calldata, amountOutMinimum, toAddress } = calldataResult;
+      const { calldata, amountOutMinimum, expectedOut, toAddress } = calldataResult;
       
       try {
         console.log(`[Trader] ⚡ Broadcasting SELL transaction for ${tokenAddress}...`);
@@ -175,7 +175,7 @@ export class TraderAgent {
           dbLogger.info(`SELL TX Confirmed`, { txHash, token: tokenAddress, block: receipt.blockNumber.toString(), reason });
           this.emitToSigningBoundary(tokenAddress, txHash, `SELL EXECUTED [${reason}]`);
 
-          const estimatedExitPrice = Number(amountOutMinimum) / Number(amountInToken);
+          const estimatedExitPrice = Number(expectedOut || 1n) / Number(amountInToken || 1n);
           await this.updatePositionStatus(tokenAddress, estimatedExitPrice);
         } else {
           throw new Error('Transaction reverted by network');
@@ -192,7 +192,7 @@ export class TraderAgent {
    * Constructs a BUY transaction payload using Universal Router v4 execute().
    * Command 0x00 = V3_SWAP_EXACT_IN: WETH -> tokenOut
    */
-  public async constructUnsignedSwapTx(tokenOut: string, amountIn: bigint): Promise<{ calldata: string, amountOutMinimum: bigint, toAddress: `0x${string}`, value: bigint } | null> {
+  public async constructUnsignedSwapTx(tokenOut: string, amountIn: bigint): Promise<{ calldata: string, amountOutMinimum: bigint, expectedOut: bigint, toAddress: `0x${string}`, value: bigint } | null> {
     console.log(`[Trader] Constructing Universal Router BUY calldata for WETH -> ${tokenOut}...`);
 
     const WETH_ADDRESS = process.env.WETH_ADDRESS;
@@ -263,7 +263,7 @@ export class TraderAgent {
       });
 
       console.log(`[Trader] ✅ BUY Calldata (Universal Router): ${calldata.substring(0, 66)}...`);
-      return { calldata, amountOutMinimum, toAddress: ROUTER_ADDRESS as `0x${string}`, value: amountIn };
+      return { calldata, amountOutMinimum, expectedOut, toAddress: ROUTER_ADDRESS as `0x${string}`, value: amountIn };
 
     } catch (error) {
       console.error('[Trader] Failed to build BUY calldata:', error);
@@ -275,7 +275,7 @@ export class TraderAgent {
    * Constructs a SELL transaction payload using Universal Router v4 execute().
    * Command 0x00 = V3_SWAP_EXACT_IN: tokenIn -> WETH
    */
-  public async constructUnsignedSellTx(tokenIn: string, amountIn: bigint): Promise<{ calldata: string, amountOutMinimum: bigint, toAddress: `0x${string}` } | null> {
+  public async constructUnsignedSellTx(tokenIn: string, amountIn: bigint): Promise<{ calldata: string, amountOutMinimum: bigint, expectedOut: bigint, toAddress: `0x${string}` } | null> {
     console.log(`[Trader] Constructing Universal Router SELL calldata for ${tokenIn} -> WETH...`);
 
     const WETH_ADDRESS = process.env.WETH_ADDRESS;
@@ -322,7 +322,7 @@ export class TraderAgent {
       });
 
       console.log(`[Trader] ✅ SELL Calldata (Universal Router): ${calldata.substring(0, 66)}...`);
-      return { calldata, amountOutMinimum, toAddress: ROUTER_ADDRESS as `0x${string}` };
+      return { calldata, amountOutMinimum, expectedOut, toAddress: ROUTER_ADDRESS as `0x${string}` };
 
     } catch (error) {
       console.error('[Trader] Failed to build SELL calldata:', error);

@@ -31,7 +31,7 @@ export class TraderAgent {
         }
         const calldataResult = await this.constructUnsignedSwapTx(tokenAddress, sizeInWeth);
         if (calldataResult) {
-            const { calldata, amountOutMinimum, toAddress, value } = calldataResult;
+            const { calldata, amountOutMinimum, expectedOut, toAddress, value } = calldataResult;
             try {
                 if (this.executionMode === 'CONFIRM' && process.env.TELEGRAM_CHAT_ID) {
                     const tradeId = Math.random().toString(36).substring(7);
@@ -39,8 +39,8 @@ export class TraderAgent {
                         this.cancelPendingTrade(tradeId, Number(process.env.TELEGRAM_CHAT_ID), "Timeout (5 mins) reached.");
                     }, 5 * 60 * 1000);
                     this.pendingTrades.set(tradeId, {
-                        calldata: calldataResult.calldata, value: calldataResult.value, toAddress: calldataResult.toAddress,
-                        amountOutMinimum: calldataResult.amountOutMinimum, tokenAddress, sizeInWeth, timeoutId,
+                        calldata, value, toAddress,
+                        amountOutMinimum, expectedOut, tokenAddress, sizeInWeth, timeoutId,
                         source, copiedFrom
                     });
                     const keyboard = new InlineKeyboard()
@@ -53,7 +53,7 @@ export class TraderAgent {
                     console.log(`[Trader] 📄 PAPER TRADE: Simulating BUY for ${tokenAddress}...`);
                     dbLogger.info(`PAPER BUY Simulated`, { token: tokenAddress, sizeEth: (Number(sizeInWeth) / 1e18).toFixed(6) });
                     this.emitToSigningBoundary(tokenAddress, "0xPAPER_TX", 'BUY EXECUTED (PAPER)');
-                    const estimatedEntryPrice = Number(sizeInWeth) / Number(amountOutMinimum || 1n);
+                    const estimatedEntryPrice = Number(sizeInWeth) / Number(expectedOut || 1n);
                     await this.registerPosition(tokenAddress, estimatedEntryPrice, Number(sizeInWeth) / 1e18, source, copiedFrom);
                     return;
                 }
@@ -72,7 +72,7 @@ export class TraderAgent {
                     console.log(`[Trader] 🎯 BUY TX Confirmed in block ${receipt.blockNumber}`);
                     dbLogger.info(`BUY TX Confirmed`, { txHash, token: tokenAddress, block: receipt.blockNumber.toString(), sizeEth: (Number(sizeInWeth) / 1e18).toFixed(6) });
                     this.emitToSigningBoundary(tokenAddress, txHash, 'BUY EXECUTED');
-                    const estimatedEntryPrice = Number(sizeInWeth) / Number(amountOutMinimum || 1n);
+                    const estimatedEntryPrice = Number(sizeInWeth) / Number(expectedOut || 1n);
                     await this.registerPosition(tokenAddress, estimatedEntryPrice, Number(sizeInWeth) / 1e18, source, copiedFrom);
                 }
                 else {
@@ -110,7 +110,7 @@ export class TraderAgent {
             if (receipt.status === 'success') {
                 console.log(`[Trader] 🎯 BUY TX Confirmed in block ${receipt.blockNumber}`);
                 this.emitToSigningBoundary(trade.tokenAddress, txHash, 'BUY EXECUTED');
-                const estimatedEntryPrice = Number(trade.sizeInWeth) / Number(trade.amountOutMinimum || 1n); // Prevent division by zero if amountOutMin is 0
+                const estimatedEntryPrice = Number(trade.sizeInWeth) / Number(trade.expectedOut || 1n);
                 await this.registerPosition(trade.tokenAddress, estimatedEntryPrice, Number(trade.sizeInWeth) / 1e18, trade.source, trade.copiedFrom);
                 if (chatId)
                     await this.bot.api.sendMessage(chatId, `✅ **Trade Confirmed!**\nBlock: ${receipt.blockNumber}`);
@@ -143,7 +143,7 @@ export class TraderAgent {
         }
         const calldataResult = await this.constructUnsignedSellTx(tokenAddress, amountInToken);
         if (calldataResult) {
-            const { calldata, amountOutMinimum, toAddress } = calldataResult;
+            const { calldata, amountOutMinimum, expectedOut, toAddress } = calldataResult;
             try {
                 console.log(`[Trader] ⚡ Broadcasting SELL transaction for ${tokenAddress}...`);
                 const txHash = await walletClient.sendTransaction({
@@ -157,7 +157,7 @@ export class TraderAgent {
                     console.log(`[Trader] 🎯 SELL TX Confirmed in block ${receipt.blockNumber}`);
                     dbLogger.info(`SELL TX Confirmed`, { txHash, token: tokenAddress, block: receipt.blockNumber.toString(), reason });
                     this.emitToSigningBoundary(tokenAddress, txHash, `SELL EXECUTED [${reason}]`);
-                    const estimatedExitPrice = Number(amountOutMinimum) / Number(amountInToken);
+                    const estimatedExitPrice = Number(expectedOut || 1n) / Number(amountInToken || 1n);
                     await this.updatePositionStatus(tokenAddress, estimatedExitPrice);
                 }
                 else {
@@ -231,7 +231,7 @@ export class TraderAgent {
                 args: [commands, [swapInput], deadline]
             });
             console.log(`[Trader] ✅ BUY Calldata (Universal Router): ${calldata.substring(0, 66)}...`);
-            return { calldata, amountOutMinimum, toAddress: ROUTER_ADDRESS, value: amountIn };
+            return { calldata, amountOutMinimum, expectedOut, toAddress: ROUTER_ADDRESS, value: amountIn };
         }
         catch (error) {
             console.error('[Trader] Failed to build BUY calldata:', error);
@@ -273,7 +273,7 @@ export class TraderAgent {
                 args: [commands, [swapInput], deadline]
             });
             console.log(`[Trader] ✅ SELL Calldata (Universal Router): ${calldata.substring(0, 66)}...`);
-            return { calldata, amountOutMinimum, toAddress: ROUTER_ADDRESS };
+            return { calldata, amountOutMinimum, expectedOut, toAddress: ROUTER_ADDRESS };
         }
         catch (error) {
             console.error('[Trader] Failed to build SELL calldata:', error);
