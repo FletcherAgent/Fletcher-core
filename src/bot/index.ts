@@ -233,15 +233,34 @@ bot.command("copyexit", async (ctx) => {
 
 const orchestrator = new Orchestrator(bot);
 
-// Start the bot
-bot.start({
-  onStart: async (botInfo) => {
-    console.log(`[Bot] Started as @${botInfo.username}`);
-    
+async function startApp() {
+  try {
     // Connect Database
     await connectDb();
 
-    // Start Fletcher agents (Event Listener, etc.)
+    // Start Fletcher agents (Event Listener, Webhook Server, etc.)
     await orchestrator.startAll();
-  },
-});
+
+    // Start Telegram Bot with retry logic for zero-downtime deploys
+    const startBot = async () => {
+      try {
+        await bot.start({
+          onStart: async (botInfo) => {
+            console.log(`[Bot] Started as @${botInfo.username}`);
+          },
+        });
+      } catch (err: any) {
+        console.error(`[Bot] Telegram polling failed: ${err.message}`);
+        console.log(`[Bot] Retrying in 5 seconds... (Waiting for old container to shut down)`);
+        setTimeout(startBot, 5000);
+      }
+    };
+    
+    startBot();
+  } catch (error) {
+    console.error("[System] Critical startup error:", error);
+    process.exit(1);
+  }
+}
+
+startApp();
