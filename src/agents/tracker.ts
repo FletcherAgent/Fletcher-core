@@ -412,16 +412,18 @@ export class TrackerAgent {
           
           const zeroForOne = paramHex.substring(384, 448).endsWith('1');
           
-          // Extract amountIn by finding the first non-zero chunk after zeroForOne
-          const amountChunk = paramHex.substring(448);
-          let amountInStr = '0';
-          const match = amountChunk.match(/[1-9a-f][0-9a-f]*/);
-          if (match) {
-             amountInStr = match[0];
-          }
-          if (!amountInStr) amountInStr = '0';
-          
-          const amountIn = BigInt('0x' + amountInStr);
+          // V4 ExactInputSingleParams struct layout (ABI-encoded with tuple offset at word 0):
+          // Word 0: tuple offset (0x20)
+          // Word 1: currency0  [64:128]
+          // Word 2: currency1  [128:192]
+          // Word 3: fee        [192:256]
+          // Word 4: tickSpacing[256:320]
+          // Word 5: hooks      [320:384]
+          // Word 6: zeroForOne [384:448]
+          // Word 7: amountSpecified (uint128) [448:512]  ← read exactly 1 word
+          // Word 8: sqrtPriceLimitX96 [512:576]
+          const amountWord = paramHex.substring(448, 512);
+          const amountIn = BigInt('0x' + amountWord);
 
           // For EXACT_IN_SINGLE: zeroForOne=true means c0→c1 (c0=tokenIn, c1=tokenOut)
           // For EXACT_OUT_SINGLE: direction is logically reversed
@@ -448,8 +450,9 @@ export class TrackerAgent {
 
           console.log(`[Tracker] 🔍 Universal Router V4 Swap decoded (act 0x${act.toString(16)}): ${tokenIn} → ${tokenOut} (amountIn: ${amountIn})`);
           this.emitSignal(tokenIn, tokenOut, amountIn, walletAddress, trackedWallet, timestamp, txHash);
-        } else if (act !== 0x0b && act !== 0x0c && act !== 0x04 && act !== 0x0d) {
-          // Log unknown V4 actions (exclude known non-swap ones: SETTLE, TAKE, CLOSE_CURRENCY, SWEEP)
+        } else if (act !== 0x0b && act !== 0x0c && act !== 0x04 && act !== 0x0d && act !== 0x0f && act !== 0x10 && act !== 0x11) {
+          // Log truly unknown V4 actions
+          // Known non-swap: 0x0b=WRAP_ETH, 0x0c=UNWRAP_WETH, 0x04=SWEEP, 0x0d=TRANSFER, 0x0f=SETTLE_ALL, 0x10=TAKE_ALL, 0x11=TAKE
           console.log(`[Tracker] ℹ️ V4 Unhandled action: 0x${act.toString(16)} | TX: https://robinhoodchain.blockscout.com/tx/${txHash}`);
         }
       }
