@@ -7,6 +7,7 @@ import { WalletProfiler } from '../services/walletProfiler.js';
 export class TrackerAgent {
   public onCopyBuySignal?: (wallet: string, token: string, amount: bigint, tier: number, bundleId: string | null, timestamp: number, txHash: string) => void;
   public onCopySellSignal?: (wallet: string, token: string, amount: bigint, tier: number, bundleId: string | null, timestamp: number, txHash: string) => void;
+  public onSwapActivity?: (walletLabel: string, txHash: string, toAddress: string, value: number) => void;
 
   private server: any;
   private processedTxHashes: Set<string> = new Set<string>();

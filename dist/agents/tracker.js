@@ -6,6 +6,7 @@ import { WalletProfiler } from '../services/walletProfiler.js';
 export class TrackerAgent {
     onCopyBuySignal;
     onCopySellSignal;
+    onSwapActivity;
     server;
     processedTxHashes = new Set();
     lastBuyTime = new Map(); // For anti-farm: wallet-token -> timestamp

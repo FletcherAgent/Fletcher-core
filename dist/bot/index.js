@@ -22,6 +22,8 @@ function queueLog(emoji, ...args) {
             return JSON.stringify(a);
         return String(a);
     }).join(' ');
+    if (msg.includes("[Tracker]") || msg.includes("Received webhook activity") || msg.includes("Swap activity detected"))
+        return;
     logBuffer.push(`${emoji} ${msg}`);
 }
 console.log = (...args) => {

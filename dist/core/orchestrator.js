@@ -80,6 +80,13 @@ export class Orchestrator {
         };
         // Tracker Events
         // Tracker Events
+        this.tracker.onSwapActivity = async (walletLabel, txHash, toAddress, value) => {
+            const chatId = process.env.TELEGRAM_CHAT_ID;
+            if (chatId) {
+                const msg = `🚨 <b>SWAP ACTIVITY DETECTED</b>\n\n👤 <b>From:</b> <code>${walletLabel}</code>\n🎯 <b>To (Contract):</b> <code>${toAddress}</code>\n💰 <b>Value:</b> ${value} ETH\n🔗 <a href="https://robinhoodchain.blockscout.com/tx/${txHash}">View Transaction</a>`;
+                this.bot.api.sendMessage(chatId, msg, { parse_mode: 'HTML' }).catch(console.error);
+            }
+        };
         this.tracker.onCopyBuySignal = async (wallet, token, amount, tier, bundleId, timestamp, txHash) => {
             console.log(`[Orchestrator] 🎯 CopyBuy Signal received for ${token} from ${wallet} (Tier: ${tier})`);
             const chatId = process.env.TELEGRAM_CHAT_ID;
