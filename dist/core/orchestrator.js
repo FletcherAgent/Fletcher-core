@@ -147,12 +147,13 @@ export class Orchestrator {
                 if (chatId) {
                     this.bot.api.sendMessage(chatId, `✅ <b>Risk Warden Approved</b>\nForwarding BUY to Trader with size: <code>${Number(finalSize) / 1e18} WETH</code>`, { parse_mode: 'HTML' }).catch(console.error);
                 }
-                if (tier === 3 || finalSize === 0n) {
-                    console.log(`[Orchestrator] 📄 Paper-trade only for this tier/size.`);
+                if (finalSize === 0n) {
+                    console.log(`[Orchestrator] 📄 Size is 0, skipping trade.`);
                     return;
                 }
-                console.log(`[Orchestrator] Forwarding CopyBuy to Trader. Size: ${finalSize}...`);
-                this.trader.processSignal(token, finalSize, 'COPYTRADE', wallet);
+                const isPaperTrade = tier === 3;
+                console.log(`[Orchestrator] Forwarding CopyBuy to Trader. Size: ${finalSize}... Paper Trade: ${isPaperTrade}`);
+                this.trader.processSignal(token, finalSize, 'COPYTRADE', wallet, isPaperTrade);
                 this.guardian.startMonitoring(token, finalSize);
             }
             else {

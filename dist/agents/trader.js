@@ -24,8 +24,8 @@ export class TraderAgent {
             }
         });
     }
-    async processSignal(tokenAddress, sizeInWeth, source = "SCOUT", copiedFrom) {
-        if (!walletClient || !account) {
+    async processSignal(tokenAddress, sizeInWeth, source = "SCOUT", copiedFrom, isPaperTrade = false) {
+        if (!isPaperTrade && (!walletClient || !account)) {
             console.error("[Trader] Auto-trading disabled (no PRIVATE_KEY). Aborting trade.");
             return;
         }
@@ -49,6 +49,16 @@ export class TraderAgent {
                     await this.bot.api.sendMessage(process.env.TELEGRAM_CHAT_ID, `🚨 **PENDING BUY**\nToken: \`${tokenAddress}\`\nSize: \`${Number(sizeInWeth) / 1e18} WETH\`\n\nDo you want to execute this trade?`, { parse_mode: 'Markdown', reply_markup: keyboard });
                     return;
                 }
+                if (isPaperTrade) {
+                    console.log(`[Trader] 📄 PAPER TRADE: Simulating BUY for ${tokenAddress}...`);
+                    dbLogger.info(`PAPER BUY Simulated`, { token: tokenAddress, sizeEth: (Number(sizeInWeth) / 1e18).toFixed(6) });
+                    this.emitToSigningBoundary(tokenAddress, "0xPAPER_TX", 'BUY EXECUTED (PAPER)');
+                    const estimatedEntryPrice = Number(sizeInWeth) / Number(amountOutMinimum);
+                    await this.registerPosition(tokenAddress, estimatedEntryPrice, Number(sizeInWeth) / 1e18, source, copiedFrom);
+                    return;
+                }
+                if (!walletClient)
+                    throw new Error("WalletClient is null");
                 console.log(`[Trader] ⚡ Broadcasting BUY transaction for ${tokenAddress}...`);
                 const txHash = await walletClient.sendTransaction({
                     account,
