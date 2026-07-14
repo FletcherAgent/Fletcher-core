@@ -90,6 +90,10 @@ export class TrackerAgent {
     const fromAddress = activity.fromAddress.toLowerCase();
     const toAddress = activity.toAddress?.toLowerCase(); // Target contract
 
+    // --- DIAGNOSTIC LOG ---
+    console.log(`[Tracker] 📥 Received webhook activity | TX: ${activity.hash} | Category: ${activity.category} | Value: ${activity.value} | To: ${toAddress}`);
+
+
     // ── Router Whitelist Filter ───────────────────────────────────────────────
     // Only process transactions sent to a KNOWN swap router.
     const KNOWN_ROUTERS = new Set([
@@ -99,7 +103,8 @@ export class TrackerAgent {
     ].filter(Boolean));
 
     if (!toAddress || !KNOWN_ROUTERS.has(toAddress)) {
-      // Silently skip — not sent to a known router
+      // Silently skip — not sent to a known router (or uncomment for debug)
+      // console.log(`[Tracker] 🛑 Skipped ${activity.hash} - Not a known router (${toAddress})`);
       return;
     }
     // ─────────────────────────────────────────────────────────────────────────
@@ -129,7 +134,7 @@ export class TrackerAgent {
         }
         console.log(`[Tracker] 🔄 Using on-chain fallback calldata for TX: ${activity.hash}`);
         const activityTime = activity.timestamp ? new Date(activity.timestamp).getTime() : Date.now();
-        await this.decodeAndClassifySwap(tx.input as Hex, fromAddress, toAddress, trackedWallet, activityTime, activity.hash);
+        await this.decodeAndClassifySwap(tx.input as Hex, fromAddress, toAddress, trackedWallet, activityTime, activity.hash, tx.value);
       } catch (fetchErr: any) {
         console.error(`[Tracker] ❌ On-chain fallback failed for ${activity.hash}: ${fetchErr.message}`);
       }
