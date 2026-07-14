@@ -1,5 +1,5 @@
 import { Bot } from 'grammy';
-import { parseAbi } from 'viem';
+import { parseAbi, erc20Abi } from 'viem';
 import { publicClient } from '../services/viem.js';
 import { ScoutAgent } from '../agents/scout.js';
 import { TraderAgent } from '../agents/trader.js';
@@ -103,11 +103,22 @@ export class Orchestrator {
     this.tracker.onCopyBuySignal = async (wallet, token, amount, tier, bundleId, timestamp, txHash) => {
       console.log(`[Orchestrator] 🎯 CopyBuy Signal received for ${token} from ${wallet} (Tier: ${tier})`);
       
+      let tokenMetadata = token;
+      try {
+        const [name, symbol] = await Promise.all([
+          publicClient.readContract({ address: token as `0x${string}`, abi: erc20Abi, functionName: 'name' }),
+          publicClient.readContract({ address: token as `0x${string}`, abi: erc20Abi, functionName: 'symbol' })
+        ]);
+        tokenMetadata = `${name} (${symbol}) - <code>${token}</code>`;
+      } catch (e) {
+        tokenMetadata = `<code>${token}</code>`;
+      }
+
       const chatId = process.env.TELEGRAM_CHAT_ID;
       if (chatId) {
         this.bot.api.sendMessage(
           chatId,
-          `🛒 <b>BUY SIGNAL DETECTED</b>\n\n👤 <b>Wallet:</b> <code>${wallet}</code> (Tier ${tier})\n🪙 <b>Token:</b> <code>${token}</code>\n💰 <b>Amount:</b> ${Number(amount) / 1e18} ETH\n🔗 <a href="https://robinhoodchain.blockscout.com/tx/${txHash}">View Transaction</a>`,
+          `🛒 <b>BUY SIGNAL DETECTED</b>\n\n👤 <b>Wallet:</b> <code>${wallet}</code> (Tier ${tier})\n🪙 <b>Token:</b> ${tokenMetadata}\n💰 <b>Amount:</b> ${Number(amount) / 1e18} ETH\n🔗 <a href="https://robinhoodchain.blockscout.com/tx/${txHash}">View Transaction</a>`,
           { parse_mode: 'HTML' }
         ).catch(console.error);
       }
@@ -214,11 +225,22 @@ export class Orchestrator {
     this.tracker.onCopySellSignal = async (wallet, token, amount, tier, bundleId, timestamp, txHash) => {
       console.log(`[Orchestrator] 💥 CopySell Signal received for ${token} from ${wallet}`);
       
+      let tokenMetadata = token;
+      try {
+        const [name, symbol] = await Promise.all([
+          publicClient.readContract({ address: token as `0x${string}`, abi: erc20Abi, functionName: 'name' }),
+          publicClient.readContract({ address: token as `0x${string}`, abi: erc20Abi, functionName: 'symbol' })
+        ]);
+        tokenMetadata = `${name} (${symbol}) - <code>${token}</code>`;
+      } catch (e) {
+        tokenMetadata = `<code>${token}</code>`;
+      }
+
       const chatId = process.env.TELEGRAM_CHAT_ID;
       if (chatId) {
         this.bot.api.sendMessage(
           chatId,
-          `💥 <b>SELL SIGNAL DETECTED</b>\n\n👤 <b>Wallet:</b> <code>${wallet}</code> (Tier ${tier})\n🪙 <b>Token:</b> <code>${token}</code>\n🔗 <a href="https://robinhoodchain.blockscout.com/tx/${txHash}">View Transaction</a>\n\nProcessing exit protocol...`,
+          `💥 <b>SELL SIGNAL DETECTED</b>\n\n👤 <b>Wallet:</b> <code>${wallet}</code> (Tier ${tier})\n🪙 <b>Token:</b> ${tokenMetadata}\n🔗 <a href="https://robinhoodchain.blockscout.com/tx/${txHash}">View Transaction</a>\n\nProcessing exit protocol...`,
           { parse_mode: 'HTML' }
         ).catch(console.error);
       }

@@ -12,6 +12,8 @@ datasource db {
 model Position {
   id           String   @id @default(uuid())
   tokenAddress String
+  tokenName    String?
+  tokenSymbol  String?
   type         String   // "TRENCH" or "LP"
   status       String   // "OPEN" or "CLOSED"
   entryPrice   Float

@@ -1,4 +1,4 @@
-import { encodeFunctionData, encodeAbiParameters, parseAbiParameters, parseAbi, parseEther, concat, toHex, pad } from 'viem';
+import { encodeFunctionData, encodeAbiParameters, parseAbiParameters, parseAbi, parseEther, concat, toHex, pad, erc20Abi } from 'viem';
 import { detectBestFee } from '../services/poolFeeDetector.js';
 import { dbLogger } from '../services/logger.js';
 import { Bot, InlineKeyboard } from 'grammy';
@@ -335,9 +335,24 @@ export class TraderAgent {
    */
   public async registerPosition(tokenAddress: string, entryPrice: number, size: number, source: string = "SCOUT", copiedFrom?: string) {
     try {
+      let tokenName = null;
+      let tokenSymbol = null;
+      try {
+        const [name, symbol] = await Promise.all([
+          publicClient.readContract({ address: tokenAddress as `0x${string}`, abi: erc20Abi, functionName: 'name' }),
+          publicClient.readContract({ address: tokenAddress as `0x${string}`, abi: erc20Abi, functionName: 'symbol' })
+        ]);
+        tokenName = name as string;
+        tokenSymbol = symbol as string;
+      } catch (e) {
+        console.warn(`[Trader] Could not fetch name/symbol for ${tokenAddress}`);
+      }
+
       const position = await prisma.position.create({
         data: {
           tokenAddress,
+          tokenName,
+          tokenSymbol,
           type: 'TRENCH',
           status: 'OPEN',
           entryPrice,
