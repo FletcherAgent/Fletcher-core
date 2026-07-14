@@ -2,6 +2,7 @@ import { createServer, IncomingMessage, ServerResponse } from 'http';
 import { parseAbi, decodeFunctionData, decodeAbiParameters, parseAbiParameters, Hex } from 'viem';
 import { prisma } from '../core/db.js';
 import { dbLogger } from '../services/logger.js';
+import { WalletProfiler } from '../services/walletProfiler.js';
 
 export class TrackerAgent {
   public onCopyBuySignal?: (wallet: string, token: string, amount: bigint, tier: number, bundleId: string | null, timestamp: number) => void;
@@ -118,7 +119,7 @@ export class TrackerAgent {
 
     try {
       const activityTime = activity.timestamp ? new Date(activity.timestamp).getTime() : Date.now();
-      await this.decodeAndClassifySwap(calldata, fromAddress, toAddress, trackedWallet, activityTime);
+      await this.decodeAndClassifySwap(calldata, fromAddress, toAddress, trackedWallet, activityTime, activity.hash);
     } catch (e: any) {
       if (e.name === 'AbiFunctionSignatureNotFoundError' || (e.message && e.message.includes('not found on ABI'))) {
         const sig = calldata.substring(0, 10);
@@ -129,7 +130,7 @@ export class TrackerAgent {
     }
   }
 
-  private async decodeAndClassifySwap(calldata: Hex, walletAddress: string, routerAddress: string | undefined, trackedWallet: any, timestamp: number) {
+  private async decodeAndClassifySwap(calldata: Hex, walletAddress: string, routerAddress: string | undefined, trackedWallet: any, timestamp: number, txHash: string) {
     // Known router addresses (lowercase) — only decode if the target IS a known router
     const UNIVERSAL_ROUTER = (process.env.ROUTER_ADDRESS || '').toLowerCase();
     const WETH = (process.env.WETH_ADDRESS || '').toLowerCase();
@@ -172,7 +173,7 @@ export class TrackerAgent {
           // Command 0x00 = V3_SWAP_EXACT_IN
           // Command 0x01 = V3_SWAP_EXACT_OUT
           if (cmd === 0x00 || cmd === 0x01) {
-            await this.processUniversalRouterSwap(input, cmd, walletAddress, trackedWallet, timestamp);
+            await this.processUniversalRouterSwap(input, cmd, walletAddress, trackedWallet, timestamp, txHash);
           }
         }
       } catch (err: any) {
@@ -191,7 +192,7 @@ export class TrackerAgent {
           params.tokenIn.toLowerCase(),
           params.tokenOut.toLowerCase(),
           BigInt(params.amountIn),
-          walletAddress, trackedWallet, timestamp
+          walletAddress, trackedWallet, timestamp, txHash
         );
 
       } else if (decoded.functionName === 'multicall') {
@@ -205,7 +206,7 @@ export class TrackerAgent {
                 params.tokenIn.toLowerCase(),
                 params.tokenOut.toLowerCase(),
                 BigInt(params.amountIn),
-                walletAddress, trackedWallet, timestamp
+                walletAddress, trackedWallet, timestamp, txHash
               );
             }
           } catch { /* non-swap inner calls like refundETH — ignore */ }
@@ -230,7 +231,8 @@ export class TrackerAgent {
     cmd: number,
     walletAddress: string,
     trackedWallet: any,
-    timestamp: number
+    timestamp: number,
+    txHash: string
   ) {
     try {
       // Decode the ABI-encoded input tuple
@@ -251,7 +253,7 @@ export class TrackerAgent {
       const tokenOut = ('0x' + pathHex.substring(pathHex.length - 40)).toLowerCase();
 
       console.log(`[Tracker] 🔍 Universal Router Swap decoded: ${tokenIn} → ${tokenOut} (amountIn: ${amountIn})`);
-      this.emitSignal(tokenIn, tokenOut, amountIn, walletAddress, trackedWallet, timestamp);
+      this.emitSignal(tokenIn, tokenOut, amountIn, walletAddress, trackedWallet, timestamp, txHash);
 
     } catch (err: any) {
       console.warn(`[Tracker] Could not decode UR swap input: ${err.message}`);
@@ -259,7 +261,7 @@ export class TrackerAgent {
   }
 
 
-  private emitSignal(tokenIn: string, tokenOut: string, amountIn: bigint, walletAddress: string, trackedWallet: any, timestamp: number) {
+  private emitSignal(tokenIn: string, tokenOut: string, amountIn: bigint, walletAddress: string, trackedWallet: any, timestamp: number, txHash: string) {
     const WETH_ADDRESS = (process.env.WETH_ADDRESS || '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2').toLowerCase();
     
     // Classification
@@ -268,6 +270,9 @@ export class TrackerAgent {
       console.log(`[Tracker] 🛒 BUY Signal: ${walletAddress} bought ${tokenOut}`);
       dbLogger.info(`BUY Signal detected`, { wallet: trackedWallet.label || walletAddress, token: tokenOut, amountWei: amountIn.toString(), tier: trackedWallet.tier });
       
+      // Async trigger for on-chain profiling
+      WalletProfiler.processBuy(walletAddress, tokenOut, txHash);
+
       // Track buy time for anti-farm
       this.lastBuyTime.set(`${walletAddress}-${tokenOut}`, timestamp);
 
@@ -279,6 +284,9 @@ export class TrackerAgent {
       console.log(`[Tracker] 💥 SELL Signal: ${walletAddress} sold ${tokenIn}`);
       dbLogger.info(`SELL Signal detected`, { wallet: trackedWallet.label || walletAddress, token: tokenIn, amountWei: amountIn.toString(), tier: trackedWallet.tier });
       
+      // Async trigger for on-chain profiling
+      WalletProfiler.processSell(walletAddress, tokenIn, txHash);
+
       // Anti-farm check
       const buyTime = this.lastBuyTime.get(`${walletAddress}-${tokenIn}`);
       if (buyTime && (timestamp - buyTime < 120000)) {

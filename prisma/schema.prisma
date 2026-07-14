@@ -65,3 +65,16 @@ model SystemConfig {
   key   String @id
   value String
 }
+
+model WalletPosition {
+  id              String   @id @default(uuid())
+  walletAddress   String
+  tokenAddress    String
+  status          String   @default("OPEN")
+  totalWethSpent  Float    
+  totalTokens     Float    
+  avgEntryPrice   Float    
+  realizedPnl     Float?   
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
