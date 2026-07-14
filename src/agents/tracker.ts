@@ -251,7 +251,10 @@ export class TrackerAgent {
     try {
       // Robust manual parser for (address recipient, uint256 amountIn, uint256 amountOutMin, bytes path, bool payerIsUser)
       const hex = input.startsWith('0x') ? input.substring(2) : input;
-      if (hex.length < 320) return; // Minimum 5 words for the tuple
+      if (hex.length < 320) {
+        console.log(`[Tracker] ℹ️ UR V3 Ignored: Input hex too short (${hex.length} < 320) | TX: https://robinhoodchain.blockscout.com/tx/${txHash}`);
+        return; // Minimum 5 words for the tuple
+      }
 
       // Word 1: amountIn
       const amountInStr = hex.substring(64, 128);
@@ -264,7 +267,10 @@ export class TrackerAgent {
       const pathLength = parseInt(hex.substring(pathOffset, pathOffset + 64), 16) * 2;
       const pathHex = hex.substring(pathOffset + 64, pathOffset + 64 + pathLength);
       
-      if (pathHex.length < 86) return; // Min path length = 43 bytes (86 chars)
+      if (pathHex.length < 86) {
+        console.log(`[Tracker] ℹ️ UR V3 Ignored: Path hex too short (${pathHex.length} < 86) | TX: https://robinhoodchain.blockscout.com/tx/${txHash}`);
+        return; // Min path length = 43 bytes (86 chars)
+      }
 
       let tokenIn = ('0x' + pathHex.substring(0, 40)).toLowerCase();
       let tokenOut = ('0x' + pathHex.substring(pathHex.length - 40)).toLowerCase();
@@ -279,7 +285,7 @@ export class TrackerAgent {
       console.log(`[Tracker] 🔍 Universal Router V3 Swap decoded: ${tokenIn} → ${tokenOut} (amountIn: ${amountIn})`);
       this.emitSignal(tokenIn, tokenOut, amountIn, walletAddress, trackedWallet, timestamp, txHash);
     } catch (err: any) {
-      console.warn(`[Tracker] Could not decode UR V3 swap input: ${err.message}`);
+      console.warn(`[Tracker] Could not decode UR V3 swap input | TX: https://robinhoodchain.blockscout.com/tx/${txHash}: ${err.message}`);
     }
   }
 
@@ -298,7 +304,10 @@ export class TrackerAgent {
     try {
       // Robust manual parser for (address recipient, uint256 amountIn, uint256 amountOutMin, address[] path, bool payerIsUser)
       const hex = input.startsWith('0x') ? input.substring(2) : input;
-      if (hex.length < 320) return;
+      if (hex.length < 320) {
+        console.log(`[Tracker] ℹ️ UR V2 Ignored: Input hex too short (${hex.length} < 320) | TX: https://robinhoodchain.blockscout.com/tx/${txHash}`);
+        return;
+      }
 
       const amountInStr = hex.substring(64, 128);
       const amountIn = BigInt('0x' + amountInStr);
@@ -306,7 +315,10 @@ export class TrackerAgent {
       const pathOffset = parseInt(hex.substring(192, 256), 16) * 2;
       const pathLength = parseInt(hex.substring(pathOffset, pathOffset + 64), 16);
 
-      if (pathLength < 2) return;
+      if (pathLength < 2) {
+        console.log(`[Tracker] ℹ️ UR V2 Ignored: Path length < 2 (${pathLength}) | TX: https://robinhoodchain.blockscout.com/tx/${txHash}`);
+        return;
+      }
 
       let tokenIn = ('0x' + hex.substring(pathOffset + 64, pathOffset + 128).slice(-40)).toLowerCase();
       let tokenOut = ('0x' + hex.substring(pathOffset + 64 + ((pathLength - 1) * 64), pathOffset + 64 + (pathLength * 64)).slice(-40)).toLowerCase();
@@ -321,7 +333,7 @@ export class TrackerAgent {
       console.log(`[Tracker] 🔍 Universal Router V2 Swap decoded: ${tokenIn} → ${tokenOut} (amountIn: ${amountIn})`);
       this.emitSignal(tokenIn, tokenOut, amountIn, walletAddress, trackedWallet, timestamp, txHash);
     } catch (err: any) {
-      console.warn(`[Tracker] Could not decode UR V2 swap input: ${err.message}`);
+      console.warn(`[Tracker] Could not decode UR V2 swap input | TX: https://robinhoodchain.blockscout.com/tx/${txHash}: ${err.message}`);
     }
   }
 
@@ -362,6 +374,11 @@ export class TrackerAgent {
         if (act === 0x06 && params[i]) {
           // V4_SWAP_EXACT_IN_SINGLE
           const paramHex = params[i].replace('0x', '');
+          
+          if (paramHex.length < 448) {
+             console.log(`[Tracker] ℹ️ UR V4 Ignored: Param hex too short (${paramHex.length} < 448) | TX: https://robinhoodchain.blockscout.com/tx/${txHash}`);
+             continue;
+          }
 
           // Universal Router tightly packs or offsets the V4 ExactInputSingleParams.
           // Through raw byte analysis, we can extract the values at specific fixed positions:
@@ -449,7 +466,7 @@ export class TrackerAgent {
         this.onCopySellSignal(walletAddress, tokenIn, amountIn, trackedWallet.tier, trackedWallet.bundleId, timestamp);
       }
     } else {
-      console.log(`[Tracker] 🔄 SWAP Signal: ${walletAddress} swapped ${tokenIn} for ${tokenOut}`);
+      console.log(`[Tracker] 🚫 Ignored SWAP (No WETH involved): ${walletAddress} swapped ${tokenIn} for ${tokenOut} | TX: https://robinhoodchain.blockscout.com/tx/${txHash}`);
     }
   }
 }
