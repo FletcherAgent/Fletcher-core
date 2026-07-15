@@ -17,7 +17,7 @@ export class RiskWardenAgent {
 
     // 1. Check Portfolio Heat (Circuit Breaker)
     const activePositionsCount = await prisma.position.count({
-      where: { status: 'OPEN' }
+      where: { status: { in: ['OPEN', 'PENDING', 'EXITING'] } }
     });
 
     if (activePositionsCount >= this.MAX_HEAT) {
