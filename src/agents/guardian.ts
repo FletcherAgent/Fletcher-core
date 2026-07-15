@@ -2,6 +2,7 @@ import { publicClient } from '../services/viem.js';
 import { parseAbi, parseEther } from 'viem';
 import { prisma } from '../core/db.js';
 import type { Position } from '@prisma/client';
+import { detectBestFee } from '../services/poolFeeDetector.js';
 
 export class GuardianAgent {
   public onExitSignal?: (pos: Position, reason: string) => void;
@@ -68,15 +69,9 @@ export class GuardianAgent {
       // console.log(`[Guardian] 🔍 Polling current price for ${tokenAddress}...`);
       
       try {
-        // We query WETH -> Token
-        const tokensOut = await publicClient.readContract({
-          address: QUOTER_ADDRESS as `0x${string}`,
-          abi: quoterAbi,
-          functionName: 'quoteExactInputSingle',
-          args: [WETH_ADDRESS as `0x${string}`, tokenAddress as `0x${string}`, 3000, wethTestAmount, 0n]
-        }) as bigint;
+        // Query best active pool
+        const { expectedOut: tokensOut } = await detectBestFee(WETH_ADDRESS, tokenAddress, wethTestAmount);
 
-        if (tokensOut === 0n) throw new Error("0 tokens out");
 
         // Calculate current exchange rate (WETH per 1 wei of Token)
         const currentQuote = Number(wethTestAmount) / Number(tokensOut);
@@ -131,8 +126,9 @@ export class GuardianAgent {
         }
 
       } catch (err) {
-        console.warn(`[Guardian] ⚠️ Failed to fetch current quote for ${tokenAddress} - pool might be rugged!`);
-        this.triggerExit(pos, "EMERGENCY_RUG_NO_QUOTES");
+        console.warn(`[Guardian] ⚠️ Failed to fetch current quote for ${tokenAddress} - pool might be temporarily unavailable.`);
+        // Do not instantly trigger EMERGENCY_RUG_NO_QUOTES unless we have a sophisticated retry limit,
+        // because RPC glitches or empty V3 ticks can easily trigger this by accident.
       }
       
     }, 10000); // 10 seconds

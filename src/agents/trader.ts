@@ -184,6 +184,9 @@ export class TraderAgent {
         
         await prisma.position.update({ where: { id: posId }, data: { status: 'EXIT_FAILED' } }).catch(console.error);
       }
+    } else {
+      console.error(`[Trader] ❌ Failed to construct SELL calldata for ${tokenAddress}. Marking as EXIT_FAILED.`);
+      await prisma.position.update({ where: { id: posId }, data: { status: 'EXIT_FAILED' } }).catch(console.error);
     }
   }
 
