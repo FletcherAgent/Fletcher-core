@@ -158,6 +158,30 @@ export class TraderAgent {
       try {
         const estimatedExitPrice = Number(expectedOut || 1n) / Number(amountInToken || 1n);
 
+        // --- 0. Check and Approve Allowance ---
+        const currentAllowance = await publicClient.readContract({
+          address: tokenAddress as `0x${string}`,
+          abi: erc20Abi,
+          functionName: 'allowance',
+          args: [account!.address, toAddress]
+        });
+
+        if (currentAllowance < amountInToken) {
+          console.log(`[Trader] 🔓 Approving Router to spend ${tokenAddress}...`);
+          const approveData = encodeFunctionData({
+            abi: erc20Abi,
+            functionName: 'approve',
+            args: [toAddress, 2n ** 256n - 1n] // MaxUint256
+          });
+          const approveTxHash = await walletClient!.sendTransaction({
+            account: account!,
+            to: tokenAddress as `0x${string}`,
+            data: approveData
+          });
+          await publicClient.waitForTransactionReceipt({ hash: approveTxHash });
+          console.log(`[Trader] ✅ Approve confirmed!`);
+        }
+
         console.log(`[Trader] ⚡ Broadcasting SELL transaction for ${tokenAddress}...`);
         const txHash = await walletClient!.sendTransaction({
           account: account!,
