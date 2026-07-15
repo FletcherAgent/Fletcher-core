@@ -62,6 +62,7 @@ export class GuardianAgent {
     const initialQuote = pos.entryPrice;
 
     let highestQuote = initialQuote;
+    let failCount = 0;
     const startedAt = Date.now(); // We can also use pos.createdAt.getTime(), but let's stick to start of monitoring for time limits
 
     // Polling every 10 seconds
@@ -126,9 +127,13 @@ export class GuardianAgent {
         }
 
       } catch (err) {
-        console.warn(`[Guardian] ⚠️ Failed to fetch current quote for ${tokenAddress} - pool might be temporarily unavailable.`);
-        // Do not instantly trigger EMERGENCY_RUG_NO_QUOTES unless we have a sophisticated retry limit,
-        // because RPC glitches or empty V3 ticks can easily trigger this by accident.
+        failCount++;
+        console.warn(`[Guardian] ⚠️ Failed to fetch current quote for ${tokenAddress} - pool might be temporarily unavailable. (Fail count: ${failCount}/3)`);
+        
+        if (failCount >= 3) {
+           console.log(`[Guardian] ❌ Token ${tokenAddress} failed quoting 3 times. Marking as unsupported/rug.`);
+           this.triggerExit(pos, "UNSUPPORTED_OR_RUG_NO_QUOTES");
+        }
       }
       
     }, 10000); // 10 seconds
