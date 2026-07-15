@@ -31,11 +31,13 @@ export class Orchestrator {
     this.tracker = new TrackerAgent();
 
     // Wire up events
-    this.guardian.onExitSignal = async (tokenAddress, reason) => {
+    this.guardian.onExitSignal = async (pos: any, reason: string) => {
+      const tokenAddress = pos.tokenAddress;
       console.log(`[Orchestrator] Guardian requested exit for ${tokenAddress} (${reason}), forwarding to Trader...`);
       
       const walletAddress = process.env.USER_WALLET_ADDRESS;
       let tokenAmountToSell = 0n;
+      let isPaperTrade = false;
 
       if (walletAddress && walletAddress.startsWith('0x')) {
         try {
@@ -52,10 +54,18 @@ export class Orchestrator {
         }
       }
 
+      if (tokenAmountToSell === 0n) {
+        console.warn(`[Orchestrator] Real wallet balance is 0. Closing position in DB without swapping.`);
+        await prisma.position.update({ where: { id: pos.id }, data: { status: 'CLOSED' } });
+        return;
+      }
+
       if (tokenAmountToSell > 0n) {
-        this.trader.processExitSignal(tokenAddress, tokenAmountToSell, reason);
+        // Mark as EXITING so Guardian stops monitoring it and doesn't retry instantly
+        await prisma.position.update({ where: { id: pos.id }, data: { status: 'EXITING' } });
+        this.trader.processExitSignal(pos.id, tokenAddress, tokenAmountToSell, reason);
       } else {
-        console.warn(`[Orchestrator] Aborting exit signal: Wallet has 0 balance for ${tokenAddress}`);
+        console.warn(`[Orchestrator] Aborting exit signal: Unable to process balance for ${tokenAddress}`);
       }
     };
 
@@ -83,8 +93,7 @@ export class Orchestrator {
         console.log(`[Orchestrator] Risk Warden approved. Forwarding to Trader with size ${riskEvaluation.recommendedSize}...`);
         this.trader.processSignal(tokenAddress, riskEvaluation.recommendedSize, 'SCOUT');
         
-        // Simulating the post-fill workflow: Start Guardian monitoring immediately
-        this.guardian.startMonitoring(tokenAddress, riskEvaluation.recommendedSize);
+        // Guardian now polls DB for OPEN positions autonomously, so we don't start monitoring manually here.
       } else {
         console.warn(`[Orchestrator] Risk Warden rejected signal for ${tokenAddress}. Reason: ${riskEvaluation.reason}`);
       }
@@ -202,14 +211,13 @@ export class Orchestrator {
           return;
         }
 
-        const isPaperTrade = tier === 3;
-        console.log(`[Orchestrator] Forwarding CopyBuy to Trader. Size: ${finalSize}... Paper Trade: ${isPaperTrade}`);
+        console.log(`[Orchestrator] Forwarding CopyBuy to Trader. Size: ${finalSize}...`);
         
         // Update cooldown
         this.tokenCooldowns.set(token, Date.now());
 
-        this.trader.processSignal(token, finalSize, 'COPYTRADE', wallet, isPaperTrade);
-        this.guardian.startMonitoring(token, finalSize);
+        this.trader.processSignal(token, finalSize, 'COPYTRADE', wallet);
+        // Guardian DB polling handles monitoring
       } else {
         console.warn(`[Orchestrator] CopyBuy Risk Warden VETO for ${token}: ${riskEvaluation.reason}`);
         if (chatId) {
@@ -252,7 +260,12 @@ export class Orchestrator {
       if (config && config.value === 'true') {
         console.log(`[Orchestrator] Copy-Exit is ON. Forcing Guardian to trigger exit...`);
         // We reuse the guardian exit logic which forwards to trader
-        this.guardian.onExitSignal!(token, `COPY_EXIT_TRIGGERED_BY_${wallet}`);
+        const pos = await prisma.position.findFirst({ where: { tokenAddress: token, status: 'OPEN' } });
+        if (pos) {
+          this.guardian.onExitSignal!(pos, `COPY_EXIT_TRIGGERED_BY_${wallet}`);
+        } else {
+          console.log(`[Orchestrator] No OPEN position found for ${token} to copy-exit.`);
+        }
       } else {
         console.log(`[Orchestrator] Copy-Exit is OFF. Ignoring sell signal.`);
       }
@@ -281,6 +294,9 @@ export class Orchestrator {
     
     // Start tracking wallets via webhook
     this.tracker.startListening();
+
+    // Start Guardian DB polling
+    this.guardian.init();
 
     // Start Dormant cleanup cronjob (every 12 hours)
     setInterval(async () => {

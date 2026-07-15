@@ -24,8 +24,10 @@ export class TraderAgent {
             }
         });
     }
-    async processSignal(tokenAddress, sizeInWeth, source = "SCOUT", copiedFrom, isPaperTrade = false) {
-        if (!isPaperTrade && (!walletClient || !account)) {
+    async processSignal(tokenAddress, sizeInWeth, source = 'SCOUT', copiedFrom) {
+        const tradeId = Math.random().toString(36).substring(7);
+        console.log(`[Trader] Processing Signal for ${tokenAddress} - Size: ${sizeInWeth}`);
+        if (!walletClient || !account) {
             console.error("[Trader] Auto-trading disabled (no PRIVATE_KEY). Aborting trade.");
             return;
         }
@@ -34,7 +36,6 @@ export class TraderAgent {
             const { calldata, amountOutMinimum, expectedOut, toAddress, value } = calldataResult;
             try {
                 if (this.executionMode === 'CONFIRM' && process.env.TELEGRAM_CHAT_ID) {
-                    const tradeId = Math.random().toString(36).substring(7);
                     const timeoutId = setTimeout(() => {
                         this.cancelPendingTrade(tradeId, Number(process.env.TELEGRAM_CHAT_ID), "Timeout (5 mins) reached.");
                     }, 5 * 60 * 1000);
@@ -49,15 +50,7 @@ export class TraderAgent {
                     await this.bot.api.sendMessage(process.env.TELEGRAM_CHAT_ID, `🚨 **PENDING BUY**\nToken: \`${tokenAddress}\`\nSize: \`${Number(sizeInWeth) / 1e18} WETH\`\n\nDo you want to execute this trade?`, { parse_mode: 'Markdown', reply_markup: keyboard });
                     return;
                 }
-                if (isPaperTrade) {
-                    console.log(`[Trader] 📄 PAPER TRADE: Simulating BUY for ${tokenAddress}...`);
-                    dbLogger.info(`PAPER BUY Simulated`, { token: tokenAddress, sizeEth: (Number(sizeInWeth) / 1e18).toFixed(6) });
-                    this.emitToSigningBoundary(tokenAddress, "0xPAPER_TX", 'BUY EXECUTED (PAPER)');
-                    const estimatedEntryPrice = Number(sizeInWeth) / Number(expectedOut || 1n);
-                    await this.registerPosition(tokenAddress, estimatedEntryPrice, Number(sizeInWeth) / 1e18, source, copiedFrom);
-                    return;
-                }
-                if (!walletClient)
+                if (!walletClient || !account)
                     throw new Error("WalletClient is null");
                 console.log(`[Trader] ⚡ Broadcasting BUY transaction for ${tokenAddress}...`);
                 const txHash = await walletClient.sendTransaction({
@@ -136,18 +129,20 @@ export class TraderAgent {
             }
         }
     }
-    async processExitSignal(tokenAddress, amountInToken, reason) {
+    async processExitSignal(posId, tokenAddress, amountInToken, reason) {
         if (!walletClient || !account) {
             console.error("[Trader] Auto-trading disabled (no PRIVATE_KEY). Aborting trade.");
+            await prisma.position.update({ where: { id: posId }, data: { status: 'EXIT_FAILED' } }).catch(console.error);
             return;
         }
         const calldataResult = await this.constructUnsignedSellTx(tokenAddress, amountInToken);
         if (calldataResult) {
             const { calldata, amountOutMinimum, expectedOut, toAddress } = calldataResult;
             try {
+                const estimatedExitPrice = Number(expectedOut || 1n) / Number(amountInToken || 1n);
                 console.log(`[Trader] ⚡ Broadcasting SELL transaction for ${tokenAddress}...`);
                 const txHash = await walletClient.sendTransaction({
-                    account,
+                    account: account,
                     to: toAddress,
                     data: calldata
                 });
@@ -157,8 +152,7 @@ export class TraderAgent {
                     console.log(`[Trader] 🎯 SELL TX Confirmed in block ${receipt.blockNumber}`);
                     dbLogger.info(`SELL TX Confirmed`, { txHash, token: tokenAddress, block: receipt.blockNumber.toString(), reason });
                     this.emitToSigningBoundary(tokenAddress, txHash, `SELL EXECUTED [${reason}]`);
-                    const estimatedExitPrice = Number(expectedOut || 1n) / Number(amountInToken || 1n);
-                    await this.updatePositionStatus(tokenAddress, estimatedExitPrice);
+                    await this.updatePositionStatus(posId, tokenAddress, estimatedExitPrice);
                 }
                 else {
                     throw new Error('Transaction reverted by network');
@@ -166,8 +160,9 @@ export class TraderAgent {
             }
             catch (error) {
                 console.error(`[Trader] ❌ SELL TX Failed:`, error);
-                dbLogger.error(`SELL TX Failed`, { token: tokenAddress, reason, error: String(error) });
-                this.emitToSigningBoundary(tokenAddress, "FAILED", `SELL REJECTED [${reason}]`);
+                dbLogger.error(`SELL TX Failed`, { token: tokenAddress, error: String(error) });
+                this.emitToSigningBoundary(tokenAddress, "FAILED", 'SELL REJECTED');
+                await prisma.position.update({ where: { id: posId }, data: { status: 'EXIT_FAILED' } }).catch(console.error);
             }
         }
     }
@@ -320,11 +315,10 @@ export class TraderAgent {
     /**
      * Updates a position's status to CLOSED in the database.
      */
-    async updatePositionStatus(tokenAddress, exitPrice) {
+    async updatePositionStatus(posId, tokenAddress, exitPrice) {
         try {
-            const position = await prisma.position.findFirst({
-                where: { tokenAddress, status: 'OPEN' },
-                orderBy: { createdAt: 'desc' }
+            const position = await prisma.position.findUnique({
+                where: { id: posId }
             });
             if (position) {
                 const pnlRatio = (exitPrice - position.entryPrice) / position.entryPrice;
