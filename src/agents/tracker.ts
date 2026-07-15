@@ -39,7 +39,7 @@ export class TrackerAgent {
             prisma.position.findMany({ orderBy: { createdAt: 'desc' }, take: 20 }),
             prisma.log.findMany({ orderBy: { createdAt: 'desc' }, take: 50 }),
             prisma.signal.count(),
-            prisma.position.count({ where: { status: 'OPEN' } }),
+            prisma.position.count({ where: { status: { in: ['OPEN', 'PENDING', 'EXITING'] } } }),
           ]);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ wallets, signals, positions, logs, totalSignals, openPositionsCount }));
