@@ -211,7 +211,10 @@ export class TraderAgent {
                 }
             }
             // 4. Slippage Protection (1%)
-            const amountOutMinimum = expectedOut > 0n ? (expectedOut * 99n) / 100n : 0n;
+            if (expectedOut === 0n) {
+                throw new Error('No active pool found (expectedOut = 0). Aborting to prevent TX revert.');
+            }
+            const amountOutMinimum = (expectedOut * 99n) / 100n;
             console.log(`[Trader] 🛡️ BUY amountOutMinimum: ${amountOutMinimum}`);
             // 5. Encode Universal Router execute() payload
             // Path encoding for V3: tokenIn (20 bytes) + fee (3 bytes) + tokenOut (20 bytes)
@@ -255,7 +258,10 @@ export class TraderAgent {
             // 1. Detect best pool fee tier dynamically
             const { fee: POOL_FEE, expectedOut } = await detectBestFee(tokenIn, WETH_ADDRESS, amountIn);
             // 2. Slippage Protection (1%)
-            const amountOutMinimum = expectedOut > 0n ? (expectedOut * 99n) / 100n : 0n;
+            if (expectedOut === 0n) {
+                throw new Error('No active pool found (expectedOut = 0). Aborting to prevent TX revert.');
+            }
+            const amountOutMinimum = (expectedOut * 99n) / 100n;
             console.log(`[Trader] 🛡️ SELL amountOutMinimum: ${amountOutMinimum}`);
             // 3. Encode path: tokenIn + fee + WETH
             const feeHex = POOL_FEE.toString(16).padStart(6, '0');
