@@ -18,8 +18,7 @@ export class Orchestrator {
   private tracker: TrackerAgent;
   private bot: Bot;
 
-  // Anti-spam cooldown per token (1 hour)
-  private tokenCooldowns: Map<string, number> = new Map();
+  private processingTokens: Set<string> = new Set();
 
   constructor(bot: Bot) {
     this.bot = bot;
@@ -70,7 +69,27 @@ export class Orchestrator {
     };
 
     this.scout.onSignal = async (tokenAddress) => {
-      console.log(`[Orchestrator] Received signal for ${tokenAddress}, consulting Risk Warden...`);
+      const lowerToken = tokenAddress.toLowerCase();
+      if (this.processingTokens.has(lowerToken)) return;
+      this.processingTokens.add(lowerToken);
+
+      try {
+        const COOLDOWN_MS = 60 * 60 * 1000;
+        const existingPos = await prisma.position.findFirst({
+           where: { 
+             tokenAddress: { equals: tokenAddress, mode: 'insensitive' }, 
+             OR: [
+               { status: { in: ['OPEN', 'PENDING', 'EXITING'] } },
+               { createdAt: { gte: new Date(Date.now() - COOLDOWN_MS) } }
+             ]
+           }
+        });
+        if (existingPos) {
+           console.log(`[Orchestrator] ℹ️ Dedup: Active position or cooldown exists for ${tokenAddress}, ignoring Scout signal.`);
+           return;
+        }
+
+        console.log(`[Orchestrator] Received signal for ${tokenAddress}, consulting Risk Warden...`);
       
       // Save Signal to DB
       try {
@@ -97,6 +116,9 @@ export class Orchestrator {
       } else {
         console.warn(`[Orchestrator] Risk Warden rejected signal for ${tokenAddress}. Reason: ${riskEvaluation.reason}`);
       }
+      } finally {
+        setTimeout(() => this.processingTokens.delete(lowerToken), 10000);
+      }
     };
 
     // Tracker Events
@@ -110,6 +132,29 @@ export class Orchestrator {
     };
 
     this.tracker.onCopyBuySignal = async (wallet, token, amount, tier, bundleId, timestamp, txHash) => {
+      const lowerToken = token.toLowerCase();
+      if (this.processingTokens.has(lowerToken)) {
+        console.log(`[Orchestrator] ℹ️ Dedup: Already processing a signal for ${token}, ignoring this concurrent CopyBuy.`);
+        return;
+      }
+      this.processingTokens.add(lowerToken);
+
+      try {
+        const COOLDOWN_MS = 60 * 60 * 1000;
+        const existingPos = await prisma.position.findFirst({
+           where: { 
+             tokenAddress: { equals: token, mode: 'insensitive' }, 
+             OR: [
+               { status: { in: ['OPEN', 'PENDING', 'EXITING'] } },
+               { createdAt: { gte: new Date(Date.now() - COOLDOWN_MS) } }
+             ]
+           }
+        });
+        if (existingPos) {
+           console.log(`[Orchestrator] ℹ️ Dedup: Active position or cooldown exists for ${token}, ignoring CopyBuy signal.`);
+           return;
+        }
+
       console.log(`[Orchestrator] 🎯 CopyBuy Signal received for ${token} from ${wallet} (Tier: ${tier})`);
       
       let tokenMetadata = token;
@@ -139,14 +184,6 @@ export class Orchestrator {
         return;
       }
 
-      // 1.5. Token Cooldown Filter (1 Hour)
-      const COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
-      const lastBuyTime = this.tokenCooldowns.get(token) || 0;
-      if (Date.now() - lastBuyTime < COOLDOWN_MS) {
-        const remainingMins = Math.ceil((COOLDOWN_MS - (Date.now() - lastBuyTime)) / 60000);
-        console.warn(`[Orchestrator] 🚫 Signal rejected: Token ${token} is on cooldown for another ${remainingMins} minutes.`);
-        return;
-      }
 
       // 2. Min Buy Size Filter (0.001 ETH)
       const minBuy = 1000000000000000n; // 0.001 ETH
@@ -213,8 +250,6 @@ export class Orchestrator {
 
         console.log(`[Orchestrator] Forwarding CopyBuy to Trader. Size: ${finalSize}...`);
         
-        // Update cooldown
-        this.tokenCooldowns.set(token, Date.now());
 
         this.trader.processSignal(token, finalSize, 'COPYTRADE', wallet, txHash);
         // Guardian DB polling handles monitoring
@@ -227,6 +262,9 @@ export class Orchestrator {
             { parse_mode: 'HTML' }
           ).catch(console.error);
         }
+      }
+      } finally {
+        setTimeout(() => this.processingTokens.delete(lowerToken), 10000);
       }
     };
 
@@ -260,7 +298,7 @@ export class Orchestrator {
       if (config && config.value === 'true') {
         console.log(`[Orchestrator] Copy-Exit is ON. Forcing Guardian to trigger exit...`);
         // We reuse the guardian exit logic which forwards to trader
-        const pos = await prisma.position.findFirst({ where: { tokenAddress: token, status: 'OPEN' } });
+        const pos = await prisma.position.findFirst({ where: { tokenAddress: { equals: token, mode: 'insensitive' }, status: 'OPEN' } });
         if (pos) {
           this.guardian.onExitSignal!(pos, `COPY_EXIT_TRIGGERED_BY_${wallet}`);
         } else {
