@@ -248,7 +248,7 @@ export class TraderAgent {
           dbLogger.info(`SELL TX Confirmed`, { txHash: txHashFinal, token: tokenAddress, block: blockNumber.toString(), reason, mode });
           this.emitToSigningBoundary(tokenAddress, txHashFinal, `SELL EXECUTED [${reason}]`);
 
-          await this.updatePositionStatus(posId, tokenAddress, estimatedExitPrice);
+          await this.updatePositionStatus(posId, tokenAddress, estimatedExitPrice, reason);
         } else {
           throw new Error('Transaction reverted by network');
         }
@@ -274,7 +274,7 @@ export class TraderAgent {
       console.error(`[Trader] ❌ Failed to construct SELL calldata for ${tokenAddress}.`);
       if (reason === 'UNSUPPORTED_OR_RUG_NO_QUOTES') {
          console.log(`[Trader] 🚮 Token is a rug/unsupported. Marking position as CLOSED (100% loss).`);
-         await this.updatePositionStatus(posId, tokenAddress, 0);
+         await this.updatePositionStatus(posId, tokenAddress, 0, reason);
       } else {
          console.log(`[Trader] Marking as EXIT_FAILED.`);
          await prisma.position.update({ where: { id: posId }, data: { status: 'EXIT_FAILED' } }).catch(console.error);
@@ -685,7 +685,7 @@ export class TraderAgent {
   /**
    * Updates a position's status to CLOSED in the database.
    */
-  public async updatePositionStatus(posId: string, tokenAddress: string, exitPrice: number) {
+  public async updatePositionStatus(posId: string, tokenAddress: string, exitPrice: number, exitReason?: string) {
     try {
       const position = await prisma.position.findUnique({
         where: { id: posId }
@@ -695,7 +695,7 @@ export class TraderAgent {
         
         await prisma.position.update({
           where: { id: position.id },
-          data: { status: 'CLOSED', exitPrice, pnl: pnlRatio }
+          data: { status: 'CLOSED', exitPrice, pnl: pnlRatio, exitReason } // IDE should pick up new types now
         });
         console.log(`[Trader] 💾 DB UPDATE: Position ${position.id} CLOSED in DB. PNL: ${(pnlRatio*100).toFixed(2)}%`);
 
