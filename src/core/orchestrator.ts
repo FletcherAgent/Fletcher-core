@@ -41,7 +41,8 @@ export class Orchestrator {
       if (pos.tradingMode === 'DRY_RUN') {
         // Calculate the theoretical token amount we own based on the simulated entry
         const tokensOwned = pos.entryPrice > 0 ? (pos.size / pos.entryPrice) : 0;
-        tokenAmountToSell = BigInt(Math.floor(tokensOwned * 1e18));
+        const tokensOwnedStr = (tokensOwned * 1e18).toLocaleString('fullwide', {useGrouping:false, maximumFractionDigits:0});
+        tokenAmountToSell = BigInt(tokensOwnedStr);
         console.log(`[Orchestrator] Calculated DRY_RUN simulated token balance: ${tokenAmountToSell}`);
       } else if (walletAddress && walletAddress.startsWith('0x')) {
         try {
