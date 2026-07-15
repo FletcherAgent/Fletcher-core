@@ -38,7 +38,12 @@ export class Orchestrator {
       let tokenAmountToSell = 0n;
       let isPaperTrade = false;
 
-      if (walletAddress && walletAddress.startsWith('0x')) {
+      if (pos.tradingMode === 'DRY_RUN') {
+        // Calculate the theoretical token amount we own based on the simulated entry
+        const tokensOwned = pos.entryPrice > 0 ? (pos.size / pos.entryPrice) : 0;
+        tokenAmountToSell = BigInt(Math.floor(tokensOwned * 1e18));
+        console.log(`[Orchestrator] Calculated DRY_RUN simulated token balance: ${tokenAmountToSell}`);
+      } else if (walletAddress && walletAddress.startsWith('0x')) {
         try {
           const erc20Abi = parseAbi(['function balanceOf(address owner) view returns (uint256)']);
           tokenAmountToSell = await publicClient.readContract({

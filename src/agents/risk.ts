@@ -40,8 +40,7 @@ export class RiskWardenAgent {
       const mode = config ? config.value : 'LIVE';
 
       if (mode === 'DRY_RUN') {
-        // Mock a 1 ETH balance for DRY_RUN simulations so the logic doesn't block due to insufficient real funds
-        currentBalance = 1000000000000000000n;
+        currentBalance = 1000000000000000000n; // Mock 1 ETH for simulation
       } else {
         currentBalance = await publicClient.getBalance({ address: walletAddress as `0x${string}` });
       }
