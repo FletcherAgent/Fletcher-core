@@ -183,7 +183,7 @@ export class Orchestrator {
                 console.log(`[Orchestrator] Forwarding CopyBuy to Trader. Size: ${finalSize}...`);
                 // Update cooldown
                 this.tokenCooldowns.set(token, Date.now());
-                this.trader.processSignal(token, finalSize, 'COPYTRADE', wallet);
+                this.trader.processSignal(token, finalSize, 'COPYTRADE', wallet, txHash);
                 // Guardian DB polling handles monitoring
             }
             else {

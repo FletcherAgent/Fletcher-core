@@ -216,7 +216,7 @@ export class Orchestrator {
         // Update cooldown
         this.tokenCooldowns.set(token, Date.now());
 
-        this.trader.processSignal(token, finalSize, 'COPYTRADE', wallet);
+        this.trader.processSignal(token, finalSize, 'COPYTRADE', wallet, txHash);
         // Guardian DB polling handles monitoring
       } else {
         console.warn(`[Orchestrator] CopyBuy Risk Warden VETO for ${token}: ${riskEvaluation.reason}`);

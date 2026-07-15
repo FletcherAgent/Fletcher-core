@@ -27,30 +27,71 @@ export async function detectBestFee(
   const QUOTER_ADDRESS = process.env.QUOTER_ADDRESS;
 
   if (!QUOTER_ADDRESS) {
-    console.warn('[PoolFeeDetector] QUOTER_ADDRESS not set. Falling back to default fee 3000.');
-    return { fee: 3000, expectedOut: 0n };
+    throw new Error('[PoolFeeDetector] ❌ QUOTER_ADDRESS not set in .env! Cannot perform real queries without Quoter.');
   }
 
-  const quoterAbi = parseAbi([
-    'function quoteExactInputSingle(address,address,uint24,uint256,uint160) external returns (uint256)'
-  ]);
+  const quoterAbi = [
+    {
+      type: 'function',
+      name: 'quoteExactInputSingle',
+      inputs: [
+        {
+          name: 'key',
+          type: 'tuple',
+          components: [
+            { name: 'currency0', type: 'address' },
+            { name: 'currency1', type: 'address' },
+            { name: 'fee', type: 'uint24' },
+            { name: 'tickSpacing', type: 'int24' },
+            { name: 'hooks', type: 'address' }
+          ]
+        },
+        { name: 'zeroForOne', type: 'bool' },
+        { name: 'amountIn', type: 'uint128' },
+        { name: 'sqrtPriceLimitX96', type: 'uint160' },
+        { name: 'hookData', type: 'bytes' }
+      ],
+      outputs: [
+        { name: 'amountOut', type: 'uint256' },
+        { name: 'gasEstimate', type: 'uint256' }
+      ],
+      stateMutability: 'nonpayable'
+    }
+  ] as const;
+
+  // Determine token order
+  const isZeroForOne = BigInt(tokenIn) < BigInt(tokenOut);
+  const currency0 = isZeroForOne ? tokenIn : tokenOut;
+  const currency1 = isZeroForOne ? tokenOut : tokenIn;
 
   // Query all fee tiers in parallel
   const results = await Promise.allSettled(
     FEE_TIERS.map(async (fee) => {
+      // Common tickSpacings: 500 -> 10, 3000 -> 60, 10000 -> 200
+      let tickSpacing = 60;
+      if (fee === 500) tickSpacing = 10;
+      else if (fee === 10000) tickSpacing = 200;
+
       const out = await publicClient.readContract({
         address: QUOTER_ADDRESS as `0x${string}`,
         abi: quoterAbi,
         functionName: 'quoteExactInputSingle',
         args: [
-          tokenIn as `0x${string}`,
-          tokenOut as `0x${string}`,
-          fee,
+          {
+            currency0: currency0 as `0x${string}`,
+            currency1: currency1 as `0x${string}`,
+            fee,
+            tickSpacing,
+            hooks: '0x0000000000000000000000000000000000000000' as `0x${string}`
+          },
+          isZeroForOne,
           amountIn,
-          0n
+          0n, // sqrtPriceLimitX96
+          '0x' as `0x${string}`
         ]
-      }) as bigint;
-      return { fee, expectedOut: out };
+      }) as unknown as [bigint, bigint];
+      
+      return { fee, expectedOut: out[0] };
     })
   );
 
@@ -70,7 +111,7 @@ export async function detectBestFee(
   if (best.expectedOut > 0n) {
     console.log(`[PoolFeeDetector] ✅ Best pool: fee=${best.fee} (${best.fee / 10000}%) → expectedOut=${best.expectedOut}`);
   } else {
-    console.warn(`[PoolFeeDetector] ⚠️ No active pool found for ${tokenIn} → ${tokenOut}. Using fee=3000, amountOutMin=0 (sniper mode).`);
+    throw new Error(`[PoolFeeDetector] ❌ No active pool found for ${tokenIn} → ${tokenOut}. Simulation and dummy data are disabled.`);
   }
 
   return best;

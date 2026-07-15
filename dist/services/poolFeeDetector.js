@@ -1,5 +1,4 @@
 import { publicClient } from './viem.js';
-import { parseAbi } from 'viem';
 /**
  * All Uniswap V3/V4 fee tiers to probe, sorted by most common first.
  * 500 = 0.05%, 3000 = 0.3%, 10000 = 1%
@@ -18,24 +17,65 @@ export async function detectBestFee(tokenIn, tokenOut, amountIn) {
         console.warn('[PoolFeeDetector] QUOTER_ADDRESS not set. Falling back to default fee 3000.');
         return { fee: 3000, expectedOut: 0n };
     }
-    const quoterAbi = parseAbi([
-        'function quoteExactInputSingle(address,address,uint24,uint256,uint160) external returns (uint256)'
-    ]);
+    const quoterAbi = [
+        {
+            type: 'function',
+            name: 'quoteExactInputSingle',
+            inputs: [
+                {
+                    name: 'key',
+                    type: 'tuple',
+                    components: [
+                        { name: 'currency0', type: 'address' },
+                        { name: 'currency1', type: 'address' },
+                        { name: 'fee', type: 'uint24' },
+                        { name: 'tickSpacing', type: 'int24' },
+                        { name: 'hooks', type: 'address' }
+                    ]
+                },
+                { name: 'zeroForOne', type: 'bool' },
+                { name: 'amountIn', type: 'uint128' },
+                { name: 'sqrtPriceLimitX96', type: 'uint160' },
+                { name: 'hookData', type: 'bytes' }
+            ],
+            outputs: [
+                { name: 'amountOut', type: 'uint256' },
+                { name: 'gasEstimate', type: 'uint256' }
+            ],
+            stateMutability: 'nonpayable'
+        }
+    ];
+    // Determine token order
+    const isZeroForOne = BigInt(tokenIn) < BigInt(tokenOut);
+    const currency0 = isZeroForOne ? tokenIn : tokenOut;
+    const currency1 = isZeroForOne ? tokenOut : tokenIn;
     // Query all fee tiers in parallel
     const results = await Promise.allSettled(FEE_TIERS.map(async (fee) => {
+        // Common tickSpacings: 500 -> 10, 3000 -> 60, 10000 -> 200
+        let tickSpacing = 60;
+        if (fee === 500)
+            tickSpacing = 10;
+        else if (fee === 10000)
+            tickSpacing = 200;
         const out = await publicClient.readContract({
             address: QUOTER_ADDRESS,
             abi: quoterAbi,
             functionName: 'quoteExactInputSingle',
             args: [
-                tokenIn,
-                tokenOut,
-                fee,
+                {
+                    currency0: currency0,
+                    currency1: currency1,
+                    fee,
+                    tickSpacing,
+                    hooks: '0x0000000000000000000000000000000000000000'
+                },
+                isZeroForOne,
                 amountIn,
-                0n
+                0n, // sqrtPriceLimitX96
+                '0x'
             ]
         });
-        return { fee, expectedOut: out };
+        return { fee, expectedOut: out[0] };
     }));
     let best = { fee: 3000, expectedOut: 0n };
     for (let i = 0; i < results.length; i++) {

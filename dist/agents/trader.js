@@ -1,4 +1,4 @@
-import { encodeFunctionData, encodeAbiParameters, parseAbiParameters, parseAbi, erc20Abi } from 'viem';
+import { encodeFunctionData, encodeAbiParameters, decodeAbiParameters, parseAbiParameters, parseAbi, concat, erc20Abi } from 'viem';
 import { detectBestFee } from '../services/poolFeeDetector.js';
 import { dbLogger } from '../services/logger.js';
 import { InlineKeyboard } from 'grammy';
@@ -24,14 +24,14 @@ export class TraderAgent {
             }
         });
     }
-    async processSignal(tokenAddress, sizeInWeth, source = 'SCOUT', copiedFrom) {
+    async processSignal(tokenAddress, sizeInWeth, source = 'SCOUT', copiedFrom, txHash) {
         const tradeId = Math.random().toString(36).substring(7);
         console.log(`[Trader] Processing Signal for ${tokenAddress} - Size: ${sizeInWeth}`);
         if (!walletClient || !account) {
             console.error("[Trader] Auto-trading disabled (no PRIVATE_KEY). Aborting trade.");
             return;
         }
-        const calldataResult = await this.constructUnsignedSwapTx(tokenAddress, sizeInWeth);
+        const calldataResult = await this.constructUnsignedSwapTx(tokenAddress, sizeInWeth, txHash);
         if (calldataResult) {
             const { calldata, amountOutMinimum, expectedOut, toAddress, value } = calldataResult;
             try {
@@ -172,10 +172,10 @@ export class TraderAgent {
     }
     /**
      * Constructs a BUY transaction payload using Universal Router v4 execute().
-     * Command 0x00 = V3_SWAP_EXACT_IN: WETH -> tokenOut
+     * Uses NOXA dynamic duplication if txHash points to a NOXA swap.
      */
-    async constructUnsignedSwapTx(tokenOut, amountIn) {
-        console.log(`[Trader] Constructing Universal Router BUY calldata for WETH -> ${tokenOut}...`);
+    async constructUnsignedSwapTx(tokenOut, amountIn, txHash) {
+        console.log(`[Trader] Constructing BUY calldata for WETH -> ${tokenOut}...`);
         const WETH_ADDRESS = process.env.WETH_ADDRESS;
         const QUOTER_ADDRESS = process.env.QUOTER_ADDRESS;
         const ROUTER_ADDRESS = process.env.ROUTER_ADDRESS;
@@ -184,6 +184,45 @@ export class TraderAgent {
             throw new Error('❌ CRITICAL: WETH_ADDRESS, QUOTER_ADDRESS, ROUTER_ADDRESS, or USER_WALLET_ADDRESS missing in .env');
         }
         const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 5); // 5 mins
+        // --- NOXA DYNAMIC DUPLICATION (Fallback) ---
+        if (txHash) {
+            try {
+                console.log(`[Trader] Attempting NOXA Dynamic Duplication from ${txHash}...`);
+                const originalTx = await publicClient.getTransaction({ hash: txHash });
+                if (originalTx && originalTx.input.startsWith('0xc1120e3d') && originalTx.to?.toLowerCase() === '0xf193ede778a92dc37cb450a1ef1565ed1e8b7964') {
+                    console.log(`[Trader] 🎯 NOXA Transaction Detected! Slicing calldata...`);
+                    // The calldata is: 0xc1120e3d + 10 words (320 bytes = 640 hex chars)
+                    // Word 4 (index 4) is minOut. Word 5 is recipient.
+                    // Let's decode it fully using ABI
+                    const noxaAbiParams = parseAbiParameters('address, address, address, uint256, uint256, address, uint256, uint256, uint256, uint256');
+                    const decodedParams = decodeAbiParameters(noxaAbiParams, `0x${originalTx.input.slice(10)}`);
+                    // Calculate proportional minOut
+                    const originalAmountIn = originalTx.value;
+                    let calculatedMinOut = 0n;
+                    if (originalAmountIn > 0n) {
+                        calculatedMinOut = (BigInt(decodedParams[4]) * amountIn) / originalAmountIn;
+                    }
+                    const slippageMinOut = (calculatedMinOut * 99n) / 100n; // 1% extra slippage
+                    // Replace Recipient (Word 5) and minOut (Word 4)
+                    decodedParams[4] = slippageMinOut;
+                    decodedParams[5] = USER_WALLET;
+                    decodedParams[6] = deadline;
+                    const newCalldata = concat(['0xc1120e3d', encodeAbiParameters(noxaAbiParams, decodedParams)]);
+                    console.log(`[Trader] ✅ NOXA Calldata Cloned! Expected MinOut: ${slippageMinOut}`);
+                    return {
+                        calldata: newCalldata,
+                        amountOutMinimum: slippageMinOut,
+                        expectedOut: calculatedMinOut,
+                        toAddress: originalTx.to,
+                        value: amountIn
+                    };
+                }
+            }
+            catch (err) {
+                console.warn(`[Trader] NOXA Duplication failed, falling back to Universal Router...`, err);
+            }
+        }
+        // -------------------------------------------
         try {
             // 1. Fetch Total Supply for 2% Cap check
             const erc20Abi = parseAbi(['function totalSupply() view returns (uint256)']);
@@ -216,14 +255,45 @@ export class TraderAgent {
             }
             const amountOutMinimum = (expectedOut * 99n) / 100n;
             console.log(`[Trader] 🛡️ BUY amountOutMinimum: ${amountOutMinimum}`);
-            // 5. Encode Universal Router execute() payload
-            // Path encoding for V3: tokenIn (20 bytes) + fee (3 bytes) + tokenOut (20 bytes)
-            const feeHex = POOL_FEE.toString(16).padStart(6, '0'); // 3 bytes = 6 hex chars
-            const path = `0x${WETH_ADDRESS.replace('0x', '')}${feeHex}${tokenOut.replace('0x', '')}`;
-            // Encode the swap input tuple: (address recipient, uint256 amountIn, uint256 amountOutMin, bytes path, bool payerIsUser)
-            const swapInput = encodeAbiParameters(parseAbiParameters('address, uint256, uint256, bytes, bool'), [USER_WALLET, amountIn, amountOutMinimum, path, false]);
-            // commands: 0x00 = V3_SWAP_EXACT_IN
-            const commands = '0x00';
+            // 5. Encode Universal Router execute() payload for Uniswap V4
+            // Command 0x10 = V4_SWAP
+            const commands = '0x10';
+            // In Universal Router, V4_SWAP input is abi.encode(IV4Router.ExactInputSingleParams)
+            // ExactInputSingleParams = (PoolKey key, bool zeroForOne, uint128 amountIn, uint128 amountOutMinimum, bytes hookData)
+            // PoolKey = (address currency0, address currency1, uint24 fee, int24 tickSpacing, address hooks)
+            const isZeroForOne = BigInt(WETH_ADDRESS) < BigInt(tokenOut);
+            const currency0 = isZeroForOne ? WETH_ADDRESS : tokenOut;
+            const currency1 = isZeroForOne ? tokenOut : WETH_ADDRESS;
+            let tickSpacing = 60;
+            if (POOL_FEE === 500)
+                tickSpacing = 10;
+            else if (POOL_FEE === 10000)
+                tickSpacing = 200;
+            const exactInputSingleParamsAbi = [{
+                    type: 'tuple',
+                    components: [
+                        { name: 'poolKey', type: 'tuple', components: [{ name: 'currency0', type: 'address' }, { name: 'currency1', type: 'address' }, { name: 'fee', type: 'uint24' }, { name: 'tickSpacing', type: 'int24' }, { name: 'hooks', type: 'address' }] },
+                        { name: 'zeroForOne', type: 'bool' },
+                        { name: 'amountIn', type: 'uint128' },
+                        { name: 'amountOutMinimum', type: 'uint128' },
+                        { name: 'hookData', type: 'bytes' }
+                    ]
+                }];
+            const swapInput = encodeAbiParameters(exactInputSingleParamsAbi, [
+                {
+                    poolKey: {
+                        currency0: currency0,
+                        currency1: currency1,
+                        fee: POOL_FEE,
+                        tickSpacing,
+                        hooks: '0x0000000000000000000000000000000000000000'
+                    },
+                    zeroForOne: isZeroForOne,
+                    amountIn,
+                    amountOutMinimum,
+                    hookData: '0x'
+                }
+            ]);
             const universalRouterAbi = parseAbi([
                 'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
             ]);
@@ -232,7 +302,7 @@ export class TraderAgent {
                 functionName: 'execute',
                 args: [commands, [swapInput], deadline]
             });
-            console.log(`[Trader] ✅ BUY Calldata (Universal Router): ${calldata.substring(0, 66)}...`);
+            console.log(`[Trader] ✅ BUY Calldata (Universal Router V4): ${calldata.substring(0, 66)}...`);
             return { calldata, amountOutMinimum, expectedOut, toAddress: ROUTER_ADDRESS, value: amountIn };
         }
         catch (error) {
@@ -263,12 +333,42 @@ export class TraderAgent {
             }
             const amountOutMinimum = (expectedOut * 99n) / 100n;
             console.log(`[Trader] 🛡️ SELL amountOutMinimum: ${amountOutMinimum}`);
-            // 3. Encode path: tokenIn + fee + WETH
-            const feeHex = POOL_FEE.toString(16).padStart(6, '0');
-            const path = `0x${tokenIn.replace('0x', '')}${feeHex}${WETH_ADDRESS.replace('0x', '')}`;
-            // 4. Encode swap input tuple
-            const swapInput = encodeAbiParameters(parseAbiParameters('address, uint256, uint256, bytes, bool'), [USER_WALLET, amountIn, amountOutMinimum, path, false]);
-            const commands = '0x00';
+            // 3. Encode Universal Router execute() payload for Uniswap V4
+            // Command 0x10 = V4_SWAP
+            const commands = '0x10';
+            const isZeroForOne = BigInt(tokenIn) < BigInt(WETH_ADDRESS);
+            const currency0 = isZeroForOne ? tokenIn : WETH_ADDRESS;
+            const currency1 = isZeroForOne ? WETH_ADDRESS : tokenIn;
+            let tickSpacing = 60;
+            if (POOL_FEE === 500)
+                tickSpacing = 10;
+            else if (POOL_FEE === 10000)
+                tickSpacing = 200;
+            const exactInputSingleParamsAbi = [{
+                    type: 'tuple',
+                    components: [
+                        { name: 'poolKey', type: 'tuple', components: [{ name: 'currency0', type: 'address' }, { name: 'currency1', type: 'address' }, { name: 'fee', type: 'uint24' }, { name: 'tickSpacing', type: 'int24' }, { name: 'hooks', type: 'address' }] },
+                        { name: 'zeroForOne', type: 'bool' },
+                        { name: 'amountIn', type: 'uint128' },
+                        { name: 'amountOutMinimum', type: 'uint128' },
+                        { name: 'hookData', type: 'bytes' }
+                    ]
+                }];
+            const swapInput = encodeAbiParameters(exactInputSingleParamsAbi, [
+                {
+                    poolKey: {
+                        currency0: currency0,
+                        currency1: currency1,
+                        fee: POOL_FEE,
+                        tickSpacing,
+                        hooks: '0x0000000000000000000000000000000000000000'
+                    },
+                    zeroForOne: isZeroForOne,
+                    amountIn,
+                    amountOutMinimum,
+                    hookData: '0x'
+                }
+            ]);
             const universalRouterAbi = parseAbi([
                 'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
             ]);
