@@ -72,7 +72,7 @@ export class TraderAgent {
         
         if (mode === 'DRY_RUN') {
           console.log(`[Trader] 🛡️ DRY RUN: Simulating BUY transaction for ${tokenAddress}...`);
-          txHash = `0xdryrun${Date.now()}${Math.floor(Math.random()*1000)}` as `0x${string}`;
+          txHash = `0xdddddddddddddddddddddddddddddddd${Date.now().toString(16).padStart(32, '0')}` as `0x${string}`;
           blockNumber = await publicClient.getBlockNumber();
         } else {
           console.log(`[Trader] ⚡ Broadcasting BUY transaction for ${tokenAddress}...`);
@@ -131,7 +131,7 @@ export class TraderAgent {
 
       if (mode === 'DRY_RUN') {
         console.log(`[Trader] 🛡️ DRY RUN: Simulating CONFIRMED BUY transaction for ${trade.tokenAddress}...`);
-        txHash = `0xdryrun${Date.now()}${Math.floor(Math.random()*1000)}` as `0x${string}`;
+        txHash = `0xdddddddddddddddddddddddddddddddd${Date.now().toString(16).padStart(32, '0')}` as `0x${string}`;
         blockNumber = await publicClient.getBlockNumber();
         if (chatId) await this.bot.api.sendMessage(chatId, `🚀 **DRY RUN TX Simulated!**\nHash: \`${txHash}\``, { parse_mode: 'Markdown' });
       } else {
@@ -203,7 +203,7 @@ export class TraderAgent {
 
         if (mode === 'DRY_RUN') {
           console.log(`[Trader] 🛡️ DRY RUN: Simulating SELL transaction for ${tokenAddress}...`);
-          txHashFinal = `0xdryrun${Date.now()}${Math.floor(Math.random()*1000)}` as `0x${string}`;
+          txHashFinal = `0xdddddddddddddddddddddddddddddddd${Date.now().toString(16).padStart(32, '0')}` as `0x${string}`;
           blockNumber = await publicClient.getBlockNumber();
         } else {
           // --- 0. Check and Approve Allowance ---
