@@ -30,7 +30,7 @@ export class Orchestrator {
     this.tracker = new TrackerAgent();
 
     // Wire up events
-    this.guardian.onExitSignal = async (pos: any, reason: string) => {
+    this.guardian.onExitSignal = async (pos: any, reason: string, txHash?: string) => {
       const tokenAddress = pos.tokenAddress;
       console.log(`[Orchestrator] Guardian requested exit for ${tokenAddress} (${reason}), forwarding to Trader...`);
       
@@ -62,7 +62,7 @@ export class Orchestrator {
       if (tokenAmountToSell > 0n) {
         // Mark as EXITING so Guardian stops monitoring it and doesn't retry instantly
         await prisma.position.update({ where: { id: pos.id }, data: { status: 'EXITING' } });
-        this.trader.processExitSignal(pos.id, tokenAddress, tokenAmountToSell, reason);
+        this.trader.processExitSignal(pos.id, tokenAddress, tokenAmountToSell, reason, txHash);
       } else {
         console.warn(`[Orchestrator] Aborting exit signal: Unable to process balance for ${tokenAddress}`);
       }
@@ -300,7 +300,7 @@ export class Orchestrator {
         // We reuse the guardian exit logic which forwards to trader
         const pos = await prisma.position.findFirst({ where: { tokenAddress: { equals: token, mode: 'insensitive' }, status: 'OPEN' } });
         if (pos) {
-          this.guardian.onExitSignal!(pos, `COPY_EXIT_TRIGGERED_BY_${wallet}`);
+          this.guardian.onExitSignal!(pos, `COPY_EXIT_TRIGGERED_BY_${wallet}`, txHash);
         } else {
           console.log(`[Orchestrator] No OPEN position found for ${token} to copy-exit.`);
         }

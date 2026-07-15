@@ -1,4 +1,4 @@
-import { encodeFunctionData, encodeAbiParameters, decodeAbiParameters, parseAbiParameters, parseAbi, parseEther, concat, toHex, pad, erc20Abi } from 'viem';
+import { encodeFunctionData, encodeAbiParameters, decodeAbiParameters, parseAbiParameters, parseAbi, parseEther, concat, toHex, pad, erc20Abi, decodeEventLog } from 'viem';
 import { detectBestFee } from '../services/poolFeeDetector.js';
 import { dbLogger } from '../services/logger.js';
 import { Bot, InlineKeyboard } from 'grammy';
@@ -144,14 +144,14 @@ export class TraderAgent {
       }
     }
   }
-  public async processExitSignal(posId: string, tokenAddress: string, amountInToken: bigint, reason: string) {
+  public async processExitSignal(posId: string, tokenAddress: string, amountInToken: bigint, reason: string, txHash?: string) {
     if (!walletClient || !account) {
       console.error("[Trader] Auto-trading disabled (no PRIVATE_KEY). Aborting trade.");
       await prisma.position.update({ where: { id: posId }, data: { status: 'EXIT_FAILED' } }).catch(console.error);
       return;
     }
     
-    const calldataResult = await this.constructUnsignedSellTx(tokenAddress, amountInToken);
+    const calldataResult = await this.constructUnsignedSellTx(tokenAddress, amountInToken, txHash);
     if (calldataResult) {
       const { calldata, amountOutMinimum, expectedOut, toAddress } = calldataResult;
       
@@ -375,7 +375,7 @@ export class TraderAgent {
    * Constructs a SELL transaction payload using Universal Router v4 execute().
    * Command 0x00 = V3_SWAP_EXACT_IN: tokenIn -> WETH
    */
-  public async constructUnsignedSellTx(tokenIn: string, amountIn: bigint): Promise<{ calldata: string, amountOutMinimum: bigint, expectedOut: bigint, toAddress: `0x${string}` } | null> {
+  public async constructUnsignedSellTx(tokenIn: string, amountIn: bigint, txHash?: string): Promise<{ calldata: string, amountOutMinimum: bigint, expectedOut: bigint, toAddress: `0x${string}` } | null> {
     console.log(`[Trader] Constructing Universal Router SELL calldata for ${tokenIn} -> WETH...`);
 
     const WETH_ADDRESS = process.env.WETH_ADDRESS;
@@ -389,26 +389,89 @@ export class TraderAgent {
 
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 5);
 
+    if (txHash) {
+      try {
+        console.log(`[Trader] Attempting Dynamic Duplication for SELL from ${txHash}...`);
+        const originalTx = await publicClient.getTransaction({ hash: txHash as `0x${string}` });
+        
+        if (originalTx && originalTx.to) {
+           const receipt = await publicClient.getTransactionReceipt({ hash: txHash as `0x${string}` });
+           const erc20AbiForLog = parseAbi(['event Transfer(address indexed from, address indexed to, uint256 value)']);
+           
+           let originalAmountIn = 0n;
+           for (const log of receipt.logs) {
+             if (log.address.toLowerCase() === tokenIn.toLowerCase()) {
+               try {
+                 const decoded = decodeEventLog({ abi: erc20AbiForLog, data: log.data, topics: log.topics });
+                 if ((decoded.args as any).from.toLowerCase() === originalTx.from.toLowerCase()) {
+                   originalAmountIn = (decoded.args as any).value as bigint;
+                   break;
+                 }
+               } catch(e) {}
+             }
+           }
+
+           if (originalAmountIn > 0n) {
+             const origHex = originalAmountIn.toString(16).padStart(64, '0');
+             const newHex = amountIn.toString(16).padStart(64, '0');
+             const zeroHex = '0000000000000000000000000000000000000000000000000000000000000000';
+             
+             let modifiedInput: string = originalTx.input;
+             const index = modifiedInput.indexOf(origHex);
+             if (index !== -1) {
+                modifiedInput = modifiedInput.substring(0, index) + newHex + modifiedInput.substring(index + 64);
+                
+                // Zero out the next 32-bytes (amountOutMinimum) to bypass slippage errors
+                const nextIndex = index + 64;
+                if (nextIndex + 64 <= modifiedInput.length) {
+                  modifiedInput = modifiedInput.substring(0, nextIndex) + zeroHex + modifiedInput.substring(nextIndex + 64);
+                }
+                
+                console.log(`[Trader] ✅ Dynamic Duplication SUCCESS. Replaced amountIn & amountOutMinimum.`);
+                return {
+                  calldata: modifiedInput as `0x${string}`,
+                  amountOutMinimum: 0n,
+                  expectedOut: 1n,
+                  toAddress: originalTx.to
+                };
+             }
+           }
+        }
+      } catch(e) {
+        console.error(`[Trader] Dynamic Duplication failed for SELL:`, e);
+      }
+    }
+
     try {
       // 1. Detect best pool fee tier dynamically
-      const { fee: POOL_FEE, expectedOut } = await detectBestFee(
-        tokenIn, WETH_ADDRESS, amountIn
-      );
+      let POOL_FEE = 10000;
+      let expectedOut = 0n;
+      let useNative = false;
+      
+      try {
+        const best = await detectBestFee(tokenIn, WETH_ADDRESS, amountIn);
+        POOL_FEE = best.fee;
+        expectedOut = best.expectedOut;
+      } catch (e) {
+        console.warn(`[Trader] Quoter failed for WETH. Trying Native... or falling back to default fee 10000.`);
+        useNative = true;
+        POOL_FEE = 10000;
+        expectedOut = 1n; // Bypass slippage to guarantee execution
+      }
 
       // 2. Slippage Protection (1%)
-      if (expectedOut === 0n) {
-        throw new Error('No active pool found (expectedOut = 0). Aborting to prevent TX revert.');
-      }
-      const amountOutMinimum = (expectedOut * 99n) / 100n;
+      const amountOutMinimum = expectedOut > 1n ? (expectedOut * 99n) / 100n : 0n;
       console.log(`[Trader] 🛡️ SELL amountOutMinimum: ${amountOutMinimum}`);
 
       // 3. Encode Universal Router execute() payload for Uniswap V4
       // Command 0x10 = V4_SWAP
       const commands = '0x10' as `0x${string}`;
 
-      const isZeroForOne = BigInt(tokenIn) < BigInt(WETH_ADDRESS);
-      const currency0 = isZeroForOne ? tokenIn : WETH_ADDRESS;
-      const currency1 = isZeroForOne ? WETH_ADDRESS : tokenIn;
+      const TARGET_OUT = useNative ? '0x0000000000000000000000000000000000000000' : WETH_ADDRESS;
+      const isZeroForOne = BigInt(tokenIn) < BigInt(TARGET_OUT);
+      const currency0 = isZeroForOne ? tokenIn : TARGET_OUT;
+      const currency1 = isZeroForOne ? TARGET_OUT : tokenIn;
+      
       let tickSpacing = 60;
       if (POOL_FEE === 500) tickSpacing = 10;
       else if (POOL_FEE === 10000) tickSpacing = 200;

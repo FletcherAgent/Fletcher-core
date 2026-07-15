@@ -87,9 +87,36 @@ export class RiskWardenAgent {
       // We don't reject here to avoid DB issues blocking trades, but log error
     }
 
-    // 4. Fixed-fractional sizing (0.5% of real balance)
-    const fractionBps = BigInt(Math.floor(this.RISK_FRACTION * 10000)); // 50
-    const recommendedSize = (currentBalance * fractionBps) / 10000n;
+    // 4. Base size 0.014 ETH + Full Compound (All historical PnL)
+    const baseSize = 14000000000000000n; // 0.014 ETH
+
+    const allClosedPositions = await prisma.position.findMany({
+      where: { status: 'CLOSED' }
+    });
+
+    let totalHistoricalPnL = 0;
+    for (const pos of allClosedPositions) {
+      if (pos.exitPrice && pos.entryPrice) {
+        const profit = (pos.exitPrice - pos.entryPrice) * pos.size;
+        totalHistoricalPnL += profit;
+      }
+    }
+
+    const totalHistoricalPnLWei = BigInt(Math.floor(totalHistoricalPnL * 1e18));
+    let recommendedSize = baseSize;
+
+    // Full compound: Add historical profits to the base size
+    if (totalHistoricalPnLWei > 0n) {
+      recommendedSize += totalHistoricalPnLWei;
+    }
+
+    // Safety check: Don't exceed current balance, leave 0.002 ETH for gas buffer
+    const gasBuffer = 2000000000000000n; // 0.002 ETH
+    const maxAffordable = currentBalance > gasBuffer ? currentBalance - gasBuffer : 0n;
+    
+    if (recommendedSize > maxAffordable) {
+      recommendedSize = maxAffordable;
+    }
 
     console.log(`[Risk Warden] ✅ APPROVED: Risk gates passed. Assigned size: ${recommendedSize} wei (from total balance ${currentBalance})`);
 

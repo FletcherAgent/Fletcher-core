@@ -5,7 +5,7 @@ import type { Position } from '@prisma/client';
 import { detectBestFee } from '../services/poolFeeDetector.js';
 
 export class GuardianAgent {
-  public onExitSignal?: (pos: Position, reason: string) => void;
+  public onExitSignal?: (pos: Position, reason: string, txHash?: string) => void;
   
   private activeIntervals: Map<string, {
     intervalId: NodeJS.Timeout;
