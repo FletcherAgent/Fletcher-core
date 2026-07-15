@@ -289,6 +289,9 @@ export class Orchestrator {
   public async startAll() {
     console.log("🚀 Orchestrator: Starting all Fletcher agents (Minimum Viable Swarm)...");
     
+    // Recover any pending transactions that crashed during deployment
+    await this.trader.recoverPendingTrades();
+
     // Start monitoring for new token launches
     await this.scout.startListening();
     

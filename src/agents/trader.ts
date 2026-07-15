@@ -69,16 +69,18 @@ export class TraderAgent {
         });
         
         console.log(`[Trader] ✅ BUY TX Broadcasted: ${txHash}. Waiting for confirmation...`);
+        const estimatedEntryPrice = Number(sizeInWeth) / Number(expectedOut || 1n);
+        await this.registerPendingPosition(tokenAddress, estimatedEntryPrice, Number(sizeInWeth) / 1e18, txHash, source, copiedFrom);
+
         const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
 
         if (receipt.status === 'success') {
           console.log(`[Trader] 🎯 BUY TX Confirmed in block ${receipt.blockNumber}`);
           dbLogger.info(`BUY TX Confirmed`, { txHash, token: tokenAddress, block: receipt.blockNumber.toString(), sizeEth: (Number(sizeInWeth) / 1e18).toFixed(6) });
           this.emitToSigningBoundary(tokenAddress, txHash, 'BUY EXECUTED');
-
-          const estimatedEntryPrice = Number(sizeInWeth) / Number(expectedOut || 1n);
-          await this.registerPosition(tokenAddress, estimatedEntryPrice, Number(sizeInWeth) / 1e18, source, copiedFrom);
+          await this.confirmPosition(txHash);
         } else {
+          await this.failPendingPosition(txHash);
           throw new Error('Transaction reverted by network');
         }
       } catch (error) {
@@ -111,16 +113,18 @@ export class TraderAgent {
       console.log(`[Trader] ✅ BUY TX Broadcasted: ${txHash}. Waiting for confirmation...`);
       if (chatId) await this.bot.api.sendMessage(chatId, `🚀 **TX Broadcasted!**\nHash: \`${txHash}\`\nWaiting for block confirmation...`, { parse_mode: 'Markdown' });
       
+      const estimatedEntryPrice = Number(trade.sizeInWeth) / Number(trade.expectedOut || 1n); 
+      await this.registerPendingPosition(trade.tokenAddress, estimatedEntryPrice, Number(trade.sizeInWeth) / 1e18, txHash, trade.source, trade.copiedFrom);
+
       const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
 
       if (receipt.status === 'success') {
         console.log(`[Trader] 🎯 BUY TX Confirmed in block ${receipt.blockNumber}`);
         this.emitToSigningBoundary(trade.tokenAddress, txHash, 'BUY EXECUTED');
-
-        const estimatedEntryPrice = Number(trade.sizeInWeth) / Number(trade.expectedOut || 1n); 
-        await this.registerPosition(trade.tokenAddress, estimatedEntryPrice, Number(trade.sizeInWeth) / 1e18, trade.source, trade.copiedFrom);
+        await this.confirmPosition(txHash);
         if (chatId) await this.bot.api.sendMessage(chatId, `✅ **Trade Confirmed!**\nBlock: ${receipt.blockNumber}`);
       } else {
+        await this.failPendingPosition(txHash);
         throw new Error('Transaction reverted by network');
       }
     } catch (error) {
@@ -327,8 +331,10 @@ export class TraderAgent {
 
   /**
    * Registers the position in the database after successful execution.
+  /**
+   * Registers a position in PENDING state before tx confirmation
    */
-  public async registerPosition(tokenAddress: string, entryPrice: number, size: number, source: string = "SCOUT", copiedFrom?: string) {
+  public async registerPendingPosition(tokenAddress: string, entryPrice: number, size: number, txHash: string, source: string = "SCOUT", copiedFrom?: string) {
     try {
       let tokenName = null;
       let tokenSymbol = null;
@@ -349,16 +355,68 @@ export class TraderAgent {
           tokenName,
           tokenSymbol,
           type: 'TRENCH',
-          status: 'OPEN',
+          status: 'PENDING',
           entryPrice,
           size,
+          txHash,
           source,
           copiedFrom
         }
       });
-      console.log(`[Trader] 💾 DB UPDATE: Position registered -> ID: ${position.id}`);
+      console.log(`[Trader] 💾 DB UPDATE: Position registered as PENDING -> ID: ${position.id}, txHash: ${txHash}`);
     } catch (error) {
-      console.error("[Trader] Failed to register position in DB", error);
+      console.error("[Trader] Failed to register pending position in DB", error);
+    }
+  }
+
+  public async confirmPosition(txHash: string) {
+    try {
+      await prisma.position.updateMany({
+        where: { txHash, status: 'PENDING' },
+        data: { status: 'OPEN' }
+      });
+      console.log(`[Trader] 💾 DB UPDATE: Position confirmed to OPEN for txHash: ${txHash}`);
+    } catch (error) {
+      console.error("[Trader] Failed to confirm position in DB", error);
+    }
+  }
+
+  public async failPendingPosition(txHash: string) {
+    try {
+      await prisma.position.updateMany({
+        where: { txHash, status: 'PENDING' },
+        data: { status: 'FAILED' }
+      });
+      console.log(`[Trader] 💾 DB UPDATE: Position marked as FAILED for txHash: ${txHash}`);
+    } catch (error) {
+      console.error("[Trader] Failed to fail position in DB", error);
+    }
+  }
+
+  public async recoverPendingTrades() {
+    console.log(`[Trader] 🔄 Running recovery for PENDING trades...`);
+    try {
+      const pendingPositions = await prisma.position.findMany({ where: { status: 'PENDING' } });
+      for (const pos of pendingPositions) {
+        if (!pos.txHash) continue;
+        
+        console.log(`[Trader] 🔍 Checking pending txHash ${pos.txHash} for ${pos.tokenAddress}...`);
+        try {
+          const receipt = await publicClient.getTransactionReceipt({ hash: pos.txHash as `0x${string}` });
+          if (receipt.status === 'success') {
+            console.log(`[Trader] 🎯 Recovered BUY TX Confirmed for ${pos.tokenAddress}`);
+            await this.confirmPosition(pos.txHash);
+            dbLogger.info(`BUY TX Recovered & Confirmed`, { txHash: pos.txHash, token: pos.tokenAddress });
+          } else {
+            console.log(`[Trader] ❌ Recovered BUY TX Reverted for ${pos.tokenAddress}`);
+            await this.failPendingPosition(pos.txHash);
+          }
+        } catch (e) {
+          console.warn(`[Trader] ⏳ TX ${pos.txHash} still pending or not found.`);
+        }
+      }
+    } catch (e) {
+      console.error("[Trader] Failed to recover pending trades", e);
     }
   }
 

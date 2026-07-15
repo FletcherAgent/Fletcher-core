@@ -21,6 +21,7 @@ model Position {
   exitPrice    Float?
   pnl          Float?   // PnL ratio ((exitPrice - entryPrice) / entryPrice)
   tokenId      String?  // Storage for Uniswap V3 LP NFT
+  txHash       String?  // Hash of the opening transaction for recovery
   source       String   @default("SCOUT") // "SCOUT" or "COPYTRADE"
   copiedFrom   String?  // Wallet address if source is COPYTRADE
   createdAt    DateTime @default(now())
