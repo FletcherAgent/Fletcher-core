@@ -530,9 +530,13 @@ export class TrackerAgent {
   private async emitSignal(tokenIn: string, tokenOut: string, amountIn: bigint, walletAddress: string, trackedWallet: any, timestamp: number, txHash: string) {
     const WETH_ADDRESS = (process.env.WETH_ADDRESS || '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2').toLowerCase();
     
+    console.log(`[Tracker-DEBUG] emitSignal called. tokenIn: ${tokenIn}, tokenOut: ${tokenOut}, WETH: ${WETH_ADDRESS}, amount: ${amountIn}`);
+
     // Classification
     if (tokenIn === WETH_ADDRESS) {
-      // BUY tokenOut
+      // BUY targetToken
+      console.log(`[Tracker-DEBUG] It is a BUY! Firing onCopyBuySignal...`);
+      WalletProfiler.processBuy(walletAddress, tokenOut, txHash);
       console.log(`[Tracker] 🛒 BUY Signal: ${walletAddress} bought ${tokenOut} | TX: https://robinhoodchain.blockscout.com/tx/${txHash}`);
       dbLogger.info(`BUY Signal detected`, { wallet: trackedWallet.label || walletAddress, token: tokenOut, amountWei: amountIn.toString(), tier: trackedWallet.tier, txHash });
 

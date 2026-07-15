@@ -138,6 +138,7 @@ export class Orchestrator {
     };
 
     this.tracker.onCopyBuySignal = async (wallet, token, amount, tier, bundleId, timestamp, txHash) => {
+      console.log(`[Orchestrator-DEBUG] onCopyBuySignal triggered for ${token} from ${wallet}`);
       const lowerToken = token.toLowerCase();
       if (this.processingTokens.has(lowerToken)) {
         console.log(`[Orchestrator] ℹ️ Dedup: Already processing a signal for ${token}, ignoring this concurrent CopyBuy.`);
@@ -146,6 +147,7 @@ export class Orchestrator {
       this.processingTokens.add(lowerToken);
 
       try {
+        console.log(`[Orchestrator-DEBUG] Checking existing position for ${token}`);
         const COOLDOWN_MS = 60 * 60 * 1000;
         const existingPos = await prisma.position.findFirst({
            where: { 
@@ -269,13 +271,16 @@ export class Orchestrator {
           ).catch(console.error);
         }
       }
+      } catch (err: any) {
+        console.error(`[Orchestrator] ❌ Unhandled error in onCopyBuySignal for ${token}:`, err);
       } finally {
         setTimeout(() => this.processingTokens.delete(lowerToken), 10000);
       }
     };
 
     this.tracker.onCopySellSignal = async (wallet, token, amount, tier, bundleId, timestamp, txHash) => {
-      console.log(`[Orchestrator] 💥 CopySell Signal received for ${token} from ${wallet}`);
+      try {
+        console.log(`[Orchestrator] 💥 CopySell Signal received for ${token} from ${wallet}`);
       
       let tokenMetadata = token;
       try {
@@ -312,6 +317,9 @@ export class Orchestrator {
         }
       } else {
         console.log(`[Orchestrator] Copy-Exit is OFF. Ignoring sell signal.`);
+      }
+      } catch (err: any) {
+        console.error(`[Orchestrator] ❌ Unhandled error in onCopySellSignal for ${token}:`, err);
       }
     };
   }
