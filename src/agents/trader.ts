@@ -206,7 +206,18 @@ export class TraderAgent {
         dbLogger.error(`SELL TX Failed`, { token: tokenAddress, error: String(error) });
         this.emitToSigningBoundary(tokenAddress, "FAILED", 'SELL REJECTED');
         
-        await prisma.position.update({ where: { id: posId }, data: { status: 'EXIT_FAILED' } }).catch(console.error);
+        if (reason === 'UNSUPPORTED_OR_RUG_NO_QUOTES') {
+           console.log(`[Trader] 🚮 Token is a rug/unsupported. Marking position as CLOSED (100% loss) to clear it.`);
+           const pos = await prisma.position.findUnique({ where: { id: posId } });
+           if (pos) {
+             await prisma.position.update({
+               where: { id: posId },
+               data: { status: 'CLOSED', pnl: -1, exitPrice: 0 }
+             }).catch(console.error);
+           }
+        } else {
+           await prisma.position.update({ where: { id: posId }, data: { status: 'EXIT_FAILED' } }).catch(console.error);
+        }
       }
     } else {
       console.error(`[Trader] ❌ Failed to construct SELL calldata for ${tokenAddress}. Marking as EXIT_FAILED.`);
