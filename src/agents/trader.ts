@@ -271,8 +271,14 @@ export class TraderAgent {
         }
       }
     } else {
-      console.error(`[Trader] ❌ Failed to construct SELL calldata for ${tokenAddress}. Marking as EXIT_FAILED.`);
-      await prisma.position.update({ where: { id: posId }, data: { status: 'EXIT_FAILED' } }).catch(console.error);
+      console.error(`[Trader] ❌ Failed to construct SELL calldata for ${tokenAddress}.`);
+      if (reason === 'UNSUPPORTED_OR_RUG_NO_QUOTES') {
+         console.log(`[Trader] 🚮 Token is a rug/unsupported. Marking position as CLOSED (100% loss).`);
+         await this.updatePositionStatus(posId, tokenAddress, 0);
+      } else {
+         console.log(`[Trader] Marking as EXIT_FAILED.`);
+         await prisma.position.update({ where: { id: posId }, data: { status: 'EXIT_FAILED' } }).catch(console.error);
+      }
     }
   }
 
