@@ -27,6 +27,11 @@ export class TraderAgent {
     });
   }
 
+  private async getTradingMode(): Promise<string> {
+    const config = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
+    return config ? config.value : 'LIVE';
+  }
+
   public async processSignal(tokenAddress: string, sizeInWeth: bigint, source: string = 'SCOUT', copiedFrom?: string, txHash?: string) {
     const tradeId = Math.random().toString(36).substring(7);
     console.log(`[Trader] Processing Signal for ${tokenAddress} - Size: ${sizeInWeth}`);
@@ -60,23 +65,40 @@ export class TraderAgent {
         }
 
         if (!walletClient || !account) throw new Error("WalletClient is null");
-        console.log(`[Trader] ⚡ Broadcasting BUY transaction for ${tokenAddress}...`);
-        const txHash = await walletClient.sendTransaction({
-          account,
-          to: toAddress,
-          data: calldata as `0x${string}`,
-          value: value
-        });
+        const mode = await this.getTradingMode();
+        let txHash: `0x${string}`;
+        let receiptStatus: 'success' | 'reverted' = 'success';
+        let blockNumber = 0n;
         
-        console.log(`[Trader] ✅ BUY TX Broadcasted: ${txHash}. Waiting for confirmation...`);
+        if (mode === 'DRY_RUN') {
+          console.log(`[Trader] 🛡️ DRY RUN: Simulating BUY transaction for ${tokenAddress}...`);
+          txHash = `0xdryrun${Date.now()}${Math.floor(Math.random()*1000)}` as `0x${string}`;
+          blockNumber = await publicClient.getBlockNumber();
+        } else {
+          console.log(`[Trader] ⚡ Broadcasting BUY transaction for ${tokenAddress}...`);
+          txHash = await walletClient.sendTransaction({
+            account,
+            to: toAddress,
+            data: calldata as `0x${string}`,
+            value: value
+          });
+          console.log(`[Trader] ✅ BUY TX Broadcasted: ${txHash}. Waiting for confirmation...`);
+        }
+        
         const estimatedEntryPrice = Number(sizeInWeth) / Number(expectedOut || 1n);
         await this.registerPendingPosition(tokenAddress, estimatedEntryPrice, Number(sizeInWeth) / 1e18, txHash, source, copiedFrom);
 
-        const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+        if (mode === 'DRY_RUN') {
+          receiptStatus = 'success';
+        } else {
+          const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+          receiptStatus = receipt.status;
+          blockNumber = receipt.blockNumber;
+        }
 
-        if (receipt.status === 'success') {
-          console.log(`[Trader] 🎯 BUY TX Confirmed in block ${receipt.blockNumber}`);
-          dbLogger.info(`BUY TX Confirmed`, { txHash, token: tokenAddress, block: receipt.blockNumber.toString(), sizeEth: (Number(sizeInWeth) / 1e18).toFixed(6) });
+        if (receiptStatus === 'success') {
+          console.log(`[Trader] 🎯 BUY TX Confirmed in block ${blockNumber}`);
+          dbLogger.info(`BUY TX Confirmed`, { txHash, token: tokenAddress, block: blockNumber.toString(), sizeEth: (Number(sizeInWeth) / 1e18).toFixed(6), mode });
           this.emitToSigningBoundary(tokenAddress, txHash, 'BUY EXECUTED');
           await this.confirmPosition(txHash);
         } else {
@@ -102,27 +124,44 @@ export class TraderAgent {
     this.pendingTrades.delete(tradeId);
 
     try {
-      console.log(`[Trader] ⚡ Broadcasting CONFIRMED BUY transaction for ${trade.tokenAddress}...`);
-      const txHash = await walletClient!.sendTransaction({
-        account: account!,
-        to: trade.toAddress,
-        data: trade.calldata as `0x${string}`,
-        value: trade.value
-      });
-      
-      console.log(`[Trader] ✅ BUY TX Broadcasted: ${txHash}. Waiting for confirmation...`);
-      if (chatId) await this.bot.api.sendMessage(chatId, `🚀 **TX Broadcasted!**\nHash: \`${txHash}\`\nWaiting for block confirmation...`, { parse_mode: 'Markdown' });
+      const mode = await this.getTradingMode();
+      let txHash: `0x${string}`;
+      let receiptStatus: 'success' | 'reverted' = 'success';
+      let blockNumber = 0n;
+
+      if (mode === 'DRY_RUN') {
+        console.log(`[Trader] 🛡️ DRY RUN: Simulating CONFIRMED BUY transaction for ${trade.tokenAddress}...`);
+        txHash = `0xdryrun${Date.now()}${Math.floor(Math.random()*1000)}` as `0x${string}`;
+        blockNumber = await publicClient.getBlockNumber();
+        if (chatId) await this.bot.api.sendMessage(chatId, `🚀 **DRY RUN TX Simulated!**\nHash: \`${txHash}\``, { parse_mode: 'Markdown' });
+      } else {
+        console.log(`[Trader] ⚡ Broadcasting CONFIRMED BUY transaction for ${trade.tokenAddress}...`);
+        txHash = await walletClient!.sendTransaction({
+          account: account!,
+          to: trade.toAddress,
+          data: trade.calldata as `0x${string}`,
+          value: trade.value
+        });
+        console.log(`[Trader] ✅ BUY TX Broadcasted: ${txHash}. Waiting for confirmation...`);
+        if (chatId) await this.bot.api.sendMessage(chatId, `🚀 **TX Broadcasted!**\nHash: \`${txHash}\`\nWaiting for block confirmation...`, { parse_mode: 'Markdown' });
+      }
       
       const estimatedEntryPrice = Number(trade.sizeInWeth) / Number(trade.expectedOut || 1n); 
       await this.registerPendingPosition(trade.tokenAddress, estimatedEntryPrice, Number(trade.sizeInWeth) / 1e18, txHash, trade.source, trade.copiedFrom);
 
-      const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+      if (mode === 'DRY_RUN') {
+        receiptStatus = 'success';
+      } else {
+        const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+        receiptStatus = receipt.status;
+        blockNumber = receipt.blockNumber;
+      }
 
-      if (receipt.status === 'success') {
-        console.log(`[Trader] 🎯 BUY TX Confirmed in block ${receipt.blockNumber}`);
+      if (receiptStatus === 'success') {
+        console.log(`[Trader] 🎯 BUY TX Confirmed in block ${blockNumber}`);
         this.emitToSigningBoundary(trade.tokenAddress, txHash, 'BUY EXECUTED');
         await this.confirmPosition(txHash);
-        if (chatId) await this.bot.api.sendMessage(chatId, `✅ **Trade Confirmed!**\nBlock: ${receipt.blockNumber}`);
+        if (chatId) await this.bot.api.sendMessage(chatId, `✅ **Trade Confirmed!**\nBlock: ${blockNumber}`);
       } else {
         await this.failPendingPosition(txHash);
         throw new Error('Transaction reverted by network');
@@ -157,45 +196,57 @@ export class TraderAgent {
       
       try {
         const estimatedExitPrice = Number(expectedOut || 1n) / Number(amountInToken || 1n);
+        const mode = await this.getTradingMode();
+        let txHashFinal: `0x${string}`;
+        let receiptStatus: 'success' | 'reverted' = 'success';
+        let blockNumber = 0n;
 
-        // --- 0. Check and Approve Allowance ---
-        const currentAllowance = await publicClient.readContract({
-          address: tokenAddress as `0x${string}`,
-          abi: erc20Abi,
-          functionName: 'allowance',
-          args: [account!.address, toAddress]
-        });
-
-        if (currentAllowance < amountInToken) {
-          console.log(`[Trader] 🔓 Approving Router to spend ${tokenAddress}...`);
-          const approveData = encodeFunctionData({
+        if (mode === 'DRY_RUN') {
+          console.log(`[Trader] 🛡️ DRY RUN: Simulating SELL transaction for ${tokenAddress}...`);
+          txHashFinal = `0xdryrun${Date.now()}${Math.floor(Math.random()*1000)}` as `0x${string}`;
+          blockNumber = await publicClient.getBlockNumber();
+        } else {
+          // --- 0. Check and Approve Allowance ---
+          const currentAllowance = await publicClient.readContract({
+            address: tokenAddress as `0x${string}`,
             abi: erc20Abi,
-            functionName: 'approve',
-            args: [toAddress, 2n ** 256n - 1n] // MaxUint256
+            functionName: 'allowance',
+            args: [account!.address, toAddress]
           });
-          const approveTxHash = await walletClient!.sendTransaction({
+
+          if (currentAllowance < amountInToken) {
+            console.log(`[Trader] 🔓 Approving Router to spend ${tokenAddress}...`);
+            const approveData = encodeFunctionData({
+              abi: erc20Abi,
+              functionName: 'approve',
+              args: [toAddress, 2n ** 256n - 1n] // MaxUint256
+            });
+            const approveTxHash = await walletClient!.sendTransaction({
+              account: account!,
+              to: tokenAddress as `0x${string}`,
+              data: approveData
+            });
+            await publicClient.waitForTransactionReceipt({ hash: approveTxHash });
+            console.log(`[Trader] ✅ Approve confirmed!`);
+          }
+
+          console.log(`[Trader] ⚡ Broadcasting SELL transaction for ${tokenAddress}...`);
+          txHashFinal = await walletClient!.sendTransaction({
             account: account!,
-            to: tokenAddress as `0x${string}`,
-            data: approveData
+            to: toAddress,
+            data: calldata as `0x${string}`
           });
-          await publicClient.waitForTransactionReceipt({ hash: approveTxHash });
-          console.log(`[Trader] ✅ Approve confirmed!`);
+          
+          console.log(`[Trader] ✅ SELL TX Broadcasted: ${txHashFinal}. Waiting for confirmation...`);
+          const receipt = await publicClient.waitForTransactionReceipt({ hash: txHashFinal });
+          receiptStatus = receipt.status;
+          blockNumber = receipt.blockNumber;
         }
 
-        console.log(`[Trader] ⚡ Broadcasting SELL transaction for ${tokenAddress}...`);
-        const txHash = await walletClient!.sendTransaction({
-          account: account!,
-          to: toAddress,
-          data: calldata as `0x${string}`
-        });
-
-        console.log(`[Trader] ✅ SELL TX Broadcasted: ${txHash}. Waiting for confirmation...`);
-        const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
-
-        if (receipt.status === 'success') {
-          console.log(`[Trader] 🎯 SELL TX Confirmed in block ${receipt.blockNumber}`);
-          dbLogger.info(`SELL TX Confirmed`, { txHash, token: tokenAddress, block: receipt.blockNumber.toString(), reason });
-          this.emitToSigningBoundary(tokenAddress, txHash, `SELL EXECUTED [${reason}]`);
+        if (receiptStatus === 'success') {
+          console.log(`[Trader] 🎯 SELL TX Confirmed in block ${blockNumber}`);
+          dbLogger.info(`SELL TX Confirmed`, { txHash: txHashFinal, token: tokenAddress, block: blockNumber.toString(), reason, mode });
+          this.emitToSigningBoundary(tokenAddress, txHashFinal, `SELL EXECUTED [${reason}]`);
 
           await this.updatePositionStatus(posId, tokenAddress, estimatedExitPrice);
         } else {
@@ -564,7 +615,8 @@ export class TraderAgent {
           size,
           txHash,
           source,
-          copiedFrom
+          copiedFrom,
+          tradingMode: await this.getTradingMode()
         }
       });
       console.log(`[Trader] 💾 DB UPDATE: Position registered as PENDING -> ID: ${position.id}, txHash: ${txHash}`);
