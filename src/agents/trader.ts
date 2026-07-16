@@ -300,45 +300,86 @@ export class TraderAgent {
 
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 5); // 5 mins
 
-    // --- NOXA DYNAMIC DUPLICATION (Fallback) ---
+    // --- UNIVERSAL DYNAMIC DUPLICATION ---
     if (txHash) {
       try {
-        console.log(`[Trader] Attempting NOXA Dynamic Duplication from ${txHash}...`);
+        console.log(`[Trader] Attempting Universal Dynamic Duplication for BUY from ${txHash}...`);
         const originalTx = await publicClient.getTransaction({ hash: txHash as `0x${string}` });
-        if (originalTx && originalTx.input.startsWith('0xc1120e3d') && originalTx.to?.toLowerCase() === '0xf193ede778a92dc37cb450a1ef1565ed1e8b7964') {
-          console.log(`[Trader] 🎯 NOXA Transaction Detected! Slicing calldata...`);
-          // The calldata is: 0xc1120e3d + 10 words (320 bytes = 640 hex chars)
-          // Word 4 (index 4) is minOut. Word 5 is recipient.
-          // Let's decode it fully using ABI
-          const noxaAbiParams = parseAbiParameters('address, address, address, uint256, uint256, address, uint256, uint256, uint256, uint256');
-          const decodedParams = decodeAbiParameters(noxaAbiParams, `0x${originalTx.input.slice(10)}`) as any;
+        if (originalTx && originalTx.to) {
           
-          // Calculate proportional minOut
-          const originalAmountIn = originalTx.value;
-          let calculatedMinOut = 0n;
-          if (originalAmountIn > 0n) {
-            calculatedMinOut = (BigInt(decodedParams[4]) * amountIn) / originalAmountIn;
+          let originalAmountIn = originalTx.value;
+          
+          // If value is 0, check for WETH transfer
+          if (originalAmountIn === 0n) {
+             const receipt = await publicClient.getTransactionReceipt({ hash: txHash as `0x${string}` });
+             const erc20AbiForLog = parseAbi(['event Transfer(address indexed from, address indexed to, uint256 value)']);
+             for (const log of receipt.logs) {
+               if (log.address.toLowerCase() === WETH_ADDRESS.toLowerCase()) {
+                 try {
+                   const decoded = decodeEventLog({ abi: erc20AbiForLog, data: log.data, topics: log.topics });
+                   if ((decoded.args as any).from.toLowerCase() === originalTx.from.toLowerCase()) {
+                     originalAmountIn = (decoded.args as any).value as bigint;
+                     break;
+                   }
+                 } catch(e) {}
+               }
+             }
           }
-          const slippageMinOut = (calculatedMinOut * 99n) / 100n; // 1% extra slippage
 
-          // Replace Recipient (Word 5) and minOut (Word 4)
-          decodedParams[4] = slippageMinOut;
-          decodedParams[5] = USER_WALLET as `0x${string}`;
-          decodedParams[6] = deadline;
+          if (originalAmountIn > 0n) {
+             const origHex = originalAmountIn.toString(16).padStart(64, '0');
+             const newHex = amountIn.toString(16).padStart(64, '0');
+             const zeroHex = '0000000000000000000000000000000000000000000000000000000000000000';
+             
+             let modifiedInput: string = originalTx.input;
+             const index = modifiedInput.indexOf(origHex);
+             if (index !== -1) {
+                modifiedInput = modifiedInput.substring(0, index) + newHex + modifiedInput.substring(index + 64);
+                
+                // Zero out the next 32-bytes (amountOutMinimum) to bypass slippage errors, since we are copying blindly
+                const nextIndex = index + 64;
+                if (nextIndex + 64 <= modifiedInput.length) {
+                  modifiedInput = modifiedInput.substring(0, nextIndex) + zeroHex + modifiedInput.substring(nextIndex + 64);
+                }
+                
+                // Extract proportional expectedOut for accurate PnL tracking
+                let estimatedExpectedOut = 1n;
+                try {
+                  const receipt = await publicClient.getTransactionReceipt({ hash: txHash as `0x${string}` });
+                  const erc20AbiForLog = parseAbi(['event Transfer(address indexed from, address indexed to, uint256 value)']);
+                  for (const log of receipt.logs) {
+                    if (log.address.toLowerCase() === tokenOut.toLowerCase()) {
+                      try {
+                        const decoded = decodeEventLog({ abi: erc20AbiForLog, data: log.data, topics: log.topics });
+                        const toAddr = (decoded.args as any).to.toLowerCase();
+                        if (toAddr === originalTx.from.toLowerCase() || toAddr === originalTx.to?.toLowerCase()) {
+                          const originalAmountOut = (decoded.args as any).value as bigint;
+                          if (originalAmountOut > 0n) {
+                             estimatedExpectedOut = (originalAmountOut * amountIn) / originalAmountIn;
+                             console.log(`[Trader] 📊 Extracted proportional expectedOut: ${estimatedExpectedOut}`);
+                             break;
+                          }
+                        }
+                      } catch(e) {}
+                    }
+                  }
+                } catch(e) {}
 
-          const newCalldata = concat(['0xc1120e3d', encodeAbiParameters(noxaAbiParams, decodedParams as any)]);
-          console.log(`[Trader] ✅ NOXA Calldata Cloned! Expected MinOut: ${slippageMinOut}`);
-          
-          return {
-            calldata: newCalldata,
-            amountOutMinimum: slippageMinOut,
-            expectedOut: calculatedMinOut,
-            toAddress: originalTx.to,
-            value: amountIn
-          };
+                console.log(`[Trader] ✅ Universal Dynamic Duplication SUCCESS. Replaced amountIn & bypassed amountOutMinimum.`);
+                return {
+                  calldata: modifiedInput as `0x${string}`,
+                  amountOutMinimum: 0n,
+                  expectedOut: estimatedExpectedOut,
+                  toAddress: originalTx.to,
+                  value: originalTx.value > 0n ? amountIn : 0n
+                };
+             } else {
+                console.log(`[Trader] ⚠️ origHex ${origHex} not found in input. Falling back to PoolFeeDetector...`);
+             }
+          }
         }
       } catch (err) {
-        console.warn(`[Trader] NOXA Duplication failed, falling back to Universal Router...`, err);
+        console.warn(`[Trader] Universal Dynamic Duplication failed, falling back to PoolFeeDetector...`, err);
       }
     }
     // -------------------------------------------
@@ -495,11 +536,32 @@ export class TraderAgent {
                   modifiedInput = modifiedInput.substring(0, nextIndex) + zeroHex + modifiedInput.substring(nextIndex + 64);
                 }
                 
+                // Extract proportional expectedOut (WETH) for accurate PnL tracking
+                let estimatedExpectedOut = 1n;
+                try {
+                  for (const log of receipt.logs) {
+                    if (log.address.toLowerCase() === WETH_ADDRESS.toLowerCase()) {
+                      try {
+                        const decoded = decodeEventLog({ abi: erc20AbiForLog, data: log.data, topics: log.topics });
+                        const toAddr = (decoded.args as any).to.toLowerCase();
+                        if (toAddr === originalTx.from.toLowerCase() || toAddr === originalTx.to?.toLowerCase()) {
+                          const originalAmountOut = (decoded.args as any).value as bigint;
+                          if (originalAmountOut > 0n) {
+                             estimatedExpectedOut = (originalAmountOut * amountIn) / originalAmountIn;
+                             console.log(`[Trader] 📊 Extracted proportional expectedOut (WETH): ${estimatedExpectedOut}`);
+                             break;
+                          }
+                        }
+                      } catch(e) {}
+                    }
+                  }
+                } catch(e) {}
+
                 console.log(`[Trader] ✅ Dynamic Duplication SUCCESS. Replaced amountIn & amountOutMinimum.`);
                 return {
                   calldata: modifiedInput as `0x${string}`,
                   amountOutMinimum: 0n,
-                  expectedOut: 1n,
+                  expectedOut: estimatedExpectedOut,
                   toAddress: originalTx.to
                 };
              }

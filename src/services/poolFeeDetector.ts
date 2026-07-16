@@ -111,6 +111,31 @@ export async function detectBestFee(
   if (best.expectedOut > 0n) {
     console.log(`[PoolFeeDetector] ✅ Best pool: fee=${best.fee} (${best.fee / 10000}%) → expectedOut=${best.expectedOut}`);
   } else {
+    // V2 Fallback
+    const V2_ROUTER_ADDRESS = process.env.V2_ROUTER_ADDRESS;
+    if (V2_ROUTER_ADDRESS) {
+      try {
+        console.log(`[PoolFeeDetector] ⚠️ V4 Quoter failed. Trying V2 Router fallback...`);
+        const v2RouterAbi = parseAbi([
+          'function getAmountsOut(uint amountIn, address[] memory path) public view returns (uint[] memory amounts)'
+        ]);
+        const amountsOut = await publicClient.readContract({
+          address: V2_ROUTER_ADDRESS as `0x${string}`,
+          abi: v2RouterAbi,
+          functionName: 'getAmountsOut',
+          args: [amountIn, [tokenIn as `0x${string}`, tokenOut as `0x${string}`]]
+        }) as bigint[];
+        
+        if (amountsOut && amountsOut.length > 1 && amountsOut[1] > 0n) {
+          best = { fee: 3000, expectedOut: amountsOut[1] }; // V2 standard fee is 0.3%
+          console.log(`[PoolFeeDetector] ✅ Found V2 pool → expectedOut=${best.expectedOut}`);
+          return best;
+        }
+      } catch (err) {
+        console.warn(`[PoolFeeDetector] ❌ V2 Router fallback failed.`);
+      }
+    }
+    
     throw new Error(`[PoolFeeDetector] ❌ No active pool found for ${tokenIn} → ${tokenOut}. Simulation and dummy data are disabled.`);
   }
 

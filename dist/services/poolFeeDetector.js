@@ -1,4 +1,5 @@
 import { publicClient } from './viem.js';
+import { parseAbi } from 'viem';
 /**
  * All Uniswap V3/V4 fee tiers to probe, sorted by most common first.
  * 500 = 0.05%, 3000 = 0.3%, 10000 = 1%
@@ -14,8 +15,7 @@ const FEE_TIERS = [500, 3000, 10000];
 export async function detectBestFee(tokenIn, tokenOut, amountIn) {
     const QUOTER_ADDRESS = process.env.QUOTER_ADDRESS;
     if (!QUOTER_ADDRESS) {
-        console.warn('[PoolFeeDetector] QUOTER_ADDRESS not set. Falling back to default fee 3000.');
-        return { fee: 3000, expectedOut: 0n };
+        throw new Error('[PoolFeeDetector] ❌ QUOTER_ADDRESS not set in .env! Cannot perform real queries without Quoter.');
     }
     const quoterAbi = [
         {
@@ -92,7 +92,31 @@ export async function detectBestFee(tokenIn, tokenOut, amountIn) {
         console.log(`[PoolFeeDetector] ✅ Best pool: fee=${best.fee} (${best.fee / 10000}%) → expectedOut=${best.expectedOut}`);
     }
     else {
-        console.warn(`[PoolFeeDetector] ⚠️ No active pool found for ${tokenIn} → ${tokenOut}. Using fee=3000, amountOutMin=0 (sniper mode).`);
+        // V2 Fallback
+        const V2_ROUTER_ADDRESS = process.env.V2_ROUTER_ADDRESS;
+        if (V2_ROUTER_ADDRESS) {
+            try {
+                console.log(`[PoolFeeDetector] ⚠️ V4 Quoter failed. Trying V2 Router fallback...`);
+                const v2RouterAbi = parseAbi([
+                    'function getAmountsOut(uint amountIn, address[] memory path) public view returns (uint[] memory amounts)'
+                ]);
+                const amountsOut = await publicClient.readContract({
+                    address: V2_ROUTER_ADDRESS,
+                    abi: v2RouterAbi,
+                    functionName: 'getAmountsOut',
+                    args: [amountIn, [tokenIn, tokenOut]]
+                });
+                if (amountsOut && amountsOut.length > 1 && amountsOut[1] > 0n) {
+                    best = { fee: 3000, expectedOut: amountsOut[1] }; // V2 standard fee is 0.3%
+                    console.log(`[PoolFeeDetector] ✅ Found V2 pool → expectedOut=${best.expectedOut}`);
+                    return best;
+                }
+            }
+            catch (err) {
+                console.warn(`[PoolFeeDetector] ❌ V2 Router fallback failed.`);
+            }
+        }
+        throw new Error(`[PoolFeeDetector] ❌ No active pool found for ${tokenIn} → ${tokenOut}. Simulation and dummy data are disabled.`);
     }
     return best;
 }

@@ -1,6 +1,6 @@
-import { publicClient } from '../services/viem.js';
 import { parseAbi, parseEther } from 'viem';
 import { prisma } from '../core/db.js';
+import { detectBestFee } from '../services/poolFeeDetector.js';
 export class GuardianAgent {
     onExitSignal;
     activeIntervals = new Map();
@@ -46,20 +46,14 @@ export class GuardianAgent {
         const wethTestAmount = parseEther('0.01');
         const initialQuote = pos.entryPrice;
         let highestQuote = initialQuote;
+        let failCount = 0;
         const startedAt = Date.now(); // We can also use pos.createdAt.getTime(), but let's stick to start of monitoring for time limits
         // Polling every 10 seconds
         const intervalId = setInterval(async () => {
             // console.log(`[Guardian] 🔍 Polling current price for ${tokenAddress}...`);
             try {
-                // We query WETH -> Token
-                const tokensOut = await publicClient.readContract({
-                    address: QUOTER_ADDRESS,
-                    abi: quoterAbi,
-                    functionName: 'quoteExactInputSingle',
-                    args: [WETH_ADDRESS, tokenAddress, 3000, wethTestAmount, 0n]
-                });
-                if (tokensOut === 0n)
-                    throw new Error("0 tokens out");
+                // Query best active pool
+                const { expectedOut: tokensOut } = await detectBestFee(WETH_ADDRESS, tokenAddress, wethTestAmount);
                 // Calculate current exchange rate (WETH per 1 wei of Token)
                 const currentQuote = Number(wethTestAmount) / Number(tokensOut);
                 // Update High Watermark
@@ -107,8 +101,12 @@ export class GuardianAgent {
                 }
             }
             catch (err) {
-                console.warn(`[Guardian] ⚠️ Failed to fetch current quote for ${tokenAddress} - pool might be rugged!`);
-                this.triggerExit(pos, "EMERGENCY_RUG_NO_QUOTES");
+                failCount++;
+                console.warn(`[Guardian] ⚠️ Failed to fetch current quote for ${tokenAddress} - pool might be temporarily unavailable. (Fail count: ${failCount}/3)`);
+                if (failCount >= 3) {
+                    console.log(`[Guardian] ❌ Token ${tokenAddress} failed quoting 3 times. Marking as unsupported/rug.`);
+                    this.triggerExit(pos, "UNSUPPORTED_OR_RUG_NO_QUOTES");
+                }
             }
         }, 10000); // 10 seconds
         this.activeIntervals.set(tokenAddress, { intervalId, initialQuote, highestQuote, startedAt });

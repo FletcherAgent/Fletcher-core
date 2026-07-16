@@ -1,4 +1,4 @@
-import { encodeFunctionData, encodeAbiParameters, decodeAbiParameters, parseAbiParameters, parseAbi, concat, erc20Abi } from 'viem';
+import { encodeFunctionData, encodeAbiParameters, parseAbi, erc20Abi, decodeEventLog } from 'viem';
 import { detectBestFee } from '../services/poolFeeDetector.js';
 import { dbLogger } from '../services/logger.js';
 import { InlineKeyboard } from 'grammy';
@@ -23,6 +23,10 @@ export class TraderAgent {
                 this.cancelPendingTrade(tradeId, ctx.chat?.id, "Manually rejected by user.");
             }
         });
+    }
+    async getTradingMode() {
+        const config = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
+        return config ? config.value : 'LIVE';
     }
     async processSignal(tokenAddress, sizeInWeth, source = 'SCOUT', copiedFrom, txHash) {
         const tradeId = Math.random().toString(36).substring(7);
@@ -52,20 +56,38 @@ export class TraderAgent {
                 }
                 if (!walletClient || !account)
                     throw new Error("WalletClient is null");
-                console.log(`[Trader] ⚡ Broadcasting BUY transaction for ${tokenAddress}...`);
-                const txHash = await walletClient.sendTransaction({
-                    account,
-                    to: toAddress,
-                    data: calldata,
-                    value: value
-                });
-                console.log(`[Trader] ✅ BUY TX Broadcasted: ${txHash}. Waiting for confirmation...`);
+                const mode = await this.getTradingMode();
+                let txHash;
+                let receiptStatus = 'success';
+                let blockNumber = 0n;
+                if (mode === 'DRY_RUN') {
+                    console.log(`[Trader] 🛡️ DRY RUN: Simulating BUY transaction for ${tokenAddress}...`);
+                    txHash = `0xdddddddddddddddddddddddddddddddd${Date.now().toString(16).padStart(32, '0')}`;
+                    blockNumber = await publicClient.getBlockNumber();
+                }
+                else {
+                    console.log(`[Trader] ⚡ Broadcasting BUY transaction for ${tokenAddress}...`);
+                    txHash = await walletClient.sendTransaction({
+                        account,
+                        to: toAddress,
+                        data: calldata,
+                        value: value
+                    });
+                    console.log(`[Trader] ✅ BUY TX Broadcasted: ${txHash}. Waiting for confirmation...`);
+                }
                 const estimatedEntryPrice = Number(sizeInWeth) / Number(expectedOut || 1n);
                 await this.registerPendingPosition(tokenAddress, estimatedEntryPrice, Number(sizeInWeth) / 1e18, txHash, source, copiedFrom);
-                const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
-                if (receipt.status === 'success') {
-                    console.log(`[Trader] 🎯 BUY TX Confirmed in block ${receipt.blockNumber}`);
-                    dbLogger.info(`BUY TX Confirmed`, { txHash, token: tokenAddress, block: receipt.blockNumber.toString(), sizeEth: (Number(sizeInWeth) / 1e18).toFixed(6) });
+                if (mode === 'DRY_RUN') {
+                    receiptStatus = 'success';
+                }
+                else {
+                    const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+                    receiptStatus = receipt.status;
+                    blockNumber = receipt.blockNumber;
+                }
+                if (receiptStatus === 'success') {
+                    console.log(`[Trader] 🎯 BUY TX Confirmed in block ${blockNumber}`);
+                    dbLogger.info(`BUY TX Confirmed`, { txHash, token: tokenAddress, block: blockNumber.toString(), sizeEth: (Number(sizeInWeth) / 1e18).toFixed(6), mode });
                     this.emitToSigningBoundary(tokenAddress, txHash, 'BUY EXECUTED');
                     await this.confirmPosition(txHash);
                 }
@@ -91,25 +113,45 @@ export class TraderAgent {
         clearTimeout(trade.timeoutId);
         this.pendingTrades.delete(tradeId);
         try {
-            console.log(`[Trader] ⚡ Broadcasting CONFIRMED BUY transaction for ${trade.tokenAddress}...`);
-            const txHash = await walletClient.sendTransaction({
-                account: account,
-                to: trade.toAddress,
-                data: trade.calldata,
-                value: trade.value
-            });
-            console.log(`[Trader] ✅ BUY TX Broadcasted: ${txHash}. Waiting for confirmation...`);
-            if (chatId)
-                await this.bot.api.sendMessage(chatId, `🚀 **TX Broadcasted!**\nHash: \`${txHash}\`\nWaiting for block confirmation...`, { parse_mode: 'Markdown' });
+            const mode = await this.getTradingMode();
+            let txHash;
+            let receiptStatus = 'success';
+            let blockNumber = 0n;
+            if (mode === 'DRY_RUN') {
+                console.log(`[Trader] 🛡️ DRY RUN: Simulating CONFIRMED BUY transaction for ${trade.tokenAddress}...`);
+                txHash = `0xdddddddddddddddddddddddddddddddd${Date.now().toString(16).padStart(32, '0')}`;
+                blockNumber = await publicClient.getBlockNumber();
+                if (chatId)
+                    await this.bot.api.sendMessage(chatId, `🚀 **DRY RUN TX Simulated!**\nHash: \`${txHash}\``, { parse_mode: 'Markdown' });
+            }
+            else {
+                console.log(`[Trader] ⚡ Broadcasting CONFIRMED BUY transaction for ${trade.tokenAddress}...`);
+                txHash = await walletClient.sendTransaction({
+                    account: account,
+                    to: trade.toAddress,
+                    data: trade.calldata,
+                    value: trade.value
+                });
+                console.log(`[Trader] ✅ BUY TX Broadcasted: ${txHash}. Waiting for confirmation...`);
+                if (chatId)
+                    await this.bot.api.sendMessage(chatId, `🚀 **TX Broadcasted!**\nHash: \`${txHash}\`\nWaiting for block confirmation...`, { parse_mode: 'Markdown' });
+            }
             const estimatedEntryPrice = Number(trade.sizeInWeth) / Number(trade.expectedOut || 1n);
             await this.registerPendingPosition(trade.tokenAddress, estimatedEntryPrice, Number(trade.sizeInWeth) / 1e18, txHash, trade.source, trade.copiedFrom);
-            const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
-            if (receipt.status === 'success') {
-                console.log(`[Trader] 🎯 BUY TX Confirmed in block ${receipt.blockNumber}`);
+            if (mode === 'DRY_RUN') {
+                receiptStatus = 'success';
+            }
+            else {
+                const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+                receiptStatus = receipt.status;
+                blockNumber = receipt.blockNumber;
+            }
+            if (receiptStatus === 'success') {
+                console.log(`[Trader] 🎯 BUY TX Confirmed in block ${blockNumber}`);
                 this.emitToSigningBoundary(trade.tokenAddress, txHash, 'BUY EXECUTED');
                 await this.confirmPosition(txHash);
                 if (chatId)
-                    await this.bot.api.sendMessage(chatId, `✅ **Trade Confirmed!**\nBlock: ${receipt.blockNumber}`);
+                    await this.bot.api.sendMessage(chatId, `✅ **Trade Confirmed!**\nBlock: ${blockNumber}`);
             }
             else {
                 await this.failPendingPosition(txHash);
@@ -133,30 +175,65 @@ export class TraderAgent {
             }
         }
     }
-    async processExitSignal(posId, tokenAddress, amountInToken, reason) {
+    async processExitSignal(posId, tokenAddress, amountInToken, reason, txHash) {
         if (!walletClient || !account) {
             console.error("[Trader] Auto-trading disabled (no PRIVATE_KEY). Aborting trade.");
             await prisma.position.update({ where: { id: posId }, data: { status: 'EXIT_FAILED' } }).catch(console.error);
             return;
         }
-        const calldataResult = await this.constructUnsignedSellTx(tokenAddress, amountInToken);
+        const calldataResult = await this.constructUnsignedSellTx(tokenAddress, amountInToken, txHash);
         if (calldataResult) {
             const { calldata, amountOutMinimum, expectedOut, toAddress } = calldataResult;
             try {
                 const estimatedExitPrice = Number(expectedOut || 1n) / Number(amountInToken || 1n);
-                console.log(`[Trader] ⚡ Broadcasting SELL transaction for ${tokenAddress}...`);
-                const txHash = await walletClient.sendTransaction({
-                    account: account,
-                    to: toAddress,
-                    data: calldata
-                });
-                console.log(`[Trader] ✅ SELL TX Broadcasted: ${txHash}. Waiting for confirmation...`);
-                const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
-                if (receipt.status === 'success') {
-                    console.log(`[Trader] 🎯 SELL TX Confirmed in block ${receipt.blockNumber}`);
-                    dbLogger.info(`SELL TX Confirmed`, { txHash, token: tokenAddress, block: receipt.blockNumber.toString(), reason });
-                    this.emitToSigningBoundary(tokenAddress, txHash, `SELL EXECUTED [${reason}]`);
-                    await this.updatePositionStatus(posId, tokenAddress, estimatedExitPrice);
+                const mode = await this.getTradingMode();
+                let txHashFinal;
+                let receiptStatus = 'success';
+                let blockNumber = 0n;
+                if (mode === 'DRY_RUN') {
+                    console.log(`[Trader] 🛡️ DRY RUN: Simulating SELL transaction for ${tokenAddress}...`);
+                    txHashFinal = `0xdddddddddddddddddddddddddddddddd${Date.now().toString(16).padStart(32, '0')}`;
+                    blockNumber = await publicClient.getBlockNumber();
+                }
+                else {
+                    // --- 0. Check and Approve Allowance ---
+                    const currentAllowance = await publicClient.readContract({
+                        address: tokenAddress,
+                        abi: erc20Abi,
+                        functionName: 'allowance',
+                        args: [account.address, toAddress]
+                    });
+                    if (currentAllowance < amountInToken) {
+                        console.log(`[Trader] 🔓 Approving Router to spend ${tokenAddress}...`);
+                        const approveData = encodeFunctionData({
+                            abi: erc20Abi,
+                            functionName: 'approve',
+                            args: [toAddress, 2n ** 256n - 1n] // MaxUint256
+                        });
+                        const approveTxHash = await walletClient.sendTransaction({
+                            account: account,
+                            to: tokenAddress,
+                            data: approveData
+                        });
+                        await publicClient.waitForTransactionReceipt({ hash: approveTxHash });
+                        console.log(`[Trader] ✅ Approve confirmed!`);
+                    }
+                    console.log(`[Trader] ⚡ Broadcasting SELL transaction for ${tokenAddress}...`);
+                    txHashFinal = await walletClient.sendTransaction({
+                        account: account,
+                        to: toAddress,
+                        data: calldata
+                    });
+                    console.log(`[Trader] ✅ SELL TX Broadcasted: ${txHashFinal}. Waiting for confirmation...`);
+                    const receipt = await publicClient.waitForTransactionReceipt({ hash: txHashFinal });
+                    receiptStatus = receipt.status;
+                    blockNumber = receipt.blockNumber;
+                }
+                if (receiptStatus === 'success') {
+                    console.log(`[Trader] 🎯 SELL TX Confirmed in block ${blockNumber}`);
+                    dbLogger.info(`SELL TX Confirmed`, { txHash: txHashFinal, token: tokenAddress, block: blockNumber.toString(), reason, mode });
+                    this.emitToSigningBoundary(tokenAddress, txHashFinal, `SELL EXECUTED [${reason}]`);
+                    await this.updatePositionStatus(posId, tokenAddress, estimatedExitPrice, reason);
                 }
                 else {
                     throw new Error('Transaction reverted by network');
@@ -166,6 +243,29 @@ export class TraderAgent {
                 console.error(`[Trader] ❌ SELL TX Failed:`, error);
                 dbLogger.error(`SELL TX Failed`, { token: tokenAddress, error: String(error) });
                 this.emitToSigningBoundary(tokenAddress, "FAILED", 'SELL REJECTED');
+                if (reason === 'UNSUPPORTED_OR_RUG_NO_QUOTES') {
+                    console.log(`[Trader] 🚮 Token is a rug/unsupported. Marking position as CLOSED (100% loss) to clear it.`);
+                    const pos = await prisma.position.findUnique({ where: { id: posId } });
+                    if (pos) {
+                        await prisma.position.update({
+                            where: { id: posId },
+                            data: { status: 'CLOSED', pnl: -1, exitPrice: 0 }
+                        }).catch(console.error);
+                    }
+                }
+                else {
+                    await prisma.position.update({ where: { id: posId }, data: { status: 'EXIT_FAILED' } }).catch(console.error);
+                }
+            }
+        }
+        else {
+            console.error(`[Trader] ❌ Failed to construct SELL calldata for ${tokenAddress}.`);
+            if (reason === 'UNSUPPORTED_OR_RUG_NO_QUOTES') {
+                console.log(`[Trader] 🚮 Token is a rug/unsupported. Marking position as CLOSED (100% loss).`);
+                await this.updatePositionStatus(posId, tokenAddress, 0, reason);
+            }
+            else {
+                console.log(`[Trader] Marking as EXIT_FAILED.`);
                 await prisma.position.update({ where: { id: posId }, data: { status: 'EXIT_FAILED' } }).catch(console.error);
             }
         }
@@ -184,42 +284,84 @@ export class TraderAgent {
             throw new Error('❌ CRITICAL: WETH_ADDRESS, QUOTER_ADDRESS, ROUTER_ADDRESS, or USER_WALLET_ADDRESS missing in .env');
         }
         const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 5); // 5 mins
-        // --- NOXA DYNAMIC DUPLICATION (Fallback) ---
+        // --- UNIVERSAL DYNAMIC DUPLICATION ---
         if (txHash) {
             try {
-                console.log(`[Trader] Attempting NOXA Dynamic Duplication from ${txHash}...`);
+                console.log(`[Trader] Attempting Universal Dynamic Duplication for BUY from ${txHash}...`);
                 const originalTx = await publicClient.getTransaction({ hash: txHash });
-                if (originalTx && originalTx.input.startsWith('0xc1120e3d') && originalTx.to?.toLowerCase() === '0xf193ede778a92dc37cb450a1ef1565ed1e8b7964') {
-                    console.log(`[Trader] 🎯 NOXA Transaction Detected! Slicing calldata...`);
-                    // The calldata is: 0xc1120e3d + 10 words (320 bytes = 640 hex chars)
-                    // Word 4 (index 4) is minOut. Word 5 is recipient.
-                    // Let's decode it fully using ABI
-                    const noxaAbiParams = parseAbiParameters('address, address, address, uint256, uint256, address, uint256, uint256, uint256, uint256');
-                    const decodedParams = decodeAbiParameters(noxaAbiParams, `0x${originalTx.input.slice(10)}`);
-                    // Calculate proportional minOut
-                    const originalAmountIn = originalTx.value;
-                    let calculatedMinOut = 0n;
-                    if (originalAmountIn > 0n) {
-                        calculatedMinOut = (BigInt(decodedParams[4]) * amountIn) / originalAmountIn;
+                if (originalTx && originalTx.to) {
+                    let originalAmountIn = originalTx.value;
+                    // If value is 0, check for WETH transfer
+                    if (originalAmountIn === 0n) {
+                        const receipt = await publicClient.getTransactionReceipt({ hash: txHash });
+                        const erc20AbiForLog = parseAbi(['event Transfer(address indexed from, address indexed to, uint256 value)']);
+                        for (const log of receipt.logs) {
+                            if (log.address.toLowerCase() === WETH_ADDRESS.toLowerCase()) {
+                                try {
+                                    const decoded = decodeEventLog({ abi: erc20AbiForLog, data: log.data, topics: log.topics });
+                                    if (decoded.args.from.toLowerCase() === originalTx.from.toLowerCase()) {
+                                        originalAmountIn = decoded.args.value;
+                                        break;
+                                    }
+                                }
+                                catch (e) { }
+                            }
+                        }
                     }
-                    const slippageMinOut = (calculatedMinOut * 99n) / 100n; // 1% extra slippage
-                    // Replace Recipient (Word 5) and minOut (Word 4)
-                    decodedParams[4] = slippageMinOut;
-                    decodedParams[5] = USER_WALLET;
-                    decodedParams[6] = deadline;
-                    const newCalldata = concat(['0xc1120e3d', encodeAbiParameters(noxaAbiParams, decodedParams)]);
-                    console.log(`[Trader] ✅ NOXA Calldata Cloned! Expected MinOut: ${slippageMinOut}`);
-                    return {
-                        calldata: newCalldata,
-                        amountOutMinimum: slippageMinOut,
-                        expectedOut: calculatedMinOut,
-                        toAddress: originalTx.to,
-                        value: amountIn
-                    };
+                    if (originalAmountIn > 0n) {
+                        const origHex = originalAmountIn.toString(16).padStart(64, '0');
+                        const newHex = amountIn.toString(16).padStart(64, '0');
+                        const zeroHex = '0000000000000000000000000000000000000000000000000000000000000000';
+                        let modifiedInput = originalTx.input;
+                        const index = modifiedInput.indexOf(origHex);
+                        if (index !== -1) {
+                            modifiedInput = modifiedInput.substring(0, index) + newHex + modifiedInput.substring(index + 64);
+                            // Zero out the next 32-bytes (amountOutMinimum) to bypass slippage errors, since we are copying blindly
+                            const nextIndex = index + 64;
+                            if (nextIndex + 64 <= modifiedInput.length) {
+                                modifiedInput = modifiedInput.substring(0, nextIndex) + zeroHex + modifiedInput.substring(nextIndex + 64);
+                            }
+                            // Extract proportional expectedOut for accurate PnL tracking
+                            let estimatedExpectedOut = 1n;
+                            try {
+                                const receipt = await publicClient.getTransactionReceipt({ hash: txHash });
+                                const erc20AbiForLog = parseAbi(['event Transfer(address indexed from, address indexed to, uint256 value)']);
+                                for (const log of receipt.logs) {
+                                    if (log.address.toLowerCase() === tokenOut.toLowerCase()) {
+                                        try {
+                                            const decoded = decodeEventLog({ abi: erc20AbiForLog, data: log.data, topics: log.topics });
+                                            const toAddr = decoded.args.to.toLowerCase();
+                                            if (toAddr === originalTx.from.toLowerCase() || toAddr === originalTx.to?.toLowerCase()) {
+                                                const originalAmountOut = decoded.args.value;
+                                                if (originalAmountOut > 0n) {
+                                                    estimatedExpectedOut = (originalAmountOut * amountIn) / originalAmountIn;
+                                                    console.log(`[Trader] 📊 Extracted proportional expectedOut: ${estimatedExpectedOut}`);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        catch (e) { }
+                                    }
+                                }
+                            }
+                            catch (e) { }
+                            console.log(`[Trader] ✅ Universal Dynamic Duplication SUCCESS. Replaced amountIn & bypassed amountOutMinimum.`);
+                            return {
+                                calldata: modifiedInput,
+                                amountOutMinimum: 0n,
+                                expectedOut: estimatedExpectedOut,
+                                toAddress: originalTx.to,
+                                value: originalTx.value > 0n ? amountIn : 0n
+                            };
+                        }
+                        else {
+                            console.log(`[Trader] ⚠️ origHex ${origHex} not found in input. Falling back to PoolFeeDetector...`);
+                        }
+                    }
                 }
             }
             catch (err) {
-                console.warn(`[Trader] NOXA Duplication failed, falling back to Universal Router...`, err);
+                console.warn(`[Trader] Universal Dynamic Duplication failed, falling back to PoolFeeDetector...`, err);
             }
         }
         // -------------------------------------------
@@ -314,7 +456,7 @@ export class TraderAgent {
      * Constructs a SELL transaction payload using Universal Router v4 execute().
      * Command 0x00 = V3_SWAP_EXACT_IN: tokenIn -> WETH
      */
-    async constructUnsignedSellTx(tokenIn, amountIn) {
+    async constructUnsignedSellTx(tokenIn, amountIn, txHash) {
         console.log(`[Trader] Constructing Universal Router SELL calldata for ${tokenIn} -> WETH...`);
         const WETH_ADDRESS = process.env.WETH_ADDRESS;
         const QUOTER_ADDRESS = process.env.QUOTER_ADDRESS;
@@ -324,21 +466,102 @@ export class TraderAgent {
             throw new Error('❌ CRITICAL: Missing env variables for SELL tx construction.');
         }
         const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 5);
+        if (txHash) {
+            try {
+                console.log(`[Trader] Attempting Dynamic Duplication for SELL from ${txHash}...`);
+                const originalTx = await publicClient.getTransaction({ hash: txHash });
+                if (originalTx && originalTx.to) {
+                    const receipt = await publicClient.getTransactionReceipt({ hash: txHash });
+                    const erc20AbiForLog = parseAbi(['event Transfer(address indexed from, address indexed to, uint256 value)']);
+                    let originalAmountIn = 0n;
+                    for (const log of receipt.logs) {
+                        if (log.address.toLowerCase() === tokenIn.toLowerCase()) {
+                            try {
+                                const decoded = decodeEventLog({ abi: erc20AbiForLog, data: log.data, topics: log.topics });
+                                if (decoded.args.from.toLowerCase() === originalTx.from.toLowerCase()) {
+                                    originalAmountIn = decoded.args.value;
+                                    break;
+                                }
+                            }
+                            catch (e) { }
+                        }
+                    }
+                    if (originalAmountIn > 0n) {
+                        const origHex = originalAmountIn.toString(16).padStart(64, '0');
+                        const newHex = amountIn.toString(16).padStart(64, '0');
+                        const zeroHex = '0000000000000000000000000000000000000000000000000000000000000000';
+                        let modifiedInput = originalTx.input;
+                        const index = modifiedInput.indexOf(origHex);
+                        if (index !== -1) {
+                            modifiedInput = modifiedInput.substring(0, index) + newHex + modifiedInput.substring(index + 64);
+                            // Zero out the next 32-bytes (amountOutMinimum) to bypass slippage errors
+                            const nextIndex = index + 64;
+                            if (nextIndex + 64 <= modifiedInput.length) {
+                                modifiedInput = modifiedInput.substring(0, nextIndex) + zeroHex + modifiedInput.substring(nextIndex + 64);
+                            }
+                            // Extract proportional expectedOut (WETH) for accurate PnL tracking
+                            let estimatedExpectedOut = 1n;
+                            try {
+                                for (const log of receipt.logs) {
+                                    if (log.address.toLowerCase() === WETH_ADDRESS.toLowerCase()) {
+                                        try {
+                                            const decoded = decodeEventLog({ abi: erc20AbiForLog, data: log.data, topics: log.topics });
+                                            const toAddr = decoded.args.to.toLowerCase();
+                                            if (toAddr === originalTx.from.toLowerCase() || toAddr === originalTx.to?.toLowerCase()) {
+                                                const originalAmountOut = decoded.args.value;
+                                                if (originalAmountOut > 0n) {
+                                                    estimatedExpectedOut = (originalAmountOut * amountIn) / originalAmountIn;
+                                                    console.log(`[Trader] 📊 Extracted proportional expectedOut (WETH): ${estimatedExpectedOut}`);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        catch (e) { }
+                                    }
+                                }
+                            }
+                            catch (e) { }
+                            console.log(`[Trader] ✅ Dynamic Duplication SUCCESS. Replaced amountIn & amountOutMinimum.`);
+                            return {
+                                calldata: modifiedInput,
+                                amountOutMinimum: 0n,
+                                expectedOut: estimatedExpectedOut,
+                                toAddress: originalTx.to
+                            };
+                        }
+                    }
+                }
+            }
+            catch (e) {
+                console.error(`[Trader] Dynamic Duplication failed for SELL:`, e);
+            }
+        }
         try {
             // 1. Detect best pool fee tier dynamically
-            const { fee: POOL_FEE, expectedOut } = await detectBestFee(tokenIn, WETH_ADDRESS, amountIn);
-            // 2. Slippage Protection (1%)
-            if (expectedOut === 0n) {
-                throw new Error('No active pool found (expectedOut = 0). Aborting to prevent TX revert.');
+            let POOL_FEE = 10000;
+            let expectedOut = 0n;
+            let useNative = false;
+            try {
+                const best = await detectBestFee(tokenIn, WETH_ADDRESS, amountIn);
+                POOL_FEE = best.fee;
+                expectedOut = best.expectedOut;
             }
-            const amountOutMinimum = (expectedOut * 99n) / 100n;
+            catch (e) {
+                console.warn(`[Trader] Quoter failed for WETH. Trying Native... or falling back to default fee 10000.`);
+                useNative = true;
+                POOL_FEE = 10000;
+                expectedOut = 1n; // Bypass slippage to guarantee execution
+            }
+            // 2. Slippage Protection (1%)
+            const amountOutMinimum = expectedOut > 1n ? (expectedOut * 99n) / 100n : 0n;
             console.log(`[Trader] 🛡️ SELL amountOutMinimum: ${amountOutMinimum}`);
             // 3. Encode Universal Router execute() payload for Uniswap V4
             // Command 0x10 = V4_SWAP
             const commands = '0x10';
-            const isZeroForOne = BigInt(tokenIn) < BigInt(WETH_ADDRESS);
-            const currency0 = isZeroForOne ? tokenIn : WETH_ADDRESS;
-            const currency1 = isZeroForOne ? WETH_ADDRESS : tokenIn;
+            const TARGET_OUT = useNative ? '0x0000000000000000000000000000000000000000' : WETH_ADDRESS;
+            const isZeroForOne = BigInt(tokenIn) < BigInt(TARGET_OUT);
+            const currency0 = isZeroForOne ? tokenIn : TARGET_OUT;
+            const currency1 = isZeroForOne ? TARGET_OUT : tokenIn;
             let tickSpacing = 60;
             if (POOL_FEE === 500)
                 tickSpacing = 10;
@@ -416,7 +639,8 @@ export class TraderAgent {
                     size,
                     txHash,
                     source,
-                    copiedFrom
+                    copiedFrom,
+                    tradingMode: await this.getTradingMode()
                 }
             });
             console.log(`[Trader] 💾 DB UPDATE: Position registered as PENDING -> ID: ${position.id}, txHash: ${txHash}`);
@@ -481,7 +705,7 @@ export class TraderAgent {
     /**
      * Updates a position's status to CLOSED in the database.
      */
-    async updatePositionStatus(posId, tokenAddress, exitPrice) {
+    async updatePositionStatus(posId, tokenAddress, exitPrice, exitReason) {
         try {
             const position = await prisma.position.findUnique({
                 where: { id: posId }
@@ -490,7 +714,7 @@ export class TraderAgent {
                 const pnlRatio = (exitPrice - position.entryPrice) / position.entryPrice;
                 await prisma.position.update({
                     where: { id: position.id },
-                    data: { status: 'CLOSED', exitPrice, pnl: pnlRatio }
+                    data: { status: 'CLOSED', exitPrice, pnl: pnlRatio, exitReason } // IDE should pick up new types now
                 });
                 console.log(`[Trader] 💾 DB UPDATE: Position ${position.id} CLOSED in DB. PNL: ${(pnlRatio * 100).toFixed(2)}%`);
                 if (position.source === 'COPYTRADE' && position.copiedFrom) {

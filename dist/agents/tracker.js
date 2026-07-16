@@ -1,8 +1,10 @@
 import { createServer } from 'http';
-import { parseAbi, decodeFunctionData } from 'viem';
+import { parseAbiItem, decodeEventLog } from 'viem';
 import { prisma } from '../core/db.js';
 import { dbLogger } from '../services/logger.js';
 import { WalletProfiler } from '../services/walletProfiler.js';
+import { publicClient } from '../services/viem.js';
+const TRANSFER_EVENT = parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)');
 export class TrackerAgent {
     onCopyBuySignal;
     onCopySellSignal;
@@ -26,19 +28,30 @@ export class TrackerAgent {
             }
             if (req.method === 'GET' && req.url === '/api/dashboard') {
                 try {
-                    const [wallets, signals, positions, logs, totalSignals, openPositionsCount] = await Promise.all([
+                    const [wallets, signals, positions, logs, totalSignals, openPositionsCount, tradingModeConfig] = await Promise.all([
                         prisma.trackedWallet.findMany({ orderBy: { createdAt: 'desc' } }),
                         prisma.signal.findMany({ orderBy: { createdAt: 'desc' }, take: 20 }),
                         prisma.position.findMany({ orderBy: { createdAt: 'desc' }, take: 20 }),
                         prisma.log.findMany({ orderBy: { createdAt: 'desc' }, take: 50 }),
                         prisma.signal.count(),
                         prisma.position.count({ where: { status: 'OPEN' } }),
+                        prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } })
                     ]);
                     res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ wallets, signals, positions, logs, totalSignals, openPositionsCount }));
+                    res.end(JSON.stringify({
+                        wallets,
+                        signals,
+                        positions,
+                        logs,
+                        metrics: {
+                            totalSignals,
+                            openPositionsCount,
+                            tradingMode: tradingModeConfig?.value || 'LIVE'
+                        }
+                    }));
                 }
                 catch (e) {
-                    console.error(`[Tracker] API error:`, e);
+                    console.error(`[Tracker] API Error:`, e);
                     res.writeHead(500);
                     res.end();
                 }
@@ -51,8 +64,6 @@ export class TrackerAgent {
                 req.on('end', async () => {
                     try {
                         const payload = JSON.parse(body);
-                        // Verify Alchemy payload signature if needed here
-                        // Handle Address Activity webhook payload
                         if (payload.event && payload.event.activity) {
                             for (const activity of payload.event.activity) {
                                 await this.processActivity(activity);
@@ -78,38 +89,17 @@ export class TrackerAgent {
         });
     }
     async processActivity(activity) {
-        // Allow 'external' (standard calls), 'token' (ERC20/ETH transfers), 'internal' (contract-to-contract)
-        // Reject only: no activity hash, no fromAddress, or pure ERC20 approve/transfer noise
         if (!activity.hash || !activity.fromAddress)
             return;
         const fromAddress = activity.fromAddress.toLowerCase();
-        const toAddress = activity.toAddress?.toLowerCase(); // Target contract
-        // --- DIAGNOSTIC LOG ---
-        console.log(`[Tracker] 📥 Received webhook activity | TX: ${activity.hash} | Category: ${activity.category} | Value: ${activity.value} | To: ${toAddress}`);
-        // ── Router Whitelist Filter ───────────────────────────────────────────────
-        // Only process transactions sent to a KNOWN swap router.
-        const KNOWN_ROUTERS = new Set([
-            (process.env.ROUTER_ADDRESS || '').toLowerCase(), // Universal Router v4
-            '0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45', // SwapRouter02 (legacy fallback)
-            '0xf193ede778a92dc37cb450a1ef1565ed1e8b7964', // Sniper Bot Proxy Router (0xc1120e3d)
-        ].filter(Boolean));
-        if (!toAddress || !KNOWN_ROUTERS.has(toAddress)) {
-            // Silently skip — not sent to a known router (or uncomment for debug)
-            // console.log(`[Tracker] 🛑 Skipped ${activity.hash} - Not a known router (${toAddress})`);
-            return;
-        }
-        // ─────────────────────────────────────────────────────────────────────────
         // Check if the fromAddress is in our registry
         const trackedWallet = await prisma.trackedWallet.findUnique({
             where: { address: fromAddress }
         });
         if (!trackedWallet || trackedWallet.status !== 'ACTIVE') {
-            return; // Not tracked or not active
+            return;
         }
-        console.log(`[Tracker] 🚨 Swap activity detected from: ${trackedWallet.label || fromAddress} → ${toAddress} | TX: https://robinhoodchain.blockscout.com/tx/${activity.hash}`);
-        dbLogger.info(`Swap activity detected from: ${trackedWallet.label || fromAddress} → ${toAddress}`, { txHash: activity.hash, wallet: trackedWallet.label || fromAddress });
         // Deduplicate by txHash to avoid processing the same transaction multiple times
-        // (Alchemy webhooks send one activity per transfer, so a single swap tx has multiple activities)
         if (this.processedTxHashes?.has(activity.hash)) {
             return;
         }
@@ -117,337 +107,102 @@ export class TrackerAgent {
             this.processedTxHashes = new Set();
         }
         this.processedTxHashes.add(activity.hash);
-        // Clean up old hashes to prevent memory leak
         if (this.processedTxHashes.size > 10000) {
             this.processedTxHashes.clear();
             this.processedTxHashes.add(activity.hash);
         }
-        // Always fetch calldata on-chain because activity.rawContract?.rawValue is the transfer amount, not the tx input!
-        let calldata = '0x';
-        const { publicClient } = await import('../services/viem.js');
-        try {
-            const tx = await publicClient.getTransaction({ hash: activity.hash });
-            if (!tx.input || tx.input.length < 10) {
-                console.warn(`[Tracker] ⚠️ On-chain fallback returned empty input for TX: ${activity.hash}`);
-                return;
-            }
-            calldata = tx.input;
-            console.log(`[Tracker] 🔄 Fetched on-chain calldata for TX: ${activity.hash}`);
-        }
-        catch (fetchErr) {
-            console.error(`[Tracker] ❌ On-chain fallback failed for ${activity.hash}: ${fetchErr.message}`);
-            return;
-        }
-        console.log(`[Tracker] 🔎 Calldata found (${calldata.length} chars), decoding...`);
-        try {
-            const activityTime = activity.timestamp ? new Date(activity.timestamp).getTime() : Date.now();
-            // Parse tx value from Alchemy webhook (activity.value is in native tokens, e.g. 0.13662)
-            // Convert to Wei (BigInt). If missing, fallback to 0.
-            let txValueWei = 0n;
-            if (activity.value !== undefined && activity.value !== null) {
-                // activity.value is usually a float for native token (e.g., 0.13662)
-                txValueWei = BigInt(Math.floor(parseFloat(activity.value.toString()) * 1e18));
-            }
-            await this.decodeAndClassifySwap(calldata, fromAddress, toAddress, trackedWallet, activityTime, activity.hash, txValueWei);
-        }
-        catch (e) {
-            if (e.name === 'AbiFunctionSignatureNotFoundError' || (e.message && e.message.includes('not found on ABI'))) {
-                const sig = calldata.substring(0, 10);
-                console.log(`[Tracker] ℹ️ Ignored non-swap calldata from ${trackedWallet.label || fromAddress} (sig: ${sig})`);
-            }
-            else {
-                console.error(`[Tracker] Failed to decode calldata for wallet ${fromAddress}`, e);
-            }
-        }
+        console.log(`[Tracker] 🚨 Swap activity detected from: ${trackedWallet.label || fromAddress} | TX: https://robinhoodchain.blockscout.com/tx/${activity.hash}`);
+        // Defer processing to not block the webhook response
+        setTimeout(() => {
+            this.analyzeTransactionReceipt(fromAddress, trackedWallet, activity.hash, activity.timestamp).catch(e => {
+                console.error(`[Tracker] Error in analyzeTransactionReceipt for ${activity.hash}:`, e);
+            });
+        }, 2000); // Wait 2s for RPC indexing
     }
-    async decodeAndClassifySwap(calldata, walletAddress, routerAddress, trackedWallet, timestamp, txHash, txValueWei = 0n) {
-        // Known router addresses (lowercase) — only decode if the target IS a known router
-        const UNIVERSAL_ROUTER = (process.env.ROUTER_ADDRESS || '').toLowerCase();
-        const WETH = (process.env.WETH_ADDRESS || '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2').toLowerCase();
-        // === ABI definitions ===
-        const swapRouter02Abi = parseAbi([
-            'struct ExactInputSingleParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }',
-            'function exactInputSingle(ExactInputSingleParams params) external payable returns (uint256 amountOut)',
-            'function multicall(bytes[] data) external payable returns (bytes[] results)',
-        ]);
-        const universalRouterAbi = parseAbi([
-            'function execute(bytes commands, bytes[] inputs) external payable',
-            'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable',
-        ]);
-        const funcSig = calldata.substring(0, 10).toLowerCase();
-        // ── Custom Bot Router (0xc1120e3d) ────────────────────────────────────────
-        if (funcSig === '0xc1120e3d') {
-            try {
-                // Layout:
-                // params[0]: Router
-                // params[1]: PoolManager
-                // params[2]: Token
-                // params[3]: isBuy (uint256)
-                // ...
-                const rawParams = calldata.substring(10);
-                const tokenParam = rawParams.substring(128, 192); // Param 3 (index 2)
-                const isBuyParam = rawParams.substring(192, 256); // Param 4 (index 3)
-                const amountParam = rawParams.substring(256, 320); // Param 5 (index 4) - might be amountIn for sell?
-                const targetToken = '0x' + tokenParam.substring(24).toLowerCase();
-                const isBuy = isBuyParam.endsWith('1');
-                if (isBuy) {
-                    // BUY: ETH -> Token. Amount is the tx value!
-                    console.log(`[Tracker] 🔍 Sniper Bot Swap decoded: BUY ${targetToken} (amountIn: ${txValueWei})`);
-                    await this.emitSignal(WETH, targetToken, txValueWei, walletAddress, trackedWallet, timestamp, txHash);
-                }
-                else {
-                    // SELL: Token -> ETH. Amount is likely passed in Param 5 (index 4)
-                    const amountIn = BigInt('0x' + amountParam);
-                    console.log(`[Tracker] 🔍 Sniper Bot Swap decoded: SELL ${targetToken} (amountIn: ${amountIn})`);
-                    await this.emitSignal(targetToken, WETH, amountIn, walletAddress, trackedWallet, timestamp, txHash);
-                }
-            }
-            catch (err) {
-                console.warn(`[Tracker] Failed to decode Custom Bot Swap | TX: https://robinhoodchain.blockscout.com/tx/${txHash}: ${err.message}`);
-            }
-            return;
-        }
-        // ── Universal Router execute() ────────────────────────────────────────────
-        // Selector: 0x3593564c (execute with deadline) or 0x24856bc3 (execute without)
-        const isUniversalRouter = funcSig === '0x3593564c' || funcSig === '0x24856bc3';
-        if (isUniversalRouter) {
-            try {
-                const decoded = decodeFunctionData({ abi: universalRouterAbi, data: calldata });
-                const commands = decoded.args[0]; // bytes: each byte = 1 command
-                const inputs = decoded.args[1]; // bytes[]: params for each command
-                // Convert commands hex string to array of command bytes
-                // Skip '0x' prefix, then every 2 chars = 1 byte = 1 command
-                const commandBytes = (commands.replace('0x', '').match(/.{1,2}/g) || [])
-                    .map(b => parseInt(b, 16));
-                for (let i = 0; i < commandBytes.length; i++) {
-                    const cmd = commandBytes[i] & 0x3f; // mask flag bits
-                    const input = inputs[i];
-                    if (!input)
-                        continue;
-                    // Command 0x00 = V3_SWAP_EXACT_IN
-                    // Command 0x01 = V3_SWAP_EXACT_OUT
-                    if (cmd === 0x00 || cmd === 0x01) {
-                        await this.processUniversalRouterSwap(input, cmd, walletAddress, trackedWallet, timestamp, txHash);
-                    }
-                    // Command 0x08 = V2_SWAP_EXACT_IN
-                    // Command 0x09 = V2_SWAP_EXACT_OUT
-                    else if (cmd === 0x08 || cmd === 0x09) {
-                        await this.processUniversalRouterSwapV2(input, cmd, walletAddress, trackedWallet, timestamp, txHash);
-                    }
-                    // Command 0x10 = V4_SWAP
-                    else if (cmd === 0x10) {
-                        await this.processUniversalRouterSwapV4(input, cmd, walletAddress, trackedWallet, timestamp, txHash);
-                    }
-                    else {
-                        // e.g. 0x0b (WRAP_ETH), 0x0c (UNWRAP_WETH), 0x04 (SWEEP), etc.
-                        console.log(`[Tracker] ℹ️ UR Ignored Command: 0x${cmd.toString(16)} | TX: https://robinhoodchain.blockscout.com/tx/${txHash}`);
-                    }
-                }
-            }
-            catch (err) {
-                console.warn(`[Tracker] Failed to decode Universal Router execute() | TX: https://robinhoodchain.blockscout.com/tx/${txHash}: ${err.message}`);
-            }
-            return;
-        }
-        // ── SwapRouter02 exactInputSingle / multicall ─────────────────────────────
+    async analyzeTransactionReceipt(walletAddress, trackedWallet, txHash, timestampStr) {
         try {
-            const decoded = decodeFunctionData({ abi: swapRouter02Abi, data: calldata });
-            if (decoded.functionName === 'exactInputSingle') {
-                const params = decoded.args[0];
-                this.emitSignal(params.tokenIn.toLowerCase(), params.tokenOut.toLowerCase(), BigInt(params.amountIn), walletAddress, trackedWallet, timestamp, txHash);
+            const receipt = await publicClient.getTransactionReceipt({ hash: txHash });
+            if (receipt.status !== 'success')
+                return;
+            const tx = await publicClient.getTransaction({ hash: txHash });
+            const WETH_ADDRESS = (process.env.WETH_ADDRESS || '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2').toLowerCase();
+            const walletLower = walletAddress.toLowerCase();
+            let wethSpent = 0n;
+            let wethReceived = 0n;
+            // Native ETH tracking
+            if (tx.from.toLowerCase() === walletLower && tx.value > 0n) {
+                wethSpent += tx.value;
             }
-            else if (decoded.functionName === 'multicall') {
-                const multicallData = decoded.args[0];
-                for (const data of multicallData) {
-                    try {
-                        const inner = decodeFunctionData({ abi: swapRouter02Abi, data });
-                        if (inner.functionName === 'exactInputSingle') {
-                            const params = inner.args[0];
-                            this.emitSignal(params.tokenIn.toLowerCase(), params.tokenOut.toLowerCase(), BigInt(params.amountIn), walletAddress, trackedWallet, timestamp, txHash);
+            // We will map which tokens left the wallet and which tokens arrived
+            const tokensAcquired = new Map();
+            const tokensSpent = new Map();
+            for (const log of receipt.logs) {
+                try {
+                    const decoded = decodeEventLog({
+                        abi: [TRANSFER_EVENT],
+                        data: log.data,
+                        topics: log.topics
+                    });
+                    if (decoded.eventName === 'Transfer') {
+                        const { from, to, value } = decoded.args;
+                        const tokenAddr = log.address.toLowerCase();
+                        const fromAddr = from.toLowerCase();
+                        const toAddr = to.toLowerCase();
+                        if (fromAddr === walletLower) {
+                            if (tokenAddr === WETH_ADDRESS)
+                                wethSpent += value;
+                            else {
+                                const current = tokensSpent.get(tokenAddr) || 0n;
+                                tokensSpent.set(tokenAddr, current + value);
+                            }
+                        }
+                        if (toAddr === walletLower) {
+                            if (tokenAddr === WETH_ADDRESS)
+                                wethReceived += value;
+                            else {
+                                const current = tokensAcquired.get(tokenAddr) || 0n;
+                                tokensAcquired.set(tokenAddr, current + value);
+                            }
                         }
                     }
-                    catch { /* non-swap inner calls like refundETH — ignore */ }
+                }
+                catch (e) {
+                    // Not a standard transfer event
+                }
+            }
+            const timestamp = timestampStr ? new Date(timestampStr).getTime() : Date.now();
+            // Analyze Net Flow to determine BUY or SELL
+            // BUY condition: WETH spent > 0, Token acquired > 0
+            if (wethSpent > 0n && tokensAcquired.size > 0) {
+                for (const [tokenAddr, tokenAmount] of tokensAcquired.entries()) {
+                    // If we spent WETH and got Token, it's a BUY of Token.
+                    // We assume the wethSpent was entirely used for this token (simplification for single swaps)
+                    await this.emitSignal(WETH_ADDRESS, tokenAddr, wethSpent, walletAddress, trackedWallet, timestamp, txHash);
+                }
+            }
+            // SELL condition: Token spent > 0, WETH received > 0 (or native ETH received... native ETH trace is hard, we rely on WETH/WETH unwrapping if any, or just assume if Token left, it was a sell)
+            if (tokensSpent.size > 0) {
+                for (const [tokenAddr, tokenAmount] of tokensSpent.entries()) {
+                    // We consider it a sell if any token leaves the wallet and they get WETH back.
+                    // Wait, if wethReceived == 0, maybe they got native ETH? We can't trace internal native ETH transfers easily via logs.
+                    // But if they spent a token, we can assume it's a SELL anyway, and let Orchestrator handle size based on position.
+                    await this.emitSignal(tokenAddr, WETH_ADDRESS, tokenAmount, walletAddress, trackedWallet, timestamp, txHash);
                 }
             }
         }
-        catch (error) {
-            if (error.name === 'AbiFunctionSignatureNotFoundError' || (error.message && error.message.includes('not found on ABI'))) {
-                const sig = calldata.substring(0, 10);
-                console.log(`[Tracker] ℹ️ Ignored non-swap tx from ${trackedWallet.label || walletAddress} (sig: ${sig})`);
-            }
-            else {
-                console.warn(`[Tracker] Unrecognized calldata: ${error.message}`);
-            }
-        }
-    }
-    /**
-     * Decodes a single V3_SWAP_EXACT_IN or V3_SWAP_EXACT_OUT input from Universal Router.
-     * Layout (ABI-encoded tuple): (address recipient, uint256 amountIn, uint256 amountOutMin, bytes path, bool payerIsUser)
-     */
-    async processUniversalRouterSwap(input, cmd, walletAddress, trackedWallet, timestamp, txHash) {
-        try {
-            // Robust manual parser for (address recipient, uint256 amountIn, uint256 amountOutMin, bytes path, bool payerIsUser)
-            const hex = input.startsWith('0x') ? input.substring(2) : input;
-            if (hex.length < 320) {
-                console.log(`[Tracker] ℹ️ UR V3 Ignored: Input hex too short (${hex.length} < 320) | TX: https://robinhoodchain.blockscout.com/tx/${txHash}`);
-                return; // Minimum 5 words for the tuple
-            }
-            // Word 1: amountIn
-            const amountInStr = hex.substring(64, 128);
-            const amountIn = BigInt('0x' + amountInStr);
-            // Word 3: offset to path
-            const pathOffset = parseInt(hex.substring(192, 256), 16) * 2;
-            // Read path length and data
-            const pathLength = parseInt(hex.substring(pathOffset, pathOffset + 64), 16) * 2;
-            const pathHex = hex.substring(pathOffset + 64, pathOffset + 64 + pathLength);
-            if (pathHex.length < 86) {
-                console.log(`[Tracker] ℹ️ UR V3 Ignored: Path hex too short (${pathHex.length} < 86) | TX: https://robinhoodchain.blockscout.com/tx/${txHash}`);
-                return; // Min path length = 43 bytes (86 chars)
-            }
-            let tokenIn = ('0x' + pathHex.substring(0, 40)).toLowerCase();
-            let tokenOut = ('0x' + pathHex.substring(pathHex.length - 40)).toLowerCase();
-            // For EXACT_OUT (cmd 0x01), the path is reversed (tokenOut -> ... -> tokenIn)
-            if (cmd === 0x01) {
-                const temp = tokenIn;
-                tokenIn = tokenOut;
-                tokenOut = temp;
-            }
-            console.log(`[Tracker] 🔍 Universal Router V3 Swap decoded: ${tokenIn} → ${tokenOut} (amountIn: ${amountIn})`);
-            this.emitSignal(tokenIn, tokenOut, amountIn, walletAddress, trackedWallet, timestamp, txHash);
-        }
-        catch (err) {
-            console.warn(`[Tracker] Could not decode UR V3 swap input | TX: https://robinhoodchain.blockscout.com/tx/${txHash}: ${err.message}`);
-        }
-    }
-    /**
-     * Decodes a single V2_SWAP_EXACT_IN or V2_SWAP_EXACT_OUT input from Universal Router.
-     * Layout (ABI-encoded tuple): (address recipient, uint256 amountIn, uint256 amountOutMin, address[] path, bool payerIsUser)
-     */
-    async processUniversalRouterSwapV2(input, cmd, walletAddress, trackedWallet, timestamp, txHash) {
-        try {
-            // Robust manual parser for (address recipient, uint256 amountIn, uint256 amountOutMin, address[] path, bool payerIsUser)
-            const hex = input.startsWith('0x') ? input.substring(2) : input;
-            if (hex.length < 320) {
-                console.log(`[Tracker] ℹ️ UR V2 Ignored: Input hex too short (${hex.length} < 320) | TX: https://robinhoodchain.blockscout.com/tx/${txHash}`);
-                return;
-            }
-            const amountInStr = hex.substring(64, 128);
-            const amountIn = BigInt('0x' + amountInStr);
-            const pathOffset = parseInt(hex.substring(192, 256), 16) * 2;
-            const pathLength = parseInt(hex.substring(pathOffset, pathOffset + 64), 16);
-            if (pathLength < 2) {
-                console.log(`[Tracker] ℹ️ UR V2 Ignored: Path length < 2 (${pathLength}) | TX: https://robinhoodchain.blockscout.com/tx/${txHash}`);
-                return;
-            }
-            let tokenIn = ('0x' + hex.substring(pathOffset + 64, pathOffset + 128).slice(-40)).toLowerCase();
-            let tokenOut = ('0x' + hex.substring(pathOffset + 64 + ((pathLength - 1) * 64), pathOffset + 64 + (pathLength * 64)).slice(-40)).toLowerCase();
-            // For EXACT_OUT (cmd 0x09), the logical input/output is reversed
-            if (cmd === 0x09) {
-                const temp = tokenIn;
-                tokenIn = tokenOut;
-                tokenOut = temp;
-            }
-            console.log(`[Tracker] 🔍 Universal Router V2 Swap decoded: ${tokenIn} → ${tokenOut} (amountIn: ${amountIn})`);
-            this.emitSignal(tokenIn, tokenOut, amountIn, walletAddress, trackedWallet, timestamp, txHash);
-        }
-        catch (err) {
-            console.warn(`[Tracker] Could not decode UR V2 swap input | TX: https://robinhoodchain.blockscout.com/tx/${txHash}: ${err.message}`);
-        }
-    }
-    /**
-     * Decodes V4_SWAP input from Universal Router (Command 0x10).
-     * Parses actions and params to extract the tokens and amountIn for V4_SWAP_EXACT_IN_SINGLE (0x06).
-     */
-    async processUniversalRouterSwapV4(input, cmd, walletAddress, trackedWallet, timestamp, txHash) {
-        try {
-            const hex = input.startsWith('0x') ? input.substring(2) : input;
-            const actionOffset = parseInt(hex.substring(0, 64), 16) * 2;
-            const actionLength = parseInt(hex.substring(actionOffset, actionOffset + 64), 16) * 2;
-            const actionsHex = hex.substring(actionOffset + 64, actionOffset + 64 + actionLength);
-            const actionBytes = (actionsHex.match(/.{1,2}/g) || []).map(b => parseInt(b, 16));
-            const paramsOffset = parseInt(hex.substring(64, 128), 16) * 2;
-            const paramsCount = parseInt(hex.substring(paramsOffset, paramsOffset + 64), 16);
-            const params = [];
-            for (let i = 0; i < paramsCount; i++) {
-                const itemOffsetRelative = parseInt(hex.substring(paramsOffset + 64 + (i * 64), paramsOffset + 64 + (i * 64) + 64), 16) * 2;
-                // Array offsets are relative to the start of the elements (after the 32-byte length word)
-                const itemOffset = paramsOffset + 64 + itemOffsetRelative;
-                const itemLength = parseInt(hex.substring(itemOffset, itemOffset + 64), 16) * 2;
-                params.push(hex.substring(itemOffset + 64, itemOffset + 64 + itemLength));
-            }
-            // Log all found action bytes for diagnostics
-            const actHexList = actionBytes.map(b => '0x' + b.toString(16).padStart(2, '0')).join(', ');
-            console.log(`[Tracker] 🔬 V4 Action Bytes: [${actHexList}] (${actionBytes.length} actions, ${params.length} params) | TX: https://robinhoodchain.blockscout.com/tx/${txHash}`);
-            for (let i = 0; i < actionBytes.length; i++) {
-                const act = actionBytes[i];
-                // 0x06 = V4_SWAP_EXACT_IN_SINGLE, 0x07 = V4_SWAP_EXACT_OUT_SINGLE
-                // 0x08 = V4_SWAP_EXACT_IN (multi-hop), 0x09 = V4_SWAP_EXACT_OUT (multi-hop)
-                if ((act === 0x06 || act === 0x07) && params[i]) {
-                    const isExactOut = act === 0x07;
-                    const paramHex = params[i].replace('0x', '');
-                    if (paramHex.length < 448) {
-                        console.log(`[Tracker] ℹ️ UR V4 Ignored: Param hex too short (${paramHex.length} < 448) | TX: https://robinhoodchain.blockscout.com/tx/${txHash}`);
-                        continue;
-                    }
-                    // Universal Router tightly packs or offsets the V4 ExactInputSingleParams.
-                    // Through raw byte analysis, we can extract the values at specific fixed positions:
-                    // The param data starts with a 32-byte tuple offset (0x0020), so the first struct element starts at 64 chars
-                    const c0Str = paramHex.substring(64, 128).slice(-40);
-                    const c1Str = paramHex.substring(128, 192).slice(-40);
-                    const zeroForOne = paramHex.substring(384, 448).endsWith('1');
-                    // V4 ExactInputSingleParams struct layout (ABI-encoded with tuple offset at word 0):
-                    // Word 0: tuple offset (0x20)
-                    // Word 1: currency0  [64:128]
-                    // Word 2: currency1  [128:192]
-                    // Word 3: fee        [192:256]
-                    // Word 4: tickSpacing[256:320]
-                    // Word 5: hooks      [320:384]
-                    // Word 6: zeroForOne [384:448]
-                    // Word 7: amountSpecified (uint128) [448:512]  ← read exactly 1 word
-                    // Word 8: sqrtPriceLimitX96 [512:576]
-                    const amountWord = paramHex.substring(448, 512);
-                    const amountIn = BigInt('0x' + amountWord);
-                    // For EXACT_IN_SINGLE: zeroForOne=true means c0→c1 (c0=tokenIn, c1=tokenOut)
-                    // For EXACT_OUT_SINGLE: direction is logically reversed
-                    let tokenInStr = zeroForOne ? c0Str : c1Str;
-                    let tokenOutStr = zeroForOne ? c1Str : c0Str;
-                    if (isExactOut) {
-                        const tmp = tokenInStr;
-                        tokenInStr = tokenOutStr;
-                        tokenOutStr = tmp;
-                    }
-                    let tokenIn = '0x' + tokenInStr.toLowerCase();
-                    let tokenOut = '0x' + tokenOutStr.toLowerCase();
-                    const WETH = (process.env.WETH_ADDRESS || '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2').toLowerCase();
-                    // In V4, native ETH is represented as address(0)
-                    if (tokenIn === '0x0000000000000000000000000000000000000000' || tokenIn === '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee') {
-                        tokenIn = WETH;
-                    }
-                    if (tokenOut === '0x0000000000000000000000000000000000000000' || tokenOut === '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee') {
-                        tokenOut = WETH;
-                    }
-                    console.log(`[Tracker] 🔍 Universal Router V4 Swap decoded (act 0x${act.toString(16)}): ${tokenIn} → ${tokenOut} (amountIn: ${amountIn})`);
-                    this.emitSignal(tokenIn, tokenOut, amountIn, walletAddress, trackedWallet, timestamp, txHash);
-                }
-                else if (act !== 0x0b && act !== 0x0c && act !== 0x04 && act !== 0x0d && act !== 0x0f && act !== 0x10 && act !== 0x11) {
-                    // Log truly unknown V4 actions
-                    // Known non-swap: 0x0b=WRAP_ETH, 0x0c=UNWRAP_WETH, 0x04=SWEEP, 0x0d=TRANSFER, 0x0f=SETTLE_ALL, 0x10=TAKE_ALL, 0x11=TAKE
-                    console.log(`[Tracker] ℹ️ V4 Unhandled action: 0x${act.toString(16)} | TX: https://robinhoodchain.blockscout.com/tx/${txHash}`);
-                }
-            }
-        }
-        catch (err) {
-            console.warn(`[Tracker] Could not decode UR V4 swap input | TX: https://robinhoodchain.blockscout.com/tx/${txHash}: ${err.message}`);
+        catch (e) {
+            console.error(`[Tracker] ❌ Failed to analyze receipt for ${txHash}: ${e.message}`);
         }
     }
     async emitSignal(tokenIn, tokenOut, amountIn, walletAddress, trackedWallet, timestamp, txHash) {
         const WETH_ADDRESS = (process.env.WETH_ADDRESS || '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2').toLowerCase();
-        // Classification
+        console.log(`[Tracker-DEBUG] emitSignal called. tokenIn: ${tokenIn}, tokenOut: ${tokenOut}, WETH: ${WETH_ADDRESS}, amount: ${amountIn}`);
         if (tokenIn === WETH_ADDRESS) {
-            // BUY tokenOut
+            // BUY targetToken
+            console.log(`[Tracker-DEBUG] It is a BUY! Firing onCopyBuySignal...`);
+            WalletProfiler.processBuy(walletAddress, tokenOut, txHash);
             console.log(`[Tracker] 🛒 BUY Signal: ${walletAddress} bought ${tokenOut} | TX: https://robinhoodchain.blockscout.com/tx/${txHash}`);
             dbLogger.info(`BUY Signal detected`, { wallet: trackedWallet.label || walletAddress, token: tokenOut, amountWei: amountIn.toString(), tier: trackedWallet.tier, txHash });
-            // Save BUY signal to DB
             try {
                 await prisma.signal.create({
                     data: {
@@ -461,12 +216,7 @@ export class TrackerAgent {
                 });
                 console.log(`[Tracker] ✅ BUY signal saved to DB for ${tokenOut}`);
             }
-            catch (e) {
-                console.error(`[Tracker] ❌ Failed to save BUY signal to DB: ${e.message} | code: ${e.code}`);
-            }
-            // Async trigger for on-chain profiling
-            WalletProfiler.processBuy(walletAddress, tokenOut, txHash);
-            // Track buy time for anti-farm
+            catch (e) { }
             this.lastBuyTime.set(`${walletAddress}-${tokenOut}`, timestamp);
             if (this.onCopyBuySignal) {
                 this.onCopyBuySignal(walletAddress, tokenOut, amountIn, trackedWallet.tier, trackedWallet.bundleId, timestamp, txHash);
@@ -476,7 +226,6 @@ export class TrackerAgent {
             // SELL tokenIn
             console.log(`[Tracker] 💥 SELL Signal: ${walletAddress} sold ${tokenIn} | TX: https://robinhoodchain.blockscout.com/tx/${txHash}`);
             dbLogger.info(`SELL Signal detected`, { wallet: trackedWallet.label || walletAddress, token: tokenIn, amountWei: amountIn.toString(), tier: trackedWallet.tier, txHash });
-            // Save SELL signal to DB
             try {
                 await prisma.signal.create({
                     data: {
@@ -488,14 +237,9 @@ export class TrackerAgent {
                         rawContext: { type: 'SELL', wallet: trackedWallet.label || walletAddress, tier: trackedWallet.tier, amountWei: amountIn.toString(), txHash }
                     }
                 });
-                console.log(`[Tracker] ✅ SELL signal saved to DB for ${tokenIn}`);
             }
-            catch (e) {
-                console.error(`[Tracker] ❌ Failed to save SELL signal to DB: ${e.message} | code: ${e.code}`);
-            }
-            // Async trigger for on-chain profiling
+            catch (e) { }
             WalletProfiler.processSell(walletAddress, tokenIn, txHash);
-            // Anti-farm check
             const buyTime = this.lastBuyTime.get(`${walletAddress}-${tokenIn}`);
             if (buyTime && (timestamp - buyTime < 120000)) {
                 const msg = `Anti-farm triggered: ${trackedWallet.label || walletAddress} flipped ${tokenIn} in < 2 min. Demoting to Tier 3.`;
@@ -504,7 +248,7 @@ export class TrackerAgent {
                 prisma.trackedWallet.update({
                     where: { address: walletAddress },
                     data: { tier: 3 }
-                }).catch(e => console.error("Failed to demote wallet", e));
+                }).catch(e => { });
             }
             if (this.onCopySellSignal) {
                 this.onCopySellSignal(walletAddress, tokenIn, amountIn, trackedWallet.tier, trackedWallet.bundleId, timestamp, txHash);
