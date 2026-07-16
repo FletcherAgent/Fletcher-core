@@ -180,7 +180,7 @@ export class Orchestrator {
       if (chatId) {
         this.bot.api.sendMessage(
           chatId,
-          `🛒 <b>BUY SIGNAL DETECTED</b>\n\n👤 <b>Wallet:</b> <code>${wallet}</code> (Tier ${tier})\n🪙 <b>Token:</b> ${tokenMetadata}\n💰 <b>Amount:</b> ${Number(amount) / 1e18} ETH\n🔗 <a href="https://robinhoodchain.blockscout.com/tx/${txHash}">View Transaction</a>`,
+          `🛒 <b>BUY SIGNAL DETECTED</b>\n\n👤 <b>Wallet:</b> <code>${wallet}</code> (Tier ${tier})\n🪙 <b>Token:</b> ${tokenMetadata}\n💰 <b>Amount:</b> ${Number(amount) / 1e18} ETH\n⏰ <b>Time:</b> ${new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' })}\n🔗 <a href="https://robinhoodchain.blockscout.com/tx/${txHash}">View Transaction</a>`,
           { parse_mode: 'HTML' }
         ).catch(console.error);
       }

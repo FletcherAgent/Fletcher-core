@@ -399,8 +399,15 @@ export class TraderAgent {
       } catch { console.warn(`[Trader] Could not fetch totalSupply for ${tokenOut}`); }
 
       // 2. Detect best pool fee tier dynamically
+      let targetRouter: string | undefined = undefined;
+      if (txHash) {
+         try {
+           const otx = await publicClient.getTransaction({ hash: txHash as `0x${string}` });
+           if (otx && otx.to) targetRouter = otx.to;
+         } catch(e) {}
+      }
       const { fee: POOL_FEE, expectedOut: rawExpectedOut } = await detectBestFee(
-        WETH_ADDRESS, tokenOut, amountIn
+        WETH_ADDRESS, tokenOut, amountIn, targetRouter
       );
       let expectedOut = rawExpectedOut;
 
@@ -568,8 +575,16 @@ export class TraderAgent {
       let expectedOut = 0n;
       let useNative = false;
       
+      let targetRouter: string | undefined = undefined;
+      if (txHash) {
+         try {
+           const otx = await publicClient.getTransaction({ hash: txHash as `0x${string}` });
+           if (otx && otx.to) targetRouter = otx.to;
+         } catch(e) {}
+      }
+
       try {
-        const best = await detectBestFee(tokenIn, WETH_ADDRESS, amountIn);
+        const best = await detectBestFee(tokenIn, WETH_ADDRESS, amountIn, targetRouter);
         POOL_FEE = best.fee;
         expectedOut = best.expectedOut;
       } catch (e) {
@@ -805,7 +820,8 @@ export class TraderAgent {
     console.log(`[Notification] Auto-Trade executed: ${action} for ${tokenAddress}. Hash: ${txHash}`);
     
     if (chatId) {
-      let msg = `🤖 *AUTO-TRADE EXECUTED*\n\nAction: **${action}**\nToken: \`${tokenAddress}\``;
+      const timeStr = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
+      let msg = `🤖 *AUTO-TRADE EXECUTED*\n\nAction: **${action}**\nToken: \`${tokenAddress}\`\n⏰ Time: ${timeStr}`;
       if (txHash !== "FAILED") {
         msg += `\n\n✅ Transaction Hash:\n\`${txHash}\``;
       } else {

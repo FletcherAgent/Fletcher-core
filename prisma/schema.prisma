@@ -83,3 +83,11 @@ model WalletPosition {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 }
+
+model DexRouter {
+  id        String   @id @default(uuid())
+  address   String   @unique
+  type      String   @default("V2") // "V2" atau "V3"
+  verified  Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
