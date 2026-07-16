@@ -1,4 +1,4 @@
-import { encodeFunctionData, encodeAbiParameters, parseAbi, erc20Abi, decodeEventLog } from 'viem';
+import { encodeFunctionData, encodeAbiParameters, parseAbi, erc20Abi, decodeEventLog, decodeFunctionData } from 'viem';
 import { detectBestFee } from '../services/poolFeeDetector.js';
 import { dbLogger } from '../services/logger.js';
 import { InlineKeyboard } from 'grammy';
@@ -36,6 +36,14 @@ export class TraderAgent {
             return;
         }
         const calldataResult = await this.constructUnsignedSwapTx(tokenAddress, sizeInWeth, txHash);
+        if (!calldataResult) {
+            console.error(`[Trader] ❌ Failed to construct BUY calldata for ${tokenAddress}.`);
+            this.emitToSigningBoundary(tokenAddress, "FAILED", 'BUY REJECTED (NO ROUTE/POOL OR CALLDATA FAIL)');
+            const chatId = process.env.TELEGRAM_CHAT_ID;
+            if (chatId)
+                this.bot.api.sendMessage(chatId, `❌ **BUY Failed**\nToken: \`${tokenAddress}\`\nReason: Failed to construct transaction (Pool not found or Universal Router parsing failed).`, { parse_mode: 'Markdown' }).catch(console.error);
+            return;
+        }
         if (calldataResult) {
             const { calldata, amountOutMinimum, expectedOut, toAddress, value } = calldataResult;
             try {
@@ -182,6 +190,14 @@ export class TraderAgent {
             return;
         }
         const calldataResult = await this.constructUnsignedSellTx(tokenAddress, amountInToken, txHash);
+        if (!calldataResult) {
+            console.error(`[Trader] ❌ Failed to construct SELL calldata for ${tokenAddress}.`);
+            this.emitToSigningBoundary(tokenAddress, "FAILED", 'SELL REJECTED (NO ROUTE/POOL OR CALLDATA FAIL)');
+            const chatId = process.env.TELEGRAM_CHAT_ID;
+            if (chatId)
+                this.bot.api.sendMessage(chatId, `❌ **SELL Failed**\nToken: \`${tokenAddress}\`\nReason: Failed to construct transaction (Pool not found or Universal Router parsing failed).`, { parse_mode: 'Markdown' }).catch(console.error);
+            return;
+        }
         if (calldataResult) {
             const { calldata, amountOutMinimum, expectedOut, toAddress } = calldataResult;
             try {
@@ -308,19 +324,9 @@ export class TraderAgent {
                             }
                         }
                     }
-                    if (originalAmountIn > 0n) {
-                        const origHex = originalAmountIn.toString(16).padStart(64, '0');
-                        const newHex = amountIn.toString(16).padStart(64, '0');
-                        const zeroHex = '0000000000000000000000000000000000000000000000000000000000000000';
-                        let modifiedInput = originalTx.input;
-                        const index = modifiedInput.indexOf(origHex);
-                        if (index !== -1) {
-                            modifiedInput = modifiedInput.substring(0, index) + newHex + modifiedInput.substring(index + 64);
-                            // Zero out the next 32-bytes (amountOutMinimum) to bypass slippage errors, since we are copying blindly
-                            const nextIndex = index + 64;
-                            if (nextIndex + 64 <= modifiedInput.length) {
-                                modifiedInput = modifiedInput.substring(0, nextIndex) + zeroHex + modifiedInput.substring(nextIndex + 64);
-                            }
+                    if (originalAmountIn > 0n || originalAmountIn === 0n) {
+                        let modifiedInput = this.modifyUniversalRouterCalldata(originalTx.input, amountIn, originalAmountIn);
+                        if (modifiedInput !== "") {
                             // Extract proportional expectedOut for accurate PnL tracking
                             let estimatedExpectedOut = 1n;
                             try {
@@ -355,7 +361,7 @@ export class TraderAgent {
                             };
                         }
                         else {
-                            console.log(`[Trader] ⚠️ origHex ${origHex} not found in input. Falling back to PoolFeeDetector...`);
+                            console.log(`[Trader] ⚠️ Dynamic Duplication failed to modify input. Falling back to PoolFeeDetector...`);
                         }
                     }
                 }
@@ -486,19 +492,9 @@ export class TraderAgent {
                             catch (e) { }
                         }
                     }
-                    if (originalAmountIn > 0n) {
-                        const origHex = originalAmountIn.toString(16).padStart(64, '0');
-                        const newHex = amountIn.toString(16).padStart(64, '0');
-                        const zeroHex = '0000000000000000000000000000000000000000000000000000000000000000';
-                        let modifiedInput = originalTx.input;
-                        const index = modifiedInput.indexOf(origHex);
-                        if (index !== -1) {
-                            modifiedInput = modifiedInput.substring(0, index) + newHex + modifiedInput.substring(index + 64);
-                            // Zero out the next 32-bytes (amountOutMinimum) to bypass slippage errors
-                            const nextIndex = index + 64;
-                            if (nextIndex + 64 <= modifiedInput.length) {
-                                modifiedInput = modifiedInput.substring(0, nextIndex) + zeroHex + modifiedInput.substring(nextIndex + 64);
-                            }
+                    if (originalAmountIn > 0n || originalAmountIn === 0n) {
+                        let modifiedInput = this.modifyUniversalRouterCalldata(originalTx.input, amountIn, originalAmountIn);
+                        if (modifiedInput !== "") {
                             // Extract proportional expectedOut (WETH) for accurate PnL tracking
                             let estimatedExpectedOut = 1n;
                             try {
@@ -776,6 +772,89 @@ export class TraderAgent {
         }
         else {
             console.warn("[Trader] TELEGRAM_CHAT_ID is not set in .env! Cannot send execution message.");
+        }
+    }
+    modifyUniversalRouterCalldata(originalInput, newAmountIn, originalAmountIn) {
+        let finalCalldata = originalInput;
+        try {
+            const executeAbiV3 = { name: 'execute', type: 'function', inputs: [{ name: 'commands', type: 'bytes' }, { name: 'inputs', type: 'bytes[]' }, { name: 'deadline', type: 'uint256' }] };
+            const executeAbiV2 = { name: 'execute', type: 'function', inputs: [{ name: 'commands', type: 'bytes' }, { name: 'inputs', type: 'bytes[]' }] };
+            let decoded = null;
+            let executeAbi = executeAbiV3;
+            try {
+                decoded = decodeFunctionData({ abi: [executeAbiV3], data: originalInput });
+            }
+            catch (e) {
+                try {
+                    decoded = decodeFunctionData({ abi: [executeAbiV2], data: originalInput });
+                    executeAbi = executeAbiV2;
+                }
+                catch (err) { }
+            }
+            const newHex = newAmountIn.toString(16).padStart(64, '0');
+            const zeroHex = '0000000000000000000000000000000000000000000000000000000000000000';
+            const maxHex = 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff';
+            if (decoded) {
+                const commandsHex = decoded.args[0].slice(2);
+                const commands = Buffer.from(commandsHex, 'hex');
+                const inputs = [...decoded.args[1]];
+                let modified = false;
+                for (let i = 0; i < commands.length; i++) {
+                    const cmd = commands[i] & 0x3f;
+                    if (cmd === 0x00 || cmd === 0x08 || cmd === 0x09) {
+                        const inputHex = inputs[i].slice(2);
+                        if (inputHex.length >= 192) {
+                            let word2 = inputHex.substring(64, 128); // amountIn
+                            if (word2 !== zeroHex && word2 !== maxHex) {
+                                word2 = newHex;
+                            }
+                            const prefix = inputHex.substring(0, 64);
+                            const suffix = inputHex.substring(192); // skip amountOutMinimum
+                            inputs[i] = `0x${prefix}${word2}${zeroHex}${suffix}`;
+                            modified = true;
+                        }
+                    }
+                    else if (cmd === 0x10) { // V4 Swap
+                        const inputHex = inputs[i].slice(2);
+                        if (inputHex.length >= 512) {
+                            let wordAmountIn = inputHex.substring(384, 448);
+                            if (wordAmountIn !== zeroHex && wordAmountIn !== maxHex) {
+                                wordAmountIn = newHex;
+                            }
+                            const prefix = inputHex.substring(0, 384);
+                            const suffix = inputHex.substring(512);
+                            inputs[i] = `0x${prefix}${wordAmountIn}${zeroHex}${suffix}`;
+                            modified = true;
+                        }
+                    }
+                }
+                if (modified) {
+                    finalCalldata = encodeFunctionData({
+                        abi: [executeAbi],
+                        functionName: 'execute',
+                        args: decoded.args.length === 3 ? [decoded.args[0], inputs, decoded.args[2]] : [decoded.args[0], inputs]
+                    });
+                    console.log(`[Trader] ✅ Universal Router ABI Decoding Duplication SUCCESS.`);
+                    return finalCalldata;
+                }
+            }
+            // Fallback to basic string hex replacement
+            const origHex = originalAmountIn.toString(16).padStart(64, '0');
+            const index = finalCalldata.indexOf(origHex);
+            if (index !== -1) {
+                finalCalldata = finalCalldata.substring(0, index) + newHex + finalCalldata.substring(index + 64);
+                const nextIndex = index + 64;
+                if (nextIndex + 64 <= finalCalldata.length) {
+                    finalCalldata = finalCalldata.substring(0, nextIndex) + zeroHex + finalCalldata.substring(nextIndex + 64);
+                }
+                console.log(`[Trader] ✅ Basic Hex Duplication SUCCESS.`);
+                return finalCalldata;
+            }
+            return "";
+        }
+        catch (e) {
+            console.error(`[Trader] Error modifying UR calldata:`, e);
+            return "";
         }
     }
 }
