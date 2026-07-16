@@ -43,7 +43,7 @@ export class TrackerAgent {
             prisma.log.findMany({ orderBy: { createdAt: 'desc' }, take: 50 }),
             prisma.signal.count(),
             prisma.position.count({ where: { status: 'OPEN' } }),
-            prisma.systemConfig.findUnique({ where: { key: 'tradingMode' } })
+            prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } })
           ]);
           
           res.writeHead(200, { 'Content-Type': 'application/json' });
