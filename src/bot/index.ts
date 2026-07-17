@@ -88,8 +88,8 @@ bot.command("help", (ctx) => {
 💧 <b>LP Engine (v2.0 Core)</b>
 /lp status - Show all active LP positions (fee, IL, APR, range).
 /lp scan - Run pair screening and show candidates that pass filters.
-/lp close <id> - Propose closing a specific LP position.
-/lp blacklist <address> - Blacklist a token (owner only).
+/lp close &lt;id&gt; - Propose closing a specific LP position.
+/lp blacklist &lt;address&gt; - Blacklist a token (owner only).
 /lp mode manual - Set LP execution to MANUAL (all tx via Telegram).
 /lp mode semi - Set LP execution to SEMI (collect+compound auto).
 /lp mode full - Set LP execution to FULL autonomous.
