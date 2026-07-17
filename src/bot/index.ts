@@ -88,12 +88,15 @@ bot.command("help", (ctx) => {
 💧 <b>LP Engine (v2.0 Core)</b>
 /lp status - Show all active LP positions (fee, IL, APR, range).
 /lp scan - Run pair screening and show candidates that pass filters.
-/lp close &lt;id&gt; - Propose closing a specific LP position.
+/lp close <id> - Propose closing a specific LP position.
+/lp blacklist <address> - Blacklist a token (owner only).
 /lp mode manual - Set LP execution to MANUAL (all tx via Telegram).
 /lp mode semi - Set LP execution to SEMI (collect+compound auto).
 /lp mode full - Set LP execution to FULL autonomous.
 /lpmeta - View or edit LP screening config (owner only).
 /harvest - Collect fees from all eligible open LP positions.
+/daymode - Manually trigger LP Engine Day Mode (find 1 best token).
+/nightmode - Manually trigger LP Engine Night Mode (find up to 3 tokens).
 
 🎯 <b>Copy-Trade (Smart Money)</b>
 /track &lt;address&gt; [label] [tier] - Add a wallet to copy-trade.
