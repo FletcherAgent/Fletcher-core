@@ -514,7 +514,8 @@ bot.on('callback_query:data', async (ctx) => {
     }
 
     // Approved
-    const isDryRun = process.env.TRADING_MODE !== 'LIVE';
+    const config = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
+    const isDryRun = (config?.value || 'LIVE') === 'DRY_RUN';
     if (isDryRun) {
       // DRY_RUN: simulate confirmation
       if (type === 'OPEN') {

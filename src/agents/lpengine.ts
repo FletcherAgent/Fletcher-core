@@ -371,7 +371,8 @@ export class LPEngineAgent {
   ): Promise<void> {
     const config    = await loadLPConfig();
     const token     = candidate.token;
-    const isDryRun  = process.env.TRADING_MODE !== 'LIVE';
+    const modeCfg   = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
+    const isDryRun  = (modeCfg?.value || 'LIVE') === 'DRY_RUN';
 
     console.log(`[LPEngine] 📋 Proposing position: ${token.symbol} | dayMode=${options.dayMode} | dryRun=${isDryRun}`);
 

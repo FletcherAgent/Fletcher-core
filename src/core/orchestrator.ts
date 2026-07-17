@@ -40,7 +40,8 @@ export class Orchestrator {
         return;
       }
 
-      const isDryRun = process.env.TRADING_MODE !== 'LIVE';
+      const modeCfg = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
+      const isDryRun = (modeCfg?.value || 'LIVE') === 'DRY_RUN';
       const dryRunTag = isDryRun ? '\n🧪 *DRY RUN — no tx will be sent*' : '';
 
       const isAuto = proposal.description.includes('✅ *Auto-') || proposal.description.includes('❌ *Auto-');

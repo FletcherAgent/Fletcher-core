@@ -91,7 +91,10 @@ export async function buildAndSendLPUserOperation(
   client: any,
   calls: UserOpCall[]
 ): Promise<Hex> {
-  if (process.env.TRADING_MODE === 'DRY_RUN') {
+  const config = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
+  const tradingMode = config?.value || 'LIVE';
+
+  if (tradingMode === 'DRY_RUN') {
     console.log("[Alchemy DRY_RUN] Simulating UserOperation calls:");
     calls.forEach((c, i) => console.log(`  [${i}] Target: ${c.target} | Data: ${c.data.substring(0, 15)}...`));
     return `0xSimulatedTxHash_${Date.now()}` as Hex;
