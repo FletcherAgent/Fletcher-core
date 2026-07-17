@@ -484,6 +484,26 @@ bot.command('harvest', async (ctx) => {
   }
 });
 
+bot.command('daymode', async (ctx) => {
+  const lpEngine = orchestrator.getLPEngine();
+  ctx.reply('☀️ *Triggering LP Engine DAY Mode manually...*', { parse_mode: 'Markdown' });
+  try {
+    await lpEngine.runDayMode();
+  } catch (e: any) {
+    ctx.reply(`❌ Day Mode failed: ${e?.message}`);
+  }
+});
+
+bot.command('nightmode', async (ctx) => {
+  const lpEngine = orchestrator.getLPEngine();
+  ctx.reply('🌙 *Triggering LP Engine NIGHT Mode manually...*', { parse_mode: 'Markdown' });
+  try {
+    await lpEngine.runNightMode();
+  } catch (e: any) {
+    ctx.reply(`❌ Night Mode failed: ${e?.message}`);
+  }
+});
+
 // ─── LP INLINE KEYBOARD CALLBACKS ───────────────────────────────────────────
 
 bot.on('callback_query:data', async (ctx) => {
