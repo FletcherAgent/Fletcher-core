@@ -85,6 +85,10 @@ async function main() {
       { key: 'lp.dayStartTime',  value: '09:00' },
       // $FLETCH tier thresholds (angka diisi Aldi nanti)
       { key: 'lp.tierThresholds', value: JSON.stringify({ tier1: 0, tier2: 0, tier3: 0 }) },
+      // Default Trading Mode
+      { key: 'TRADING_MODE',     value: 'DRY_RUN' },
+      // Default Mode
+      { key: 'lp.defaultMode',   value: 'FULL' },
     ];
 
     for (const cfg of lpDefaults) {

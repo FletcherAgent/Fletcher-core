@@ -525,8 +525,8 @@ export class LPEngineAgent {
       console.log(`[LPEngine] Mode FULL — Executing automatically via Alchemy Session Key`);
       try {
         const tier = await getUserTier(recipient);
-        const pk = process.env.SESSION_PRIVATE_KEY as Hex;
-        if (!pk) throw new Error('SESSION_PRIVATE_KEY not found');
+        const pk = process.env.PRIVATE_KEY as Hex;
+        if (!pk) throw new Error('PRIVATE_KEY not found in .env');
         
         const client = await createSmartAccount(pk, tier);
         const calls: UserOpCall[] = [{
@@ -636,8 +636,8 @@ export class LPEngineAgent {
       console.log(`[LPEngine] Mode FULL — Auto-closing position via Alchemy Session Key`);
       try {
         const tier = await getUserTier(recipient);
-        const pk = process.env.SESSION_PRIVATE_KEY as Hex;
-        if (!pk) throw new Error('SESSION_PRIVATE_KEY not found');
+        const pk = process.env.PRIVATE_KEY as Hex;
+        if (!pk) throw new Error('PRIVATE_KEY not found in .env');
         
         const client = await createSmartAccount(pk, tier);
         const collectCalldata = this.buildCollectCalldata(tokenId, recipient);
@@ -722,8 +722,8 @@ export class LPEngineAgent {
       if (pos.mode === 'SEMI' || pos.mode === 'FULL') {
         console.log(`[LPEngine] Mode ${pos.mode} — Auto-harvesting via Alchemy Session Key`);
         try {
-          const pk = process.env.SESSION_PRIVATE_KEY as Hex;
-          if (!pk) throw new Error('SESSION_PRIVATE_KEY not found');
+          const pk = process.env.PRIVATE_KEY as Hex;
+          if (!pk) throw new Error('PRIVATE_KEY not found in .env');
           
           const client = await createSmartAccount(pk, tier);
           const calls: UserOpCall[] = [

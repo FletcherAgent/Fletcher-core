@@ -89,6 +89,8 @@ async function gmgnGet<T>(path: string, params?: Record<string, string>): Promis
       'Authorization': `Bearer ${apiKey}`,
       'Content-Type':  'application/json',
       'Accept':        'application/json',
+      'User-Agent':    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Referer':       'https://gmgn.ai/',
     },
     // Force IPv4 via Node native fetch (no special config needed in Node 18+)
   });
