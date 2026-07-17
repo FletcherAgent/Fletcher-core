@@ -57,6 +57,44 @@ async function main() {
       }
     });
 
+    // ─── LP Engine v2.0 MetaConfig (lp.* prefix) ─────────────────────────────
+
+    const lpDefaults = [
+      // Pair screening thresholds
+      { key: 'lp.minMcap',       value: '500000' },
+      { key: 'lp.minVol',        value: '1000000' },
+      // Accepted token categories (GMGN category filter)
+      { key: 'lp.categories',    value: JSON.stringify(['tech', 'RWA', 'launchpad', 'ai']) },
+      // Launch platform blacklist — tokens dari platform ini diexclude
+      { key: 'lp.blacklist',     value: JSON.stringify(['flap.fun', 'hood.fun']) },
+      // Night mode window (WIB / Asia Jakarta)
+      { key: 'lp.nightWindow',   value: JSON.stringify({ start: '22:00', end: '06:00', tz: 'Asia/Jakarta' }) },
+      // Day mode: force close time (fallback jika rule §3.4 belum trigger)
+      { key: 'lp.dayCloseTime',  value: '23:00' },
+      // Night mode: range ±% dari current price (0.25 = ±25%)
+      { key: 'lp.nightRange',    value: '0.25' },
+      // Max concurrent LP positions
+      { key: 'lp.maxPositions',  value: '3' },
+      // Per-position cap sebelum harvest (USD). Compound stop di sini.
+      { key: 'lp.positionCap',   value: '2000' },
+      // Starting size per position (USD)
+      { key: 'lp.startSize',     value: '500' },
+      // Fee-vs-IL: berapa jam IL > fee sebelum trigger close
+      { key: 'lp.ilHourThreshold', value: '4' },
+      // Day mode cron start time (WIB)
+      { key: 'lp.dayStartTime',  value: '09:00' },
+      // $FLETCH tier thresholds (angka diisi Aldi nanti)
+      { key: 'lp.tierThresholds', value: JSON.stringify({ tier1: 0, tier2: 0, tier3: 0 }) },
+    ];
+
+    for (const cfg of lpDefaults) {
+      await prisma.systemConfig.upsert({
+        where: { key: cfg.key },
+        update: {},  // jangan overwrite kalau sudah ada (preserve Aldi's edits)
+        create: cfg
+      });
+    }
+
     console.log("Seeding finished.");
   } finally {
     await prisma.$disconnect();

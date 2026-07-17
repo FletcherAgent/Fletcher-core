@@ -1,18 +1,25 @@
 import { publicClient } from '../services/viem.js';
-import { parseAbi, parseEther } from 'viem';
+import { parseAbi, parseEther, type Address } from 'viem';
 import { prisma } from '../core/db.js';
-import type { Position } from '@prisma/client';
+import type { Position, LPPosition } from '@prisma/client';
 import { detectBestFee } from '../services/poolFeeDetector.js';
+import { calcAnnualizedFeeRate, calcIL, getNPMPosition, checkPositionRange, isPastDayCloseTime, tickToPrice } from '../services/lpMath.js';
+import { logEvent } from '../utils/logger.js';
 
 export class GuardianAgent {
   public onExitSignal?: (pos: Position, reason: string, txHash?: string) => void;
-  
+  public onLPCloseSignal?: (pos: LPPosition, reason: string) => void;
+  public onLPCompoundSignal?: (pos: LPPosition) => void;
+  public onLPRebalanceSignal?: (pos: LPPosition, reason: string) => void;
+
   private activeIntervals: Map<string, {
     intervalId: NodeJS.Timeout;
     initialQuote: number;
     highestQuote: number;
     startedAt: number;
   }> = new Map();
+
+  private lpMonitorInterval?: NodeJS.Timeout;
 
   constructor() {}
 
@@ -41,7 +48,144 @@ export class GuardianAgent {
         console.error(`[Guardian] Error polling for open positions`, e);
       }
     }, 15000);
+
+    // ─── LP Engine v2.0 Monitoring ──────────────────────────────────────────
+    this.startLPMonitoring();
   }
+
+  // ─── LP Engine Guardian (Rule §3.4) ───────────────────────────────────────
+
+  private startLPMonitoring() {
+    console.log(`[Guardian] 🛡️ Starting autonomous LP Engine monitoring (Rule §3.4)...`);
+    
+    // Poll hourly for LP positions
+    this.lpMonitorInterval = setInterval(async () => {
+      try {
+        const openLPs = await prisma.lPPosition.findMany({ where: { status: 'OPEN' } });
+        for (const pos of openLPs) {
+          await this.evaluateLPPosition(pos);
+        }
+        await this.sendLPDailyReport();
+      } catch (e) {
+        console.error(`[Guardian] LP monitor loop error:`, e);
+      }
+    }, 60 * 60 * 1000); // 1 hour
+  }
+
+  private async evaluateLPPosition(pos: LPPosition): Promise<void> {
+    if (pos.tokenId.startsWith('PENDING')) return;
+
+    try {
+      // 1. Fetch live data
+      const npmPos = await getNPMPosition(BigInt(pos.tokenId));
+      const config = await prisma.systemConfig.findUnique({ where: { key: 'lp.ilHourThreshold' } });
+      const maxIlHours = parseInt(config?.value ?? '4');
+      const capConfig = await prisma.systemConfig.findUnique({ where: { key: 'lp.positionCap' } });
+      const positionCap = parseFloat(capConfig?.value ?? '2000');
+
+      // (Simulate token price from Uniswap V3 current tick)
+      const rangeStatus = await checkPositionRange(pos.pool, pos.tickLower, pos.tickUpper);
+      const currentPrice = tickToPrice(rangeStatus.currentTick);
+
+      // 2. Calc IL
+      // Simplification: WETH base price = 3500
+      const isToken0 = BigInt(pos.token0) < BigInt(process.env.WETH_ADDRESS ?? '0');
+      const wethPrice = 3500;
+      const entryP0 = isToken0 ? (pos.entryValue / 2) / (wethPrice * currentPrice) : wethPrice; 
+      const entryP1 = isToken0 ? wethPrice : (pos.entryValue / 2) / (wethPrice / currentPrice);
+      const curP0 = isToken0 ? wethPrice * currentPrice : wethPrice;
+      const curP1 = isToken0 ? wethPrice : wethPrice / currentPrice;
+
+      const ilData = calcIL({
+        entryPrice0: entryP0, entryPrice1: entryP1,
+        currentPrice0: curP0, currentPrice1: curP1,
+        entryValue: pos.entryValue,
+        tickLower: pos.tickLower, tickUpper: pos.tickUpper
+      });
+
+      // 3. Calc Fees
+      // Simplified USD estimation
+      const feesUsd = (Number(npmPos.tokensOwed0) + Number(npmPos.tokensOwed1)) / 1e18 * wethPrice;
+      
+      const hoursOpen = Math.max(1, (Date.now() - pos.createdAt.getTime()) / 3600000);
+      const feeRate = calcAnnualizedFeeRate(feesUsd, pos.entryValue, hoursOpen);
+      const ilRate = calcAnnualizedFeeRate(Math.abs(ilData.ilUsd), pos.entryValue, hoursOpen);
+
+      console.log(`[Guardian] LP ${pos.id.slice(0,8)} | FeeRate: ${(feeRate*100).toFixed(1)}% | ILRate: ${(ilRate*100).toFixed(1)}%`);
+
+      // 4. Rule §3.4 Logic
+      let ilHours = pos.ilAboveFeeHours;
+      let feeHours = pos.feeAboveILHours;
+
+      if (ilData.ilUsd < 0 && Math.abs(ilData.ilUsd) > feesUsd) {
+        ilHours += 1;
+        feeHours = 0;
+        if (ilHours >= maxIlHours) {
+          console.log(`[Guardian] 🚨 LP ${pos.id} IL > Fee for ${maxIlHours}h. Triggering CLOSE.`);
+          await logEvent('WARN', `[LP] Guardian triggered CLOSE: IL > Fee for ${maxIlHours}h`, { positionId: pos.id });
+          if (this.onLPCloseSignal) this.onLPCloseSignal(pos, `IL > Fee for ${maxIlHours} consecutive hours`);
+        }
+      } else {
+        feeHours += 1;
+        ilHours = 0;
+        // Compound check
+        if (pos.entryValue + feesUsd < positionCap && feesUsd > 10) {
+          await logEvent('INFO', `[LP] Guardian triggered COMPOUND`, { positionId: pos.id, feesUsd });
+          if (this.onLPCompoundSignal) this.onLPCompoundSignal(pos);
+        }
+      }
+
+      // Update DB counters
+      await prisma.lPPosition.update({
+        where: { id: pos.id },
+        data: { 
+          ilAboveFeeHours: ilHours, 
+          feeAboveILHours: feeHours,
+          ilRunning: ilData.ilUsd 
+        }
+      });
+
+      // 5. Check Range
+      if (!rangeStatus.inRange) {
+        console.log(`[Guardian] ⚠️ LP ${pos.id} OUT OF RANGE. Triggering REBALANCE/CLOSE.`);
+        await logEvent('WARN', `[LP] Guardian triggered REBALANCE: Out of range`, { positionId: pos.id });
+        if (this.onLPRebalanceSignal) this.onLPRebalanceSignal(pos, "Out of range");
+      }
+
+      // 6. DAY Mode fallback close
+      if (pos.dayMode) {
+        const closeTimeCfg = await prisma.systemConfig.findUnique({ where: { key: 'lp.dayCloseTime' } });
+        if (isPastDayCloseTime(closeTimeCfg?.value ?? '23:00')) {
+          console.log(`[Guardian] 🌙 LP ${pos.id} DAY mode fallback close triggered.`);
+          await logEvent('INFO', `[LP] Guardian triggered DAY fallback close`, { positionId: pos.id });
+          if (this.onLPCloseSignal) this.onLPCloseSignal(pos, "DAY mode 23:00 WIB fallback close");
+        }
+      }
+
+    } catch (e: any) {
+      console.error(`[Guardian] Error evaluating LP ${pos.id}:`, e);
+      await logEvent('ERROR', `[LP] Guardian evaluation error`, { positionId: pos.id, error: e.message });
+    }
+  }
+
+  private async sendLPDailyReport() {
+    // Only send at 23:55 WIB
+    const now = new Date();
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Asia/Jakarta', hour: 'numeric', minute: 'numeric', hour12: false,
+    });
+    const parts = formatter.formatToParts(now);
+    const h = parseInt(parts.find(p => p.type === 'hour')!.value);
+    const m = parseInt(parts.find(p => p.type === 'minute')!.value);
+    
+    if (h === 23 && m >= 55) {
+       // We would send a daily summary to telegram via Orchestrator bot
+       // Not implemented directly here to avoid circular bot dependency, 
+       // but can emit an event or save a log
+       console.log(`[Guardian] Daily LP report time.`);
+    }
+  }
+
 
   /**
    * Starts an interval loop to continuously monitor an open position using real Quoter data.

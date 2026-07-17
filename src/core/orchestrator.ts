@@ -4,6 +4,7 @@ import { publicClient } from '../services/viem.js';
 import { ScoutAgent } from '../agents/scout.js';
 import { TraderAgent } from '../agents/trader.js';
 import { LpManagerAgent } from '../agents/lp.js';
+import { LPEngineAgent, type LPProposal } from '../agents/lpengine.js';
 import { RiskWardenAgent } from '../agents/risk.js';
 import { GuardianAgent } from '../agents/guardian.js';
 import { TrackerAgent } from '../agents/tracker.js';
@@ -13,6 +14,7 @@ export class Orchestrator {
   private scout: ScoutAgent;
   private trader: TraderAgent;
   private lpManager: LpManagerAgent;
+  private lpEngine: LPEngineAgent;
   private riskWarden: RiskWardenAgent;
   private guardian: GuardianAgent;
   private tracker: TrackerAgent;
@@ -25,9 +27,75 @@ export class Orchestrator {
     this.scout = new ScoutAgent(bot);
     this.trader = new TraderAgent(bot);
     this.lpManager = new LpManagerAgent();
+    this.lpEngine = new LPEngineAgent();
     this.riskWarden = new RiskWardenAgent();
     this.guardian = new GuardianAgent();
     this.tracker = new TrackerAgent();
+
+    // ─── LP Engine proposal handler ────────────────────────────────────────
+    this.lpEngine.onProposal = async (proposal: LPProposal) => {
+      const chatId = process.env.TELEGRAM_CHAT_ID;
+      if (!chatId) {
+        console.warn('[Orchestrator] TELEGRAM_CHAT_ID not set — LP proposal dropped');
+        return;
+      }
+
+      const isDryRun = process.env.TRADING_MODE !== 'LIVE';
+      const dryRunTag = isDryRun ? '\n🧪 *DRY RUN — no tx will be sent*' : '';
+
+      const isAuto = proposal.description.includes('✅ *Auto-') || proposal.description.includes('❌ *Auto-');
+
+      const msgOptions: any = { parse_mode: 'Markdown' };
+
+      if (!isAuto) {
+        // Inline keyboard: Approve / Reject (only for manual flows)
+        const approveData = `lp_approve:${proposal.positionId}:${proposal.type}`;
+        const rejectData  = `lp_reject:${proposal.positionId}:${proposal.type}`;
+        msgOptions.reply_markup = {
+          inline_keyboard: [[
+            { text: '✅ Approve', callback_data: approveData },
+            { text: '❌ Reject',  callback_data: rejectData  },
+          ]],
+        };
+      }
+
+      try {
+        await bot.api.sendMessage(chatId, `${proposal.description}${dryRunTag}`, msgOptions);
+        console.log(`[Orchestrator] LP proposal sent to Telegram: ${proposal.type} | pos: ${proposal.positionId}`);
+      } catch (e) {
+        console.error('[Orchestrator] Failed to send LP proposal to Telegram:', e);
+      }
+    };
+
+    // ─── LP Engine notification handler ──────────────────────────────────────
+    this.lpEngine.onNotification = async (message: string) => {
+      const chatId = process.env.TELEGRAM_CHAT_ID;
+      if (!chatId) return;
+
+      try {
+        await bot.api.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      } catch (e) {
+        console.error('[Orchestrator] Failed to send telegram notification:', e);
+      }
+    };
+
+    // ─── LP Guardian Events ────────────────────────────────────────────────
+    this.guardian.onLPCloseSignal = async (pos, reason) => {
+      console.log(`[Orchestrator] 🚨 Guardian requested LP CLOSE for ${pos.id}. Reason: ${reason}`);
+      await this.lpEngine.proposeClosePosition(pos.id, reason).catch(console.error);
+    };
+
+    this.guardian.onLPCompoundSignal = async (pos) => {
+      console.log(`[Orchestrator] 🌾 Guardian requested LP COMPOUND for ${pos.id}`);
+      // In MANUAL mode, this forwards harvest proposal
+      await this.lpEngine.proposeHarvest(pos.id).catch(console.error);
+    };
+
+    this.guardian.onLPRebalanceSignal = async (pos, reason) => {
+      console.log(`[Orchestrator] ⚖️ Guardian requested LP REBALANCE for ${pos.id}. Reason: ${reason}`);
+      // For MVP, rebalance is just close.
+      await this.lpEngine.proposeClosePosition(pos.id, reason).catch(console.error);
+    };
 
     // Wire up events
     this.guardian.onExitSignal = async (pos: any, reason: string, txHash?: string) => {
@@ -338,6 +406,37 @@ export class Orchestrator {
     console.log(`[Orchestrator] Trader execution mode set to ${mode}`);
   }
 
+  // Expose lpEngine for bot commands
+  public getLPEngine(): LPEngineAgent {
+    return this.lpEngine;
+  }
+
+  private scheduleLPCron() {
+    const runCron = () => {
+      const now = new Date();
+      const fmt = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'Asia/Jakarta', hour: 'numeric', minute: 'numeric', hour12: false,
+      });
+      const parts = fmt.formatToParts(now);
+      const h = parseInt(parts.find(p => p.type === 'hour')!.value);
+      const m = parseInt(parts.find(p => p.type === 'minute')!.value);
+
+      // DAY mode: 09:00 WIB
+      if (h === 9 && m === 0) {
+        console.log('[Orchestrator] ☀️ LP DAY mode cron triggered');
+        this.lpEngine.runDayMode().catch(console.error);
+      }
+      // NIGHT mode: 22:00 WIB
+      if (h === 22 && m === 0) {
+        console.log('[Orchestrator] 🌙 LP NIGHT mode cron triggered');
+        this.lpEngine.runNightMode().catch(console.error);
+      }
+    };
+    // Poll every minute
+    setInterval(runCron, 60_000);
+    console.log('[Orchestrator] LP cron scheduled (DAY: 09:00 WIB, NIGHT: 22:00 WIB)');
+  }
+
   public async startAll() {
     console.log("🚀 Orchestrator: Starting all Fletcher agents (Minimum Viable Swarm)...");
     
@@ -352,6 +451,9 @@ export class Orchestrator {
 
     // Start Guardian DB polling
     this.guardian.init();
+
+    // ─── LP Engine: DAY mode cron (09:00 WIB) ──────────────────────────────
+    this.scheduleLPCron();
 
     // Start Dormant cleanup cronjob (every 12 hours)
     setInterval(async () => {

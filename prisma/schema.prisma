@@ -91,3 +91,48 @@ model DexRouter {
   verified  Boolean  @default(false)
   createdAt DateTime @default(now())
 }
+
+// ─── LP Engine v2.0 ──────────────────────────────────────────────────────────
+
+/// Tracks Uniswap V3 LP positions managed by LP Engine
+model LPPosition {
+  id               String   @id @default(uuid())
+  tokenId          String   @unique           // Uniswap V3 NFT tokenId (set after mint confirmed)
+  pool             String                     // Pool contract address
+  token0           String                     // Token0 address
+  token1           String                     // Token1 address
+  token0Symbol     String?
+  token1Symbol     String?
+  feeTier          Int                        // 500 | 3000 | 10000
+  tickLower        Int
+  tickUpper        Int
+  entryValue       Float                      // USD value at open
+  feesCollected    Float    @default(0)       // Cumulative fee collected (USD)
+  ilRunning        Float    @default(0)       // Running impermanent loss vs HODL baseline (USD)
+  // Fee-vs-IL counters for Guardian rule §3.4
+  feeAboveILHours  Int      @default(0)       // Consecutive hours fee > IL
+  ilAboveFeeHours  Int      @default(0)       // Consecutive hours IL > fee (close trigger at 4)
+  // Mode: MANUAL = all via Telegram | SEMI = collect+compound auto | FULL = all auto
+  mode             String   @default("MANUAL")
+  // Status flow: PENDING → OPEN → (OUT_OF_RANGE) → CLOSED
+  status           String   @default("PENDING")
+  dayMode          Boolean  @default(false)   // true = DAY mode (full range, close at 23:00 WIB)
+  nightMode        Boolean  @default(false)   // true = NIGHT mode (concentrated)
+  sessionKeyId     String?                    // FK to SessionKey (Phase 3, nullable)
+  tradingMode      String   @default("DRY_RUN") // mirrors TRADING_MODE env
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+// ─── Phase 3: Alchemy Session Keys ──────────────────────────────────────────
+
+model SessionKey {
+  id          String   @id @default(uuid())
+  userId      String
+  keyAddress  String   @unique
+  scope       Json     // { mode, contracts, functions, swapEnabled, spendCap }
+  expiry      DateTime
+  status      String   @default("ACTIVE") // ACTIVE | REVOKED | EXPIRED
+  sdkProvider String   @default("alchemy")
+  createdAt   DateTime @default(now())
+}

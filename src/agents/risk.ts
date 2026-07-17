@@ -19,9 +19,16 @@ export class RiskWardenAgent {
     const activePositionsCount = await prisma.position.count({
       where: { status: { in: ['OPEN', 'PENDING', 'EXITING'] } }
     });
+    
+    // Include LP Engine positions in global heat
+    const activeLPCount = await prisma.lPPosition.count({
+      where: { status: { in: ['OPEN', 'PENDING'] } }
+    });
 
-    if (activePositionsCount >= this.MAX_HEAT) {
-      const msg = `Signal rejected: Portfolio Heat Cap Reached (${activePositionsCount}/${this.MAX_HEAT})`;
+    const totalHeat = activePositionsCount + activeLPCount;
+
+    if (totalHeat >= this.MAX_HEAT) {
+      const msg = `Signal rejected: Portfolio Heat Cap Reached (Trench: ${activePositionsCount} + LP: ${activeLPCount} >= ${this.MAX_HEAT})`;
       console.warn(`[Risk Warden] 🚨 ` + msg);
       dbLogger.warn(msg, { token: tokenAddress, reason: 'PORTFOLIO_HEAT_CAP_EXCEEDED' });
       return { approved: false, recommendedSize: 0n, reason: 'PORTFOLIO_HEAT_CAP_EXCEEDED' };

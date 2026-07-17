@@ -13,11 +13,15 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@alchemy/aa-accounts": "^3.19.0",
+    "@alchemy/aa-alchemy": "^3.19.0",
+    "@alchemy/aa-core": "^3.19.0",
     "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
     "dotenv": "^17.4.2",
     "grammy": "^1.44.0",
     "pg": "^8.22.0",
+    "sinon": "^22.0.0",
     "viem": "^2.55.0"
   },
   "devDependencies": {
