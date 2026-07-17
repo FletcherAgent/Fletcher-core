@@ -1,13 +1,13 @@
 /**
  * GMGN API Service — Robinhood Chain
  *
- * Menyediakan data pair screening untuk LP Engine:
- *   - Trending pairs (mcap, volume, kategori)
+ * Provides pair screening data for LP Engine:
+ *   - Trending pairs (mcap, volume, categories)
  *   - Pool stats (vol/TVL ratio)
  *   - Safety Gate integration (honeypot, tax, contract)
  *
  * Docs: https://gmgn.ai/docs
- * Note: GMGN API hanya support IPv4. Pastikan server tidak pakai IPv6.
+ * Note: GMGN API only supports IPv4. Ensure the server does not use IPv6.
  */
 
 const BASE_URL = 'https://gmgn.ai/defi/quotation/v1';
@@ -56,7 +56,7 @@ export interface LPScreeningCriteria {
   blacklist:  string[];    // launch platform blacklist
 }
 
-/** Load screening criteria dari SystemConfig DB */
+/** Load screening criteria from SystemConfig DB */
 export async function loadScreeningCriteria(): Promise<LPScreeningCriteria> {
   // Lazy import to avoid circular deps
   const { prisma } = await import('../core/db.js');
@@ -106,7 +106,7 @@ async function gmgnGet<T>(path: string, params?: Record<string, string>): Promis
 // ─── API Methods ──────────────────────────────────────────────────────────────
 
 /**
- * Ambil trending pairs di Robinhood Chain (24h window).
+ * Fetch trending pairs on Robinhood Chain (24h window).
  * Returns top 20 by volume.
  */
 export async function getTrendingPairs(limit = 20): Promise<GMGNToken[]> {
@@ -124,7 +124,7 @@ export async function getTrendingPairs(limit = 20): Promise<GMGNToken[]> {
 }
 
 /**
- * Ambil info token tertentu: mcap, volume, safety data.
+ * Fetch specific token info: mcap, volume, safety data.
  */
 export async function getTokenInfo(tokenAddress: string): Promise<GMGNToken | null> {
   try {
@@ -139,7 +139,7 @@ export async function getTokenInfo(tokenAddress: string): Promise<GMGNToken | nu
 }
 
 /**
- * Ambil stats pool Uniswap V3 (TVL, volume, fee tier).
+ * Fetch Uniswap V3 pool stats (TVL, volume, fee tier).
  */
 export async function getPoolStats(poolAddress: string): Promise<GMGNPool | null> {
   try {
@@ -167,15 +167,15 @@ export async function getPoolStats(poolAddress: string): Promise<GMGNPool | null
 // ─── Pair Screening ───────────────────────────────────────────────────────────
 
 /**
- * Main screening function untuk LP Engine.
- * Ambil trending pairs → filter semua kriteria → return PoolCandidate[].
+ * Main screening function for LP Engine.
+ * Fetches trending pairs → filters by all criteria → returns PoolCandidate[].
  *
- * Filter (SEMUA harus lolos):
+ * Filters (ALL must pass):
  *   1. Mcap > minMcap
  *   2. Volume 24h > minVol24h
- *   3. Kategori dalam whitelist categories
- *   4. Launch platform BUKAN di blacklist
- *   5. Bukan honeypot
+ *   3. Category must be in the whitelist
+ *   4. Launch platform MUST NOT be in the blacklist
+ *   5. Not a honeypot
  *   6. Buy/sell tax ≤ 10%
  */
 export async function screenPairs(

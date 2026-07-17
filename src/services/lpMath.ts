@@ -89,7 +89,7 @@ export function feeToTickSpacing(feeTier: number): number {
 }
 
 /**
- * Hitung tick range untuk mode NIGHT.
+ * Calculate tick range for NIGHT mode.
  * range = currentPrice ± rangePercent.
  * Returns [tickLower, tickUpper] rounded to tickSpacing.
  */
@@ -126,7 +126,7 @@ export function fullRangeTicks(feeTier: number): { tickLower: number; tickUpper:
 // ─── On-Chain Data Fetchers ───────────────────────────────────────────────────
 
 /**
- * Baca slot0 pool untuk mendapat current tick & sqrtPrice.
+ * Read slot0 of the pool to get current tick & sqrtPrice.
  */
 export async function getPoolSlot0(poolAddress: string): Promise<{
   sqrtPriceX96: bigint;
@@ -145,7 +145,7 @@ export async function getPoolSlot0(poolAddress: string): Promise<{
 }
 
 /**
- * Baca positions(tokenId) dari NPM untuk mendapat accrued fees.
+ * Read positions(tokenId) from NPM to get accrued fees.
  */
 export async function getNPMPosition(tokenId: bigint): Promise<{
   token0: string;
@@ -182,7 +182,7 @@ export async function getNPMPosition(tokenId: bigint): Promise<{
 // ─── Range Status ─────────────────────────────────────────────────────────────
 
 /**
- * Cek apakah posisi masih in-range berdasarkan current tick.
+ * Check if the position is still in-range based on the current tick.
  */
 export async function checkPositionRange(
   poolAddress: string,
@@ -205,11 +205,11 @@ export async function checkPositionRange(
 // ─── Impermanent Loss ─────────────────────────────────────────────────────────
 
 /**
- * Hitung Impermanent Loss menggunakan Uniswap V3 IL formula.
+ * Calculate Impermanent Loss using Uniswap V3 IL formula.
  *
  * IL = LP_value - HODL_value
- * Untuk full-range ini sama dengan V2 formula.
- * Untuk concentrated range, IL lebih besar di dalam range.
+ * For full-range, this is equivalent to the V2 formula.
+ * For concentrated range, IL is higher inside the range.
  *
  * @param entryPrice0   Price of token0 in USD at entry
  * @param entryPrice1   Price of token1 in USD at entry
@@ -251,7 +251,7 @@ export function calcIL(params: {
 // ─── Fee Rate Calculator ──────────────────────────────────────────────────────
 
 /**
- * Hitung annualized fee rate berdasarkan fee yang terkumpul dalam periode.
+ * Calculate annualized fee rate based on fees collected during the period.
  *
  * @param feesUsd      Total fee USD yang di-collect dalam `periodHours`
  * @param positionUsd  Current position value in USD
@@ -269,7 +269,7 @@ export function calcAnnualizedFeeRate(
 }
 
 /**
- * Hitung realized APR dari total fees collected sejak open.
+ * Calculate realized APR from total fees collected since opening.
  */
 export function calcRealizedAPR(
   totalFeesUsd: number,
@@ -283,7 +283,7 @@ export function calcRealizedAPR(
 // ─── Day Close Check ──────────────────────────────────────────────────────────
 
 /**
- * Cek apakah sudah melewati jam close untuk DAY mode.
+ * Check if it is past the closing time for DAY mode.
  * Default: 23:00 WIB (Asia/Jakarta).
  */
 export function isPastDayCloseTime(closeTimeStr = '23:00', tz = 'Asia/Jakarta'): boolean {
