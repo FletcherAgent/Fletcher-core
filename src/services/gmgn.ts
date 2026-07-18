@@ -118,7 +118,7 @@ export async function getTrendingPairs(limit = 20): Promise<GMGNToken[]> {
 
     return (data.data?.rank ?? []).map(normalizeToken);
   } catch (err) {
-    console.error('[GMGN] getTrendingPairs failed. Trying GeckoTerminal alternative...', err instanceof Error ? err.message : err);
+    console.error('[GMGN] getTrendingPairs blocked by Cloudflare WAF. Falling back to GeckoTerminal API...');
     try {
       const gtRes = await fetch('https://api.geckoterminal.com/api/v2/networks/robinhood/trending_pools?page=1');
       if (!gtRes.ok) return [];
