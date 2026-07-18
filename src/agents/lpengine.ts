@@ -23,6 +23,7 @@ import { getSessionKeyClient, buildAndSendLPUserOperation, type UserOpCall } fro
 import { getUserTier, getTierLimits } from '../services/tierGate.js';
 import { prisma } from '../core/db.js';
 import { logEvent } from '../utils/logger.js';
+import { IntelligenceLayer } from '../services/intelligence.js';
 import {
   screenPairs,
   type PoolCandidate,
@@ -315,15 +316,41 @@ export class LPEngineAgent {
       return;
     }
 
-    // Screen pairs, get top 1 (highest score = bigcap runner)
+    // Screen pairs
     const candidates = await screenPairs();
     if (candidates.length === 0) {
       console.warn('[LPEngine] DAY mode: no pairs passed screening');
       return;
     }
-    const top = candidates[0];
 
-    await this.proposeOpenPosition(top, { dayMode: true, nightMode: false });
+    let selectedCandidate: PoolCandidate | null = null;
+    
+    // Evaluate candidates with Grok
+    for (const candidate of candidates) {
+      console.log(`[LPEngine] 🧠 Asking Grok to analyze sentiment for ${candidate.token.symbol}...`);
+      if (this.onNotification) await this.onNotification(`🧠 *Grok AI* analyzing sentiment for $${candidate.token.symbol}...`);
+      
+      const sentiment = await IntelligenceLayer.analyzeSentiment(candidate.token.symbol, candidate.token.address);
+      console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
+      
+      if (sentiment.label === 'BEARISH' || sentiment.score < 50) {
+        console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < 50`);
+        continue;
+      }
+      
+      console.log(`[LPEngine] ✅ Grok APPROVED ${candidate.token.symbol}`);
+      if (this.onNotification) await this.onNotification(`✅ *Grok APPROVED $${candidate.token.symbol}*\\nScore: ${sentiment.score}\\n_Wait for V3 pool..._`);
+      
+      selectedCandidate = candidate;
+      break; // Found the top candidate that passed Grok
+    }
+
+    if (!selectedCandidate) {
+      console.warn('[LPEngine] DAY mode: No pairs passed Grok sentiment analysis');
+      return;
+    }
+
+    await this.proposeOpenPosition(selectedCandidate, { dayMode: true, nightMode: false });
   }
 
   // ─── MODE NIGHT: Concentrated Spray ────────────────────────────────────────
@@ -352,7 +379,27 @@ export class LPEngineAgent {
     if (slotsLeft <= 0) return;
 
     const candidates = await screenPairs();
-    const toOpen = candidates.slice(0, Math.min(slotsLeft, 3));
+    const toOpen: PoolCandidate[] = [];
+    
+    // Evaluate candidates with Grok until we fill the slots
+    for (const candidate of candidates) {
+      if (toOpen.length >= Math.min(slotsLeft, 3)) break;
+      
+      console.log(`[LPEngine] 🧠 Asking Grok to analyze sentiment for ${candidate.token.symbol}...`);
+      if (this.onNotification) await this.onNotification(`🧠 *Grok AI* analyzing sentiment for $${candidate.token.symbol}...`);
+      
+      const sentiment = await IntelligenceLayer.analyzeSentiment(candidate.token.symbol, candidate.token.address);
+      console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
+      
+      if (sentiment.label === 'BEARISH' || sentiment.score < 50) {
+        console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < 50`);
+        continue;
+      }
+      
+      console.log(`[LPEngine] ✅ Grok APPROVED ${candidate.token.symbol}`);
+      if (this.onNotification) await this.onNotification(`✅ *Grok APPROVED $${candidate.token.symbol}*\\nScore: ${sentiment.score}\\n_Wait for V3 pool..._`);
+      toOpen.push(candidate);
+    }
 
     for (const candidate of toOpen) {
       await this.proposeOpenPosition(candidate, {

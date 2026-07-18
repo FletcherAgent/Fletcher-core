@@ -422,14 +422,9 @@ export class Orchestrator {
       const h = parseInt(parts.find(p => p.type === 'hour')!.value);
       const m = parseInt(parts.find(p => p.type === 'minute')!.value);
 
-      // DAY mode: 09:00 WIB
-      if (h === 9 && m === 0) {
-        console.log('[Orchestrator] ☀️ LP DAY mode cron triggered');
-        this.lpEngine.runDayMode().catch(console.error);
-      }
-      // NIGHT mode: 22:00 WIB
-      if (h === 22 && m === 0) {
-        console.log('[Orchestrator] 🌙 LP NIGHT mode cron triggered');
+      // NIGHT mode (Aggressive Scouting): Run every hour
+      if (m === 0) {
+        console.log(`[Orchestrator] 🚀 LP Engine hourly scan triggered (Hour: ${h})`);
         this.lpEngine.runNightMode().catch(console.error);
       }
     };

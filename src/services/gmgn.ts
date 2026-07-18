@@ -120,11 +120,22 @@ export async function getTrendingPairs(limit = 20): Promise<GMGNToken[]> {
   } catch (err) {
     console.error('[GMGN] getTrendingPairs blocked by Cloudflare WAF. Falling back to GeckoTerminal API...');
     try {
-      const gtRes = await fetch('https://api.geckoterminal.com/api/v2/networks/robinhood/trending_pools?page=1');
-      if (!gtRes.ok) return [];
-      const gtData = await gtRes.json();
+      let allPools: any[] = [];
+      let page = 1;
       
-      return (gtData.data || []).map((pool: any) => {
+      while (allPools.length < limit && page <= 10) {
+        const gtRes = await fetch(`https://api.geckoterminal.com/api/v2/networks/robinhood/trending_pools?page=${page}`);
+        if (!gtRes.ok) break;
+        const gtData = await gtRes.json();
+        if (!gtData.data || gtData.data.length === 0) break;
+        
+        allPools = allPools.concat(gtData.data);
+        page++;
+        // Be nice to the rate limit
+        await new Promise(r => setTimeout(r, 500));
+      }
+      
+      return allPools.slice(0, limit).map((pool: any) => {
         const attrs = pool.attributes;
         const nameParts = attrs.name.split(' / ');
         const symbol = nameParts[0] || 'TKN';
@@ -242,7 +253,7 @@ export async function screenPairs(
   console.log('[GMGN] 🔍 Screening pairs on Robinhood Chain...');
   console.log(`[GMGN] Criteria: mcap>${config.minMcap} vol>${config.minVol24h} categories=${config.categories.join(',')} blacklist=${config.blacklist.join(',')}`);
 
-  const tokens = await getTrendingPairs(50); // fetch more before filtering
+  const tokens = await getTrendingPairs(300); // fetch more before filtering
 
   const passed: PoolCandidate[] = [];
 
