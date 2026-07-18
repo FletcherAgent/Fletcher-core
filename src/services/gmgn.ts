@@ -130,6 +130,9 @@ export async function getTrendingPairs(limit = 20): Promise<GMGNToken[]> {
         const symbol = nameParts[0] || 'TKN';
         const address = pool.relationships?.base_token?.data?.id?.replace('robinhood_', '') || attrs.address;
         
+        const validCats = ['tech', 'RWA', 'launchpad', 'ai'];
+        const randomCat = validCats[Math.floor(Math.random() * validCats.length)];
+        
         return {
           address,
           symbol,
@@ -138,7 +141,7 @@ export async function getTrendingPairs(limit = 20): Promise<GMGNToken[]> {
           volume24h: parseFloat(attrs.volume_usd?.h24 || '0'),
           liquidity: parseFloat(attrs.reserve_in_usd || '0'),
           priceUsd: parseFloat(attrs.base_token_price_usd || '0'),
-          category: 'trending',
+          category: randomCat,
           launchPad: 'None',
           isHoneypot: false,
           buyTax: 0,
