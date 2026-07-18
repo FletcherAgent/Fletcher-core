@@ -36,7 +36,7 @@ export class TrackerAgent {
 
       if (req.method === 'GET' && req.url === '/api/dashboard') {
         try {
-          const [wallets, signals, positions, lpPositions, logs, totalSignals, openPositionsCount, tradingModeConfig] = await Promise.all([
+          const [wallets, signals, positions, lpPositions, logs, totalSignals, openPositionsCount, tradingModeConfig, maxPosConfig] = await Promise.all([
             prisma.trackedWallet.findMany({ orderBy: { createdAt: 'desc' } }),
             prisma.signal.findMany({ orderBy: { createdAt: 'desc' }, take: 20 }),
             prisma.position.findMany({ orderBy: { createdAt: 'desc' }, take: 20 }),
@@ -44,7 +44,8 @@ export class TrackerAgent {
             prisma.log.findMany({ orderBy: { createdAt: 'desc' }, take: 50 }),
             prisma.signal.count(),
             prisma.position.count({ where: { status: 'OPEN' } }),
-            prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } })
+            prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } }),
+            prisma.systemConfig.findUnique({ where: { key: 'MAX_POSITION_SIZE' } })
           ]);
           
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -57,7 +58,8 @@ export class TrackerAgent {
             metrics: {
               totalSignals,
               openPositionsCount,
-              tradingMode: tradingModeConfig?.value || 'LIVE'
+              tradingMode: tradingModeConfig?.value || 'LIVE',
+              maxPositionSize: maxPosConfig?.value ? parseInt(maxPosConfig.value, 10) : 2000
             }
           }));
         } catch (e) {
