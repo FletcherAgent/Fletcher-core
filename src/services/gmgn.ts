@@ -118,7 +118,7 @@ export async function getTrendingPairs(limit = 20): Promise<GMGNToken[]> {
 
     return (data.data?.rank ?? []).map(normalizeToken);
   } catch (err) {
-    console.error('[GMGN] getTrendingPairs failed:', err);
+    console.error('[GMGN] getTrendingPairs failed (Cloudflare/Network error):', err instanceof Error ? err.message : err);
     return [];
   }
 }
