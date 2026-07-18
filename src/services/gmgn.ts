@@ -139,6 +139,29 @@ export async function getTokenInfo(tokenAddress: string): Promise<GMGNToken | nu
 }
 
 /**
+ * Fetch top traders for a specific token.
+ * We use GMGN token/top_traders endpoint.
+ */
+export async function fetchTopTraders(tokenAddress: string) {
+  try {
+    const data = await gmgnGet<{ data: any[] }>(
+      `/token/${CHAIN}/${tokenAddress}/top_traders`
+    );
+    
+    // Map the response to our expected trader format
+    return (data.data || []).map((trader: any) => ({
+      address: trader.address,
+      winRate: trader.win_rate ? parseFloat(trader.win_rate) * 100 : 0,
+      totalTrades: trader.total_trades || 0,
+      realizedPnlUsd: trader.realized_profit || 0
+    }));
+  } catch (err) {
+    console.error(`[GMGN] fetchTopTraders failed for ${tokenAddress}:`, err);
+    return [];
+  }
+}
+
+/**
  * Fetch Uniswap V3 pool stats (TVL, volume, fee tier).
  */
 export async function getPoolStats(poolAddress: string): Promise<GMGNPool | null> {

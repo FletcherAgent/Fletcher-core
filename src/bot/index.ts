@@ -79,11 +79,16 @@ bot.command("help", (ctx) => {
 🚀 <b>Core System</b>
 /start - Start the bot and show initial status.
 /status - Show agent status, network, and active positions.
+/tier - Check your current VIP tier status and FLETCH balance.
 /help - Show this guide and command list.
 
 🕹️ <b>Operation Mode</b>
 /mode auto - (Sniper Mode) Bot automatically buys new tokens without confirmation.
 /mode confirm - (Manual Mode) Bot sends [Confirm] / [Reject] buttons before buying.
+
+🧠 <b>Intelligence Layer</b>
+/grok &lt;token&gt; - AI sentiment analysis for a specific token (uses grok-4.3).
+/discover - Run an autonomous wallet discovery cycle via GMGN & Grok.
 
 💧 <b>LP Engine (v2.0 Core)</b>
 /lp status - Show all active LP positions (fee, IL, APR, range).
@@ -180,6 +185,41 @@ bot.command("untrack", async (ctx) => {
     ctx.reply(`✅ Wallet \`${address}\` removed from tracking.`, { parse_mode: "Markdown" });
   } catch (e) {
     ctx.reply("❌ Failed to remove or not found.");
+  }
+});
+
+bot.command("grok", async (ctx) => {
+  const token = ctx.match?.trim();
+  if (!token) return ctx.reply("❌ Usage: `/grok <tokenSymbol>`\\nExample: `/grok PEPE`", { parse_mode: "Markdown" });
+
+  ctx.reply(`🧠 Asking Grok about $${token}...`);
+  try {
+    const { IntelligenceLayer } = await import('../services/intelligence.js');
+    const result = await IntelligenceLayer.analyzeSentiment(token, '0x...'); // Dummy address for now
+    
+    const emoji = result.label === 'BULLISH' ? '🟢' : result.label === 'BEARISH' ? '🔴' : '🟡';
+    const msg = `
+${emoji} **Grok Sentiment Analysis for $${token}**
+- **Score:** ${result.score}/100
+- **Label:** ${result.label}
+
+**Reasoning:**
+_${result.reasoning}_
+`;
+    ctx.reply(msg.trim(), { parse_mode: "Markdown" });
+  } catch (e) {
+    ctx.reply("❌ Grok API failed.");
+  }
+});
+
+bot.command("discover", async (ctx) => {
+  ctx.reply("🔍 Running Autonomous Wallet Discovery Cycle via GMGN & Grok...");
+  try {
+    const { DiscoveryAgent } = await import('../agents/discovery.js');
+    const count = await DiscoveryAgent.runDiscoveryCycle();
+    ctx.reply(`✅ Cycle complete. Discovered and automatically added **${count}** new profitable wallets to the registry.`, { parse_mode: "Markdown" });
+  } catch (e) {
+    ctx.reply("❌ Discovery cycle failed.");
   }
 });
 

@@ -1,4 +1,5 @@
 import { type Address, type Hex, parseAbi, custom } from 'viem';
+import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { prisma } from '../core/db.js';
 import { createMultiOwnerModularAccount } from "@alchemy/aa-accounts";
 import { LocalAccountSigner, createSmartAccountClient } from "@alchemy/aa-core";
@@ -62,19 +63,36 @@ export type SessionKeyData = {
 
 /**
  * Grant a Session Key for the user's Smart Account
- * For now, this is a placeholder that returns a dummy session key.
- * In a full production environment, this would sign a UserOp to add a session key plugin.
+ * This generates a soft session key (local wallet) and stores it in the database.
+ * In a native ERC-6900 implementation, this would also broadcast a UserOp to install the plugin.
  */
 export async function grantSessionKey(
   client: any, 
   mode: "SEMI" | "FULL",
   swapScope: boolean = false
 ): Promise<SessionKeyData> {
-  const expiry = Date.now() + 24 * 60 * 60 * 1000; // default 24 hours
-  // Dummy return to simulate session key creation
+  const expiryDate = new Date(Date.now() + 24 * 60 * 60 * 1000); // default 24 hours
+  
+  // Generate a new soft session key
+  const privateKey = generatePrivateKey();
+  const account = privateKeyToAccount(privateKey);
+
+  // Store in database
+  const sessionKeyRecord = await prisma.sessionKey.create({
+    data: {
+      userId: client.account.address,
+      keyAddress: account.address,
+      expiry: expiryDate,
+      scope: { mode },
+      status: 'ACTIVE'
+    }
+  });
+
+  console.log(`[SessionKey] 🔑 Granted ${mode} simulated session key: ${account.address}`);
+
   return {
-    keyAddress: "0xSessionKeySimulated..." as Hex,
-    expiry
+    keyAddress: account.address,
+    expiry: expiryDate.getTime()
   };
 }
 
@@ -118,4 +136,34 @@ export async function buildAndSendLPUserOperation(
   
   console.log(`[Alchemy] UserOp mined! Tx Hash: ${txHash}`);
   return txHash;
+}
+
+/**
+ * Get a Smart Account Client authorized by a valid simulated Session Key.
+ * For this simulated version, it verifies the session key exists and is valid in DB,
+ * then returns a client signed by the master PRIVATE_KEY (since we aren't using the on-chain plugin yet).
+ */
+export async function getSessionKeyClient(modeRequired: 'SEMI' | 'FULL', tier: number) {
+  // Check for active session key in the database
+  const validKeys = await prisma.sessionKey.findMany({
+    where: {
+      status: 'ACTIVE',
+      expiry: { gt: new Date() }
+    }
+  });
+
+  const validKey = validKeys.find(k => {
+    const scope = k.scope as any;
+    return scope && (scope.mode === modeRequired || scope.mode === 'FULL');
+  });
+
+  if (!validKey) {
+    throw new Error(`No valid SessionKey found for mode ${modeRequired}`);
+  }
+
+  // Simulated: We use the master PRIVATE_KEY to act on behalf of the smart account
+  const pk = process.env.PRIVATE_KEY as Hex;
+  if (!pk) throw new Error('PRIVATE_KEY not found in .env');
+  
+  return await createSmartAccount(pk, tier);
 }
