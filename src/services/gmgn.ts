@@ -118,8 +118,38 @@ export async function getTrendingPairs(limit = 20): Promise<GMGNToken[]> {
 
     return (data.data?.rank ?? []).map(normalizeToken);
   } catch (err) {
-    console.error('[GMGN] getTrendingPairs failed (Cloudflare/Network error):', err instanceof Error ? err.message : err);
-    return [];
+    console.error('[GMGN] getTrendingPairs failed. Trying GeckoTerminal alternative...', err instanceof Error ? err.message : err);
+    try {
+      const gtRes = await fetch('https://api.geckoterminal.com/api/v2/networks/robinhood/trending_pools?page=1');
+      if (!gtRes.ok) return [];
+      const gtData = await gtRes.json();
+      
+      return (gtData.data || []).map((pool: any) => {
+        const attrs = pool.attributes;
+        const nameParts = attrs.name.split(' / ');
+        const symbol = nameParts[0] || 'TKN';
+        const address = pool.relationships?.base_token?.data?.id?.replace('robinhood_', '') || attrs.address;
+        
+        return {
+          address,
+          symbol,
+          name: symbol,
+          marketCap: parseFloat(attrs.market_cap_usd || '0'),
+          volume24h: parseFloat(attrs.volume_usd?.h24 || '0'),
+          liquidity: parseFloat(attrs.reserve_in_usd || '0'),
+          priceUsd: parseFloat(attrs.base_token_price_usd || '0'),
+          category: 'trending',
+          launchPad: 'None',
+          isHoneypot: false,
+          buyTax: 0,
+          sellTax: 0,
+          isVerified: true
+        };
+      });
+    } catch (gtErr) {
+      console.error('[GMGN] GeckoTerminal fallback also failed:', gtErr);
+      return [];
+    }
   }
 }
 
