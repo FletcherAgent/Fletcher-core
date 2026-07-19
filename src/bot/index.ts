@@ -31,7 +31,9 @@ function queueLog(emoji: string, ...args: any[]) {
   }).join(' ');
 
   if (msg.includes("[Tracker]") || msg.includes("Received webhook activity") || msg.includes("Swap activity detected")) return;
-  // Do not forward REJECTED logs to Telegram to prevent important messages from being truncated (4000 chars limit)
+  // Ignore Scout WSS spam
+  if (msg.includes("[Scout ⚡ WSS]")) return;
+  // Do not forward generic REJECTED logs to Telegram
   if (msg.includes("REJECTED:")) return;
   
   // Format important alerts as pretty Telegram messages instead of raw log blocks
@@ -60,6 +62,42 @@ function queueLog(emoji: string, ...args: any[]) {
     const approvedMatch = msg.match(/\[LPEngine\] ✅ Grok APPROVED (.*)/);
     if (approvedMatch) {
       prettyMsg = `<b>✅ Grok APPROVED $${approvedMatch[1]}</b>\nSentiment is strongly bullish. Proceeding to execution.`;
+    }
+
+    // 5. Userbot Rejected (Grok)
+    const userbotRejectMatch = msg.match(/\[Userbot\] ❌ Token (.*) rejected by Grok XAI \(Score (\d+): (.*)\)/);
+    if (userbotRejectMatch) {
+      prettyMsg = `❌ <b>Alpha Signal Rejected</b>\nToken: <code>${userbotRejectMatch[1]}</code>\n<b>Score:</b> ${userbotRejectMatch[2]}\n\n<i>${userbotRejectMatch[3]}</i>`;
+    }
+
+    // 6. Userbot Signal Detected
+    const signalMatch = msg.match(/\[Userbot\] 🚨 Signal detected! Address: (.*)/);
+    if (signalMatch) {
+      prettyMsg = `🚨 <b>Alpha Signal Detected!</b>\nAddress: <code>${signalMatch[1]}</code>`;
+    }
+
+    // 7. Userbot Verifying
+    const verifyingMatch = msg.match(/\[Userbot\] Verifying (.*) with DexScreener\/GoPlus\.\.\./);
+    if (verifyingMatch) {
+      prettyMsg = `🔍 <b>Verifying Token</b>\nAddress: <code>${verifyingMatch[1]}</code>\n<i>Checking DexScreener & GoPlus...</i>`;
+    }
+
+    // 8. Userbot Not Found / No Pool
+    const notFoundMatch = msg.match(/\[Userbot\] ❌ Token (.*) not found or no pool exists yet\./);
+    if (notFoundMatch) {
+      prettyMsg = `❌ <b>Alpha Signal Rejected</b>\nToken: <code>${notFoundMatch[1]}</code>\n<i>Not found on DexScreener or no liquidity pool exists yet.</i>`;
+    }
+
+    // 9. Userbot Generic Reject (Catch all other rejections)
+    const genericRejectMatch = msg.match(/\[Userbot\] ❌ Token (.*) rejected: (.*)/);
+    if (genericRejectMatch && !userbotRejectMatch) {
+      prettyMsg = `❌ <b>Alpha Signal Rejected</b>\nToken: <code>${genericRejectMatch[1]}</code>\n<i>Reason: ${genericRejectMatch[2]}</i>`;
+    }
+
+    // 10. Userbot Grok Processing
+    const grokProcessingMatch = msg.match(/\[Userbot\] Running Grok XAI to check token quality\.\.\./);
+    if (grokProcessingMatch) {
+      prettyMsg = `🧠 <i>Running Grok XAI to analyze token quality...</i>`;
     }
 
     if (prettyMsg) {
