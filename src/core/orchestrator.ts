@@ -430,7 +430,7 @@ export class Orchestrator {
     };
     // Poll every minute
     setInterval(runCron, 60_000);
-    console.log('[Orchestrator] LP cron scheduled (DAY: 09:00 WIB, NIGHT: 22:00 WIB)');
+    console.log('[Orchestrator] LP cron scheduled (Hourly scan at minute :00)');
   }
 
   public async startAll() {
