@@ -328,7 +328,6 @@ export class LPEngineAgent {
     // Evaluate candidates with Grok
     for (const candidate of candidates) {
       console.log(`[LPEngine] 🧠 Asking Grok to analyze sentiment for ${candidate.token.symbol}...`);
-      if (this.onNotification) await this.onNotification(`🧠 *Grok AI* analyzing sentiment for $${candidate.token.symbol}...`);
       
       const sentiment = await IntelligenceLayer.analyzeSentiment(candidate.token.symbol, candidate.token.address);
       console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
@@ -386,7 +385,6 @@ export class LPEngineAgent {
       if (toOpen.length >= Math.min(slotsLeft, 3)) break;
       
       console.log(`[LPEngine] 🧠 Asking Grok to analyze sentiment for ${candidate.token.symbol}...`);
-      if (this.onNotification) await this.onNotification(`🧠 *Grok AI* analyzing sentiment for $${candidate.token.symbol}...`);
       
       const sentiment = await IntelligenceLayer.analyzeSentiment(candidate.token.symbol, candidate.token.address);
       console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
