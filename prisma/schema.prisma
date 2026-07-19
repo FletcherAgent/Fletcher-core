@@ -118,6 +118,7 @@ model LPPosition {
   status           String   @default("PENDING")
   dayMode          Boolean  @default(false)   // true = DAY mode (full range, close at 23:00 WIB)
   nightMode        Boolean  @default(false)   // true = NIGHT mode (concentrated)
+  source           String   @default("SYSTEM") // SYSTEM | ALPHA (Userbot)
   sessionKeyId     String?                    // FK to SessionKey (Phase 3, nullable)
   tradingMode      String   @default("DRY_RUN") // mirrors TRADING_MODE env
   createdAt        DateTime @default(now())

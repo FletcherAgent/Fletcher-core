@@ -710,7 +710,7 @@ async function startApp() {
     startBot();
     
     // Start userbot listener
-    await startUserbot(bot);
+    await startUserbot(bot, orchestrator.getLPEngine());
     
   } catch (error) {
     console.error("[System] Critical startup error:", error);

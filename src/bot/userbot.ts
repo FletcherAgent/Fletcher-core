@@ -7,13 +7,16 @@ import { getTokenInfo } from '../services/gmgn.js';
 import { IntelligenceLayer } from '../services/intelligence.js';
 dotenv.config();
 
+import { LPEngineAgent } from '../agents/lpengine.js';
+
 let client: TelegramClient | null = null;
 
 /**
  * Start Userbot Listener
  * @param fletcherBot Grammy bot instance to send notifications to the user
+ * @param lpEngine LP Engine Agent to execute valid signals
  */
-export async function startUserbot(fletcherBot: Bot) {
+export async function startUserbot(fletcherBot: Bot, lpEngine: LPEngineAgent) {
   const apiId = parseInt(process.env.TELEGRAM_API_ID || '0');
   const apiHash = process.env.TELEGRAM_API_HASH || '';
   const sessionStr = process.env.TELEGRAM_SESSION || '';
@@ -95,6 +98,10 @@ export async function startUserbot(fletcherBot: Bot) {
           console.error(`[Userbot] Failed to send message via Grammy:`, botErr);
         }
       }
+
+      // Trigger LP Engine
+      console.log(`[Userbot] 🚀 Triggering LP Engine for Alpha Signal...`);
+      await lpEngine.processAlphaSignal(tokenInfo, sentiment.score);
 
     }, new NewMessage({ chats: targetGroupStr ? [targetGroupId] : [] })); // If targetGroup is empty, it listens to ALL groups (dangerous).
 

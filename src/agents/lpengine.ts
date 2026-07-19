@@ -28,6 +28,7 @@ import {
   screenPairs,
   type PoolCandidate,
   type LPScreeningCriteria,
+  type GMGNToken,
 } from '../services/gmgn.js';
 import {
   fullRangeTicks,
@@ -408,11 +409,31 @@ export class LPEngineAgent {
     }
   }
 
+  // ─── Direct Alpha Signal Processing ──────────────────────────────────────────
+
+  /** Called by Userbot when a signal passes Grok sentiment verification */
+  async processAlphaSignal(token: GMGNToken, sentimentScore: number): Promise<void> {
+    const config  = await loadLPConfig();
+    const canOpen = await this.canOpenNewPosition();
+    if (!canOpen.ok) {
+      console.warn(`[LPEngine] ⛔ Alpha Signal blocked: ${canOpen.reason}`);
+      if (this.onNotification) await this.onNotification(`⛔ *Alpha Signal blocked:* ${canOpen.reason}`);
+      return;
+    }
+
+    // Pass token and score directly without mocking PoolCandidate
+    await this.proposeOpenPosition({ token, score: sentimentScore }, {
+      dayMode: true,
+      nightMode: false,
+      source: 'ALPHA'
+    });
+  }
+
   // ─── Core: Propose Open Position ────────────────────────────────────────────
 
   private async proposeOpenPosition(
-    candidate: PoolCandidate,
-    options: { dayMode: boolean; nightMode: boolean; nightRange?: number }
+    candidate: { token: GMGNToken; score: number },
+    options: { dayMode: boolean; nightMode: boolean; nightRange?: number; source?: string }
   ): Promise<void> {
     const config    = await loadLPConfig();
     const token     = candidate.token;
@@ -539,7 +560,8 @@ export class LPEngineAgent {
         status:      'PENDING',
         dayMode:     options.dayMode,
         nightMode:   options.nightMode,
-        tradingMode: isDryRun ? 'DRY_RUN' : 'LIVE',
+        source:      options.source ?? 'SYSTEM',
+        tradingMode: (modeCfg?.value || 'LIVE'),
       },
     });
 
