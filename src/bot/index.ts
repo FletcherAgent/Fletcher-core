@@ -5,6 +5,7 @@ import { Orchestrator } from "../core/orchestrator.js";
 import { connectDb, prisma } from "../core/db.js";
 import { screenPairs } from "../services/gmgn.js";
 import { getUserTier, clearTierCache } from "../services/tierGate.js";
+import { startUserbot } from "./userbot.js";
 
 dotenv.config();
 
@@ -30,6 +31,44 @@ function queueLog(emoji: string, ...args: any[]) {
   }).join(' ');
 
   if (msg.includes("[Tracker]") || msg.includes("Received webhook activity") || msg.includes("Swap activity detected")) return;
+  // Do not forward REJECTED logs to Telegram to prevent important messages from being truncated (4000 chars limit)
+  if (msg.includes("REJECTED:")) return;
+  
+  // Format important alerts as pretty Telegram messages instead of raw log blocks
+  if (process.env.TELEGRAM_CHAT_ID) {
+    let prettyMsg = null;
+    
+    // 1. Grok Analysis Result
+    const grokMatch = msg.match(/\[LPEngine\] Grok Result for (.*?): (BULLISH|BEARISH|NEUTRAL) \(Score: (\d+)\) - (.*)/);
+    if (grokMatch) {
+      prettyMsg = `<b>🧠 Grok AI Analysis: $${grokMatch[1]}</b>\nStatus: <b>${grokMatch[2]}</b> (Score: ${grokMatch[3]})\n\n<i>${grokMatch[4]}</i>`;
+    }
+
+    // 2. Proposing Position
+    const proposeMatch = msg.match(/\[LPEngine\] 📋 Proposing position: (.*?)\s*\|\s*dayMode=(.*?)\s*\|\s*dryRun=(.*)/);
+    if (proposeMatch) {
+      prettyMsg = `<b>📋 Proposing New LP Position</b>\n<b>Token:</b> $${proposeMatch[1]}\n<b>Day Mode:</b> ${proposeMatch[2]}\n<b>Dry Run:</b> ${proposeMatch[3]}`;
+    }
+
+    // 3. Token Passed Screening
+    const passedMatch = msg.match(/\[(?:GMGN|MarketData)\] ✅ (.*?) PASSED — score: (\d+), mcap: (.*?), vol: (.*)/);
+    if (passedMatch) {
+      prettyMsg = `<b>✅ Token Passed Screening: $${passedMatch[1]}</b>\n<b>Score:</b> ${passedMatch[2]}\n<b>Market Cap:</b> ${passedMatch[3]}\n<b>24h Vol:</b> ${passedMatch[4]}`;
+    }
+    
+    // 4. Grok Approved
+    const approvedMatch = msg.match(/\[LPEngine\] ✅ Grok APPROVED (.*)/);
+    if (approvedMatch) {
+      prettyMsg = `<b>✅ Grok APPROVED $${approvedMatch[1]}</b>\nSentiment is strongly bullish. Proceeding to execution.`;
+    }
+
+    if (prettyMsg) {
+      bot.api.sendMessage(process.env.TELEGRAM_CHAT_ID, prettyMsg, { parse_mode: 'HTML' })
+        .catch(err => originalError("Failed to send formatted msg", err));
+      return; // Stop here, do not add to the standard logBuffer
+    }
+  }
+
   logBuffer.push(`${emoji} ${msg}`);
 }
 
@@ -667,7 +706,12 @@ async function startApp() {
       }
     };
     
+    // Start main bot (without waiting so we can start userbot too)
     startBot();
+    
+    // Start userbot listener
+    await startUserbot(bot);
+    
   } catch (error) {
     console.error("[System] Critical startup error:", error);
     process.exit(1);
