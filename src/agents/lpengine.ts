@@ -339,7 +339,7 @@ export class LPEngineAgent {
       }
       
       console.log(`[LPEngine] ✅ Grok APPROVED ${candidate.token.symbol}`);
-      if (this.onNotification) await this.onNotification(`✅ *Grok APPROVED $${candidate.token.symbol}*\\nScore: ${sentiment.score}\\n_Wait for V3 pool..._`);
+      if (this.onNotification) await this.onNotification(`✅ *Grok APPROVED $${candidate.token.symbol}*\nScore: ${sentiment.score}\n_Wait for V3 pool..._`);
       
       selectedCandidate = candidate;
       break; // Found the top candidate that passed Grok
@@ -396,7 +396,7 @@ export class LPEngineAgent {
       }
       
       console.log(`[LPEngine] ✅ Grok APPROVED ${candidate.token.symbol}`);
-      if (this.onNotification) await this.onNotification(`✅ *Grok APPROVED $${candidate.token.symbol}*\\nScore: ${sentiment.score}\\n_Wait for V3 pool..._`);
+      if (this.onNotification) await this.onNotification(`✅ *Grok APPROVED $${candidate.token.symbol}*\nScore: ${sentiment.score}\n_Wait for V3 pool..._`);
       toOpen.push(candidate);
     }
 

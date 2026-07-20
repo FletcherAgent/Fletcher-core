@@ -477,12 +477,40 @@ export class Orchestrator {
       
       if (riskEvaluation.approved) {
         console.log(`[Orchestrator] Risk Warden approved Alpha Spot. Forwarding to Trader with size ${riskEvaluation.recommendedSize}...`);
-        this.trader.processSignal(tokenAddress, riskEvaluation.recommendedSize, 'ALPHA');
+        
+        // Spawn async retry loop (Sniper Mode)
+        (async () => {
+          try {
+            let attempts = 0;
+            let success = false;
+            while (attempts < 5 && !success) {
+              attempts++;
+              console.log(`[Orchestrator] 🎯 Alpha Buy Attempt ${attempts}/5 for ${tokenAddress}...`);
+              const muteFailure = attempts < 5; // Mute Telegram failure message until the last attempt
+              success = await this.trader.processSignal(tokenAddress, riskEvaluation.recommendedSize, 'ALPHA', undefined, undefined, muteFailure);
+              
+              if (!success && attempts < 5) {
+                console.log(`[Orchestrator] ⏳ Retry in 60s for ${tokenAddress}...`);
+                await new Promise(r => setTimeout(r, 60000));
+              }
+            }
+            if (!success) {
+              console.warn(`[Orchestrator] ❌ Gave up on Alpha Spot buy for ${tokenAddress} after 5 attempts.`);
+            }
+          } catch (err) {
+            console.error(`[Orchestrator] Error in Alpha Spot retry loop:`, err);
+          } finally {
+            this.processingTokens.delete(lowerToken);
+          }
+        })();
+        return; // Return immediately so we don't block the caller
       } else {
         console.warn(`[Orchestrator] Risk Warden rejected Alpha signal for ${tokenAddress}. Reason: ${riskEvaluation.reason}`);
+        this.processingTokens.delete(lowerToken);
       }
-    } finally {
-      setTimeout(() => this.processingTokens.delete(lowerToken), 10000);
+    } catch (e) {
+      console.error(`[Orchestrator] Error processing Alpha Spot Signal:`, e);
+      this.processingTokens.delete(lowerToken);
     }
   }
 

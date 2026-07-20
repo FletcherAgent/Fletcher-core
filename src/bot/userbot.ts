@@ -101,14 +101,8 @@ export async function startUserbot(fletcherBot: Bot, orchestrator: Orchestrator)
           return;
         }
 
-        // Grok Sentiment Layer verification
-        console.log(`[Userbot] Running Grok XAI to check token quality...`);
-        const sentiment = await IntelligenceLayer.analyzeSentiment(tokenInfo.symbol, tokenAddress);
-        
-        if (sentiment.score < 50) {
-          console.log(`[Userbot] ❌ Token ${tokenAddress} rejected by Grok XAI (Score ${sentiment.score}: ${sentiment.reasoning})`);
-          return;
-        }
+        // Grok Sentiment Layer verification (BYPASSED for Scarp signals)
+        const sentiment = { score: 100, reasoning: "Verified Alpha Caller (Scarp) - Grok Bypass Enabled" };
 
         // Passed all verifications! Send alert via Grammy Bot
         if (ownerChatId) {
@@ -119,8 +113,7 @@ export async function startUserbot(fletcherBot: Bot, orchestrator: Orchestrator)
                       `<b>Market Cap:</b> $${(tokenInfo.marketCap / 1000).toFixed(1)}K\n` +
                       `<b>Liquidity:</b> $${(tokenInfo.liquidity / 1000).toFixed(1)}K\n` +
                       `<b>Volume 24h:</b> $${(tokenInfo.volume24h / 1000).toFixed(1)}K\n\n` +
-                      `🧠 <b>Grok XAI Analysis (Score: ${sentiment.score}):</b>\n` +
-                      `<i>${sentiment.reasoning}</i>`;
+                      `🧠 <b>Analysis:</b>\n<i>${sentiment.reasoning}</i>`;
 
           try {
             await fletcherBot.api.sendMessage(ownerChatId, msg, { parse_mode: 'HTML' });

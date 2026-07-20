@@ -32,12 +32,12 @@ export class TraderAgent {
     return config ? config.value : 'LIVE';
   }
 
-  public async processSignal(tokenAddress: string, sizeInWeth: bigint, source: string = 'SCOUT', copiedFrom?: string, txHash?: string) {
+  public async processSignal(tokenAddress: string, sizeInWeth: bigint, source: string = 'SCOUT', copiedFrom?: string, txHash?: string, muteFailure: boolean = false): Promise<boolean> {
     const tradeId = Math.random().toString(36).substring(7);
     console.log(`[Trader] Processing Signal for ${tokenAddress} - Size: ${sizeInWeth}`);
     if (!walletClient || !account) {
       console.error("[Trader] Auto-trading disabled (no PRIVATE_KEY). Aborting trade.");
-      return;
+      return false;
     }
     
     const calldataResult = await this.constructUnsignedSwapTx(tokenAddress, sizeInWeth, txHash);
@@ -45,8 +45,10 @@ export class TraderAgent {
       console.error(`[Trader] ❌ Failed to construct BUY calldata for ${tokenAddress}.`);
       this.emitToSigningBoundary(tokenAddress, "FAILED", 'BUY REJECTED (NO ROUTE/POOL OR CALLDATA FAIL)');
       const chatId = process.env.TELEGRAM_CHAT_ID;
-      if (chatId) this.bot.api.sendMessage(chatId, `❌ **BUY Failed**\nToken: \`${tokenAddress}\`\nReason: Failed to construct transaction (Pool not found or Universal Router parsing failed).`, { parse_mode: 'Markdown' }).catch(console.error);
-      return;
+      if (chatId && !muteFailure) {
+        this.bot.api.sendMessage(chatId, `❌ **BUY Failed**\nToken: \`${tokenAddress}\`\nReason: Failed to construct transaction (Pool not found or Universal Router parsing failed).`, { parse_mode: 'Markdown' }).catch(console.error);
+      }
+      return false;
     }
     if (calldataResult) {
       const { calldata, amountOutMinimum, expectedOut, toAddress, value } = calldataResult;
@@ -68,7 +70,7 @@ export class TraderAgent {
             .text("❌ Reject", `reject_${tradeId}`);
           
           await this.bot.api.sendMessage(process.env.TELEGRAM_CHAT_ID, `🚨 **PENDING BUY**\nToken: \`${tokenAddress}\`\nSize: \`${Number(sizeInWeth)/1e18} WETH\`\n\nDo you want to execute this trade?`, { parse_mode: 'Markdown', reply_markup: keyboard });
-          return;
+          return true;
         }
 
         if (!walletClient || !account) throw new Error("WalletClient is null");
@@ -112,12 +114,15 @@ export class TraderAgent {
           await this.failPendingPosition(txHash);
           throw new Error('Transaction reverted by network');
         }
+        return true;
       } catch (error) {
         console.error(`[Trader] ❌ BUY TX Failed:`, error);
         dbLogger.error(`BUY TX Failed`, { token: tokenAddress, error: String(error) });
         this.emitToSigningBoundary(tokenAddress, "FAILED", 'BUY REJECTED');
+        return false;
       }
     }
+    return false; // Fallback
   }
 
   public async executePendingTrade(tradeId: string, chatId?: number) {
