@@ -433,6 +433,59 @@ export class Orchestrator {
     console.log('[Orchestrator] LP cron scheduled (Hourly scan at minute :00)');
   }
 
+  public async processAlphaSpotSignal(tokenAddress: string, score: number) {
+    const lowerToken = tokenAddress.toLowerCase();
+    if (this.processingTokens.has(lowerToken)) {
+      console.log(`[Orchestrator] ℹ️ Dedup: Already processing a signal for ${tokenAddress}, ignoring Alpha signal.`);
+      return;
+    }
+    this.processingTokens.add(lowerToken);
+
+    try {
+      const COOLDOWN_MS = 60 * 60 * 1000;
+      const existingPos = await prisma.position.findFirst({
+         where: { 
+           tokenAddress: { equals: tokenAddress, mode: 'insensitive' }, 
+           OR: [
+             { status: { in: ['OPEN', 'PENDING', 'EXITING'] } },
+             { createdAt: { gte: new Date(Date.now() - COOLDOWN_MS) } }
+           ]
+         }
+      });
+      if (existingPos) {
+         console.log(`[Orchestrator] ℹ️ Dedup: Active position or cooldown exists for ${tokenAddress}, ignoring Alpha signal.`);
+         return;
+      }
+
+      console.log(`[Orchestrator] Received Alpha Spot signal for ${tokenAddress}, consulting Risk Warden...`);
+    
+      try {
+        await prisma.signal.create({
+          data: {
+            tokenAddress,
+            score: score,
+            passed: true,
+            rawContext: { source: 'ALPHA' },
+            source: 'ALPHA'
+          }
+        });
+      } catch (e) {
+        console.error(`[Orchestrator] Failed to save ALPHA signal to DB`, e);
+      }
+
+      const riskEvaluation = await this.riskWarden.evaluateSignal(tokenAddress);
+      
+      if (riskEvaluation.approved) {
+        console.log(`[Orchestrator] Risk Warden approved Alpha Spot. Forwarding to Trader with size ${riskEvaluation.recommendedSize}...`);
+        this.trader.processSignal(tokenAddress, riskEvaluation.recommendedSize, 'ALPHA');
+      } else {
+        console.warn(`[Orchestrator] Risk Warden rejected Alpha signal for ${tokenAddress}. Reason: ${riskEvaluation.reason}`);
+      }
+    } finally {
+      setTimeout(() => this.processingTokens.delete(lowerToken), 10000);
+    }
+  }
+
   public async startAll() {
     console.log("🚀 Orchestrator: Starting all Fletcher agents (Minimum Viable Swarm)...");
     

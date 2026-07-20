@@ -7,16 +7,16 @@ import { getTokenInfo } from '../services/gmgn.js';
 import { IntelligenceLayer } from '../services/intelligence.js';
 dotenv.config();
 
-import { LPEngineAgent } from '../agents/lpengine.js';
+import { Orchestrator } from '../core/orchestrator.js';
 
 let client: TelegramClient | null = null;
 
 /**
  * Start Userbot Listener
  * @param fletcherBot Grammy bot instance to send notifications to the user
- * @param lpEngine LP Engine Agent to execute valid signals
+ * @param orchestrator Orchestrator instance to process spot buys
  */
-export async function startUserbot(fletcherBot: Bot, lpEngine: LPEngineAgent) {
+export async function startUserbot(fletcherBot: Bot, orchestrator: Orchestrator) {
   const apiId = parseInt(process.env.TELEGRAM_API_ID || '0');
   const apiHash = process.env.TELEGRAM_API_HASH || '';
   const sessionStr = process.env.TELEGRAM_SESSION || '';
@@ -49,6 +49,25 @@ export async function startUserbot(fletcherBot: Bot, lpEngine: LPEngineAgent) {
       const message = event.message;
       const text = message.text || '';
       
+      // Filter out signals that don't have "scarp" as verified caller
+      let isScarp = text.toLowerCase().includes('scarp');
+      if (!isScarp) {
+        try {
+          const sender = await message.getSender();
+          const username = (sender as any)?.username?.toLowerCase() || '';
+          const firstName = (sender as any)?.firstName?.toLowerCase() || '';
+          if (username.includes('scarp') || firstName.includes('scarp') || username.includes('maxcashguy')) {
+            isScarp = true;
+          }
+        } catch (e) {
+          // Ignore if sender cannot be fetched
+        }
+      }
+
+      if (!isScarp) {
+        return;
+      }
+
       // Regex to find EVM address (0x followed by 40 hex characters)
       const addressMatch = text.match(/0x[a-fA-F0-9]{40}/);
       if (!addressMatch) return;
@@ -82,7 +101,8 @@ export async function startUserbot(fletcherBot: Bot, lpEngine: LPEngineAgent) {
 
       // Passed all verifications! Send alert via Grammy Bot
       if (ownerChatId) {
-        const msg = `🚨 <b>ALPHA SIGNAL DETECTED!</b> 🚨\n\n` +
+        const msg = `🚨 <b>ALPHA SPOT SIGNAL DETECTED!</b> 🚨\n\n` +
+                    `🗣️ <b>Caller:</b> Scarp (@MaxCashGuy)\n` +
                     `<b>Token:</b> ${tokenInfo.symbol} (${tokenInfo.name})\n` +
                     `<b>Contract:</b> <code>${tokenAddress}</code>\n` +
                     `<b>Market Cap:</b> $${(tokenInfo.marketCap / 1000).toFixed(1)}K\n` +
@@ -99,9 +119,9 @@ export async function startUserbot(fletcherBot: Bot, lpEngine: LPEngineAgent) {
         }
       }
 
-      // Trigger LP Engine
-      console.log(`[Userbot] 🚀 Triggering LP Engine for Alpha Signal...`);
-      await lpEngine.processAlphaSignal(tokenInfo, sentiment.score);
+      // Trigger Spot Buy via Orchestrator
+      console.log(`[Userbot] 🚀 Triggering Alpha Spot Buy for ${tokenInfo.symbol}...`);
+      await orchestrator.processAlphaSpotSignal(tokenAddress, sentiment.score);
 
     }, new NewMessage({ chats: targetGroupStr ? [targetGroupId] : [] })); // If targetGroup is empty, it listens to ALL groups (dangerous).
 
