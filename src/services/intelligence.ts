@@ -51,8 +51,17 @@ Respond ONLY in the following strict JSON format, with no markdown formatting or
         throw new Error(`Grok API Error: ${response.statusText}`);
       }
 
-      const data = await response.json();
-      const content = data.choices[0].message.content.trim();
+      let data;
+      try {
+        data = await response.json();
+      } catch (e: any) {
+        throw new Error(`Failed to parse Grok API response: ${e.message}`);
+      }
+      
+      const content = data.choices?.[0]?.message?.content?.trim() || '';
+      if (!content) {
+        throw new Error('Grok API returned empty content.');
+      }
       
       // Parse JSON
       let result: SentimentResult;
@@ -60,14 +69,18 @@ Respond ONLY in the following strict JSON format, with no markdown formatting or
         result = JSON.parse(content);
       } catch (e) {
         // Fallback cleanup if Grok returns markdown blocks
-        const cleaned = content.replace(/```json/g, '').replace(/```/g, '').trim();
-        result = JSON.parse(cleaned);
+        const match = content.match(/\{[\s\S]*\}/);
+        if (match) {
+          result = JSON.parse(match[0]);
+        } else {
+          throw new Error(`Could not extract JSON from Grok response: ${content}`);
+        }
       }
 
       return result;
-    } catch (error) {
-      console.error(`[IntelligenceLayer] Failed to analyze sentiment for ${tokenSymbol}:`, error);
-      return { score: 50, label: 'NEUTRAL', reasoning: 'Failed to fetch sentiment data.' };
+    } catch (error: any) {
+      console.error(`[IntelligenceLayer] Failed to analyze sentiment for ${tokenSymbol}:`, error.message);
+      return { score: 0, label: 'NEUTRAL', reasoning: 'Failed to fetch sentiment data.' };
     }
   }
 
@@ -113,20 +126,33 @@ Respond ONLY in strict JSON format:
         throw new Error(`Grok API Error: ${response.statusText}`);
       }
 
-      const data = await response.json();
-      const content = data.choices[0].message.content.trim();
+      let data;
+      try {
+        data = await response.json();
+      } catch (e: any) {
+        throw new Error(`Failed to parse Grok API response: ${e.message}`);
+      }
+      
+      const content = data.choices?.[0]?.message?.content?.trim() || '';
+      if (!content) {
+        throw new Error('Grok API returned empty content.');
+      }
       
       let result;
       try {
         result = JSON.parse(content);
       } catch (e) {
-        const cleaned = content.replace(/```json/g, '').replace(/```/g, '').trim();
-        result = JSON.parse(cleaned);
+        const match = content.match(/\{[\s\S]*\}/);
+        if (match) {
+          result = JSON.parse(match[0]);
+        } else {
+          throw new Error(`Could not extract JSON from Grok response: ${content}`);
+        }
       }
 
       return result;
-    } catch (error) {
-      console.error(`[IntelligenceLayer] Failed to evaluate wallet:`, error);
+    } catch (error: any) {
+      console.error(`[IntelligenceLayer] Failed to evaluate wallet:`, error.message);
       return { approved: false, reasoning: 'Failed to evaluate wallet metrics.' };
     }
   }
