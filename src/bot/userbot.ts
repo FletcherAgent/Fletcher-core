@@ -33,15 +33,15 @@ export async function startUserbot(fletcherBot: Bot, orchestrator: Orchestrator)
     connectionRetries: 5,
   });
 
+  // Simple memory cache to prevent processing the same token multiple times
+  const processedTokens = new Set<string>();
+
   try {
     await client.connect();
     console.log('✅ [Userbot] Successfully connected using Session. Waiting for signals...');
     
-    // Ensure targetGroup is valid (can be an ID number or username)
-    // If it's a negative number (e.g., -100123...), we parse it to BigInt
     let targetGroupId: any = targetGroupStr;
     if (/^-?\d+$/.test(targetGroupStr)) {
-      // GramJS can use ID numbers directly
       targetGroupId = parseInt(targetGroupStr);
     }
 
@@ -49,7 +49,6 @@ export async function startUserbot(fletcherBot: Bot, orchestrator: Orchestrator)
       const message = event.message;
       const text = message.text || '';
       
-      // Filter out signals that don't have "scarp" as verified caller
       let isScarp = text.toLowerCase().includes('scarp');
       if (!isScarp) {
         try {
@@ -59,8 +58,8 @@ export async function startUserbot(fletcherBot: Bot, orchestrator: Orchestrator)
           if (username.includes('scarp') || firstName.includes('scarp') || username.includes('maxcashguy')) {
             isScarp = true;
           }
-        } catch (e) {
-          // Ignore if sender cannot be fetched
+        } catch (e: any) {
+          console.warn(`[Userbot] ⚠️ Failed to fetch sender info for message:`, e?.message || e);
         }
       }
 
@@ -72,56 +71,71 @@ export async function startUserbot(fletcherBot: Bot, orchestrator: Orchestrator)
       const addressMatch = text.match(/0x[a-fA-F0-9]{40}/);
       if (!addressMatch) return;
       
-      const tokenAddress = addressMatch[0];
+      const tokenAddress = addressMatch[0].toLowerCase(); // Normalize case
+
+      if (processedTokens.has(tokenAddress)) {
+        return; // Ignore if already processed recently
+      }
+      processedTokens.add(tokenAddress);
+      
+      // Clear cache after 15 minutes to prevent memory leak but keep it long enough
+      setTimeout(() => {
+        processedTokens.delete(tokenAddress);
+      }, 15 * 60 * 1000);
+
       console.log(`[Userbot] 🚨 Signal detected! Address: ${tokenAddress}`);
 
-      // Ask Fletcher to verify
-      console.log(`[Userbot] Verifying ${tokenAddress} with DexScreener/GoPlus...`);
-      const tokenInfo = await getTokenInfo(tokenAddress);
-      
-      if (!tokenInfo) {
-        console.log(`[Userbot] ❌ Token ${tokenAddress} not found or no pool exists yet.`);
-        return;
-      }
-
-      // Basic safety filter
-      if (tokenInfo.isHoneypot) {
-        console.log(`[Userbot] ❌ Token ${tokenAddress} detected as HONEYPOT! Ignoring.`);
-        return;
-      }
-
-      // Grok Sentiment Layer verification
-      console.log(`[Userbot] Running Grok XAI to check token quality...`);
-      const sentiment = await IntelligenceLayer.analyzeSentiment(tokenInfo.symbol, tokenAddress);
-      
-      if (sentiment.score < 50) {
-        console.log(`[Userbot] ❌ Token ${tokenAddress} rejected by Grok XAI (Score ${sentiment.score}: ${sentiment.reasoning})`);
-        return;
-      }
-
-      // Passed all verifications! Send alert via Grammy Bot
-      if (ownerChatId) {
-        const msg = `🚨 <b>ALPHA SPOT SIGNAL DETECTED!</b> 🚨\n\n` +
-                    `🗣️ <b>Caller:</b> Scarp (@MaxCashGuy)\n` +
-                    `<b>Token:</b> ${tokenInfo.symbol} (${tokenInfo.name})\n` +
-                    `<b>Contract:</b> <code>${tokenAddress}</code>\n` +
-                    `<b>Market Cap:</b> $${(tokenInfo.marketCap / 1000).toFixed(1)}K\n` +
-                    `<b>Liquidity:</b> $${(tokenInfo.liquidity / 1000).toFixed(1)}K\n` +
-                    `<b>Volume 24h:</b> $${(tokenInfo.volume24h / 1000).toFixed(1)}K\n\n` +
-                    `🧠 <b>Grok XAI Analysis (Score: ${sentiment.score}):</b>\n` +
-                    `<i>${sentiment.reasoning}</i>`;
-
-        try {
-          await fletcherBot.api.sendMessage(ownerChatId, msg, { parse_mode: 'HTML' });
-          console.log(`[Userbot] ✅ Signal report successfully sent to Owner!`);
-        } catch (botErr) {
-          console.error(`[Userbot] Failed to send message via Grammy:`, botErr);
+      try {
+        // Ask Fletcher to verify
+        console.log(`[Userbot] Verifying ${tokenAddress} with DexScreener/GoPlus...`);
+        const tokenInfo = await getTokenInfo(tokenAddress);
+        
+        if (!tokenInfo) {
+          console.log(`[Userbot] ❌ Token ${tokenAddress} not found or no pool exists yet.`);
+          return;
         }
-      }
 
-      // Trigger Spot Buy via Orchestrator
-      console.log(`[Userbot] 🚀 Triggering Alpha Spot Buy for ${tokenInfo.symbol}...`);
-      await orchestrator.processAlphaSpotSignal(tokenAddress, sentiment.score);
+        // Basic safety filter
+        if (tokenInfo.isHoneypot) {
+          console.log(`[Userbot] ❌ Token ${tokenAddress} detected as HONEYPOT! Ignoring.`);
+          return;
+        }
+
+        // Grok Sentiment Layer verification
+        console.log(`[Userbot] Running Grok XAI to check token quality...`);
+        const sentiment = await IntelligenceLayer.analyzeSentiment(tokenInfo.symbol, tokenAddress);
+        
+        if (sentiment.score < 50) {
+          console.log(`[Userbot] ❌ Token ${tokenAddress} rejected by Grok XAI (Score ${sentiment.score}: ${sentiment.reasoning})`);
+          return;
+        }
+
+        // Passed all verifications! Send alert via Grammy Bot
+        if (ownerChatId) {
+          const msg = `🚨 <b>ALPHA SPOT SIGNAL DETECTED!</b> 🚨\n\n` +
+                      `🗣️ <b>Caller:</b> Scarp (@MaxCashGuy)\n` +
+                      `<b>Token:</b> ${tokenInfo.symbol} (${tokenInfo.name})\n` +
+                      `<b>Contract:</b> <code>${tokenAddress}</code>\n` +
+                      `<b>Market Cap:</b> $${(tokenInfo.marketCap / 1000).toFixed(1)}K\n` +
+                      `<b>Liquidity:</b> $${(tokenInfo.liquidity / 1000).toFixed(1)}K\n` +
+                      `<b>Volume 24h:</b> $${(tokenInfo.volume24h / 1000).toFixed(1)}K\n\n` +
+                      `🧠 <b>Grok XAI Analysis (Score: ${sentiment.score}):</b>\n` +
+                      `<i>${sentiment.reasoning}</i>`;
+
+          try {
+            await fletcherBot.api.sendMessage(ownerChatId, msg, { parse_mode: 'HTML' });
+            console.log(`[Userbot] ✅ Signal report successfully sent to Owner!`);
+          } catch (botErr) {
+            console.error(`[Userbot] Failed to send message via Grammy:`, botErr);
+          }
+        }
+
+        // Trigger Spot Buy via Orchestrator
+        console.log(`[Userbot] 🚀 Triggering Alpha Spot Buy for ${tokenInfo.symbol}...`);
+        await orchestrator.processAlphaSpotSignal(tokenAddress, sentiment.score);
+      } catch (processingError: any) {
+        console.error(`[Userbot] ❌ ERROR processing signal for ${tokenAddress}:`, processingError?.message || processingError);
+      }
 
     }, new NewMessage({ chats: targetGroupStr ? [targetGroupId] : [] })); // If targetGroup is empty, it listens to ALL groups (dangerous).
 
