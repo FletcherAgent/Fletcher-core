@@ -54,11 +54,12 @@ export async function loadScreeningCriteria(): Promise<LPScreeningCriteria> {
   const keys = ['lp.minMcap', 'lp.minVol', 'lp.categories', 'lp.blacklist'];
   const configs = await prisma.systemConfig.findMany({ where: { key: { in: keys } } });
   const map = Object.fromEntries(configs.map(c => [c.key, c.value]));
+  
   return {
-    minMcap:    parseFloat(map['lp.minMcap']    ?? '500000'),
-    minVol24h:  parseFloat(map['lp.minVol']     ?? '1000000'),
-    categories: JSON.parse(map['lp.categories'] ?? '["tech","RWA","launchpad","ai"]'),
-    blacklist:  JSON.parse(map['lp.blacklist']   ?? '["flap.fun","hood.fun"]'),
+    minMcap:    parseFloat(map['lp.minMcap']    ?? '10000'),
+    minVol24h:  parseFloat(map['lp.minVol']     ?? '10000'),
+    categories: JSON.parse(map['lp.categories'] ?? '["tech","RWA","launchpad","ai","meme","defi"]'),
+    blacklist:  JSON.parse(map['lp.blacklist']  ?? '["nsfw","scam"]')
   };
 }
 
