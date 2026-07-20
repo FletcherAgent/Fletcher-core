@@ -118,10 +118,39 @@ export async function getTrendingPairs(limit = 20): Promise<GMGNToken[]> {
   }
 }
 
+function normalizeToken(d: any): GMGNToken {
+  return {
+    address:    d?.address ?? d?.token_address ?? '',
+    symbol:     d?.symbol ?? d?.token_symbol ?? '',
+    name:       d?.name ?? d?.token_name ?? '',
+    marketCap:  parseFloat(d?.market_cap ?? d?.marketcap ?? '0'),
+    volume24h:  parseFloat(d?.volume_24h ?? d?.volume ?? '0'),
+    liquidity:  parseFloat(d?.liquidity ?? d?.liquidity_usd ?? '0'),
+    priceUsd:   parseFloat(d?.price ?? d?.price_usd ?? '0'),
+    category:   d?.tag ?? d?.category ?? '',
+    launchPad:  d?.launch_pad ?? d?.launchpad ?? '',
+    isHoneypot: Boolean(d?.is_honeypot ?? d?.honeypot),
+    buyTax:     parseFloat(d?.buy_tax ?? '0'),
+    sellTax:    parseFloat(d?.sell_tax ?? '0'),
+    isVerified: Boolean(d?.is_open_source ?? d?.verified),
+  };
+}
+
 /** 2. DexScreener + GoPlus: Get full token info & safety */
 export async function getTokenInfo(tokenAddress: string): Promise<GMGNToken | null> {
+  // A. Try fetching from GMGN first (as per user request for Railway testing)
   try {
-    // A. Fetch Financials from DexScreener
+    const gmgnData = await gmgnGet<{ data: any }>(`/token/${CHAIN}/${tokenAddress}`);
+    if (gmgnData && gmgnData.data) {
+      console.log(`[getTokenInfo] ✅ Successfully used GMGN API for ${tokenAddress}`);
+      return normalizeToken(gmgnData.data);
+    }
+  } catch (err) {
+    console.warn(`[getTokenInfo] ⚠️ GMGN API failed (possibly blocked by Cloudflare). Fallback to DexScreener...`);
+  }
+
+  // B. Fallback to DexScreener if GMGN is blocked
+  try {
     const dsRes = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${tokenAddress}`);
     if (!dsRes.ok) return null;
     const dsData = await dsRes.json();
@@ -154,7 +183,7 @@ export async function getTokenInfo(tokenAddress: string): Promise<GMGNToken | nu
       isVerified: true
     };
     
-    // B. Fetch Security from GoPlus (Chain ID 4663 for Robinhood)
+    // Fetch Security from GoPlus (Chain ID 4663 for Robinhood)
     try {
       const gpRes = await fetch(`https://api.gopluslabs.io/api/v1/token_security/4663?contract_addresses=${tokenAddress}`);
       if (gpRes.ok) {
@@ -168,9 +197,10 @@ export async function getTokenInfo(tokenAddress: string): Promise<GMGNToken | nu
         }
       }
     } catch (gperr) {
-      // Ignore GoPlus failure, rely on Grok XAI sentiment layer
+      console.warn(`[getTokenInfo] ⚠️ GoPlus API failed for ${tokenAddress}:`, gperr);
     }
     
+    console.log(`[getTokenInfo] ✅ Fallback to DexScreener successful for ${tokenAddress}`);
     return token;
   } catch (err) {
     console.error(`[DexScreener] getTokenInfo failed for ${tokenAddress}:`, err);
