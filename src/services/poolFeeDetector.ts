@@ -52,6 +52,33 @@ export async function detectBestFee(
     'function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external returns (uint256 amountOut)'
   ]);
 
+  const quoterV3_V2Abi = [
+    {
+      type: 'function',
+      name: 'quoteExactInputSingle',
+      inputs: [
+        {
+          name: 'params',
+          type: 'tuple',
+          components: [
+            { name: 'tokenIn', type: 'address' },
+            { name: 'tokenOut', type: 'address' },
+            { name: 'amountIn', type: 'uint256' },
+            { name: 'fee', type: 'uint24' },
+            { name: 'sqrtPriceLimitX96', type: 'uint160' }
+          ]
+        }
+      ],
+      outputs: [
+        { name: 'amountOut', type: 'uint256' },
+        { name: 'sqrtPriceX96After', type: 'uint160' },
+        { name: 'initializedTicksCrossed', type: 'uint32' },
+        { name: 'gasEstimate', type: 'uint256' }
+      ],
+      stateMutability: 'nonpayable'
+    }
+  ] as const;
+
   const quoterV4Abi = [
     {
       type: 'function',
@@ -89,6 +116,7 @@ export async function detectBestFee(
 
   // Query all fee tiers across all quoters in parallel
   const v3Promises = [];
+  const v3_V2Promises = [];
   const v4Promises = [];
 
   for (const quoter of uniqueQuoters) {
@@ -97,7 +125,7 @@ export async function detectBestFee(
       if (fee === 500) tickSpacing = 10;
       else if (fee === 10000) tickSpacing = 200;
 
-      // Try V3 Quoter
+      // Try V3 Quoter V1 ABI
       v3Promises.push(
         publicClient.readContract({
           address: quoter as `0x${string}`,
@@ -105,6 +133,22 @@ export async function detectBestFee(
           functionName: 'quoteExactInputSingle',
           args: [tokenIn as `0x${string}`, tokenOut as `0x${string}`, fee, amountIn, 0n]
         }).then(out => ({ fee, expectedOut: out as bigint, type: 'V3' as const }))
+      );
+
+      // Try V3 Quoter V2 ABI
+      v3_V2Promises.push(
+        publicClient.readContract({
+          address: quoter as `0x${string}`,
+          abi: quoterV3_V2Abi,
+          functionName: 'quoteExactInputSingle',
+          args: [{
+            tokenIn: tokenIn as `0x${string}`,
+            tokenOut: tokenOut as `0x${string}`,
+            amountIn,
+            fee,
+            sqrtPriceLimitX96: 0n
+          }]
+        }).then((out: any) => ({ fee, expectedOut: out[0] as bigint, type: 'V3' as const }))
       );
 
       // Try V4 Quoter
@@ -131,7 +175,7 @@ export async function detectBestFee(
     }
   }
 
-  const allPromises = [...v3Promises, ...v4Promises];
+  const allPromises = [...v3Promises, ...v3_V2Promises, ...v4Promises];
   const results = await Promise.allSettled(allPromises);
   
   for (const result of results) {
