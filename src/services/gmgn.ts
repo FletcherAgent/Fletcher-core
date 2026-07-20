@@ -23,6 +23,7 @@ export interface GMGNToken {
   buyTax:       number;
   sellTax:      number;
   isVerified:   boolean;
+  quoteToken?:  string;
 }
 
 export interface GMGNPool {
@@ -77,11 +78,9 @@ export async function getTrendingPairs(limit = 20): Promise<GMGNToken[]> {
       const gtData = await gtRes.json();
       if (!gtData.data || gtData.data.length === 0) break;
       
-      const wethAddr = process.env.WETH_ADDRESS?.toLowerCase() || '';
       const validPools = gtData.data.filter((p: any) => {
         const dex = p.relationships?.dex?.data?.id;
-        const quote = p.relationships?.quote_token?.data?.id;
-        return dex === 'uniswap-v3-robinhood' && quote === `robinhood_${wethAddr}`;
+        return dex === 'uniswap-v3-robinhood';
       });
       
       allPools = allPools.concat(validPools);
@@ -92,6 +91,7 @@ export async function getTrendingPairs(limit = 20): Promise<GMGNToken[]> {
     return allPools.slice(0, limit).map((pool: any) => {
       const attrs = pool.attributes;
       const address = pool.relationships?.base_token?.data?.id?.replace('robinhood_', '') || attrs.address;
+      const quoteToken = pool.relationships?.quote_token?.data?.id?.replace('robinhood_', '') || '';
       
       const validCats = ['tech', 'RWA', 'launchpad', 'ai'];
       const randomCat = validCats[Math.floor(Math.random() * validCats.length)];
@@ -109,7 +109,8 @@ export async function getTrendingPairs(limit = 20): Promise<GMGNToken[]> {
         isHoneypot: false, // checked later
         buyTax: 0,
         sellTax: 0,
-        isVerified: true
+        isVerified: true,
+        quoteToken
       };
     });
   } catch (err) {
@@ -180,7 +181,8 @@ export async function getTokenInfo(tokenAddress: string): Promise<GMGNToken | nu
       isHoneypot: false,
       buyTax: 0,
       sellTax: 0,
-      isVerified: true
+      isVerified: true,
+      quoteToken: mainPair.quoteToken?.address || ''
     };
     
     // Fetch Security from GoPlus (Chain ID 4663 for Robinhood)
@@ -327,7 +329,7 @@ export async function screenPairs(criteria?: LPScreeningCriteria): Promise<PoolC
     const pool: GMGNPool = {
       address: '',
       token0: token.address,
-      token1: process.env.WETH_ADDRESS ?? '',
+      token1: token.quoteToken || process.env.WETH_ADDRESS || '',
       feeTier: 3000,
       tvlUsd: token.liquidity,
       volume24h: token.volume24h,
