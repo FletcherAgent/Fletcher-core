@@ -1,8 +1,6 @@
 import * as dotenv from 'dotenv';
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '../core/db.js';
 dotenv.config();
-
-const prisma = new PrismaClient();
 
 const GROK_API_URL = 'https://api.x.ai/v1/chat/completions';
 
