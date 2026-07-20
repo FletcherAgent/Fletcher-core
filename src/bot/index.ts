@@ -37,6 +37,8 @@ function queueLog(emoji: string, ...args: any[]) {
   if (msg.includes("REJECTED:")) return;
   // Ignore No V3 pool found
   if (msg.includes("No V3 pool found")) return;
+  // Ignore GMGN fallback warning to prevent Telegram 429 spam
+  if (msg.includes("GMGN API failed")) return;
   
   // Format important alerts as pretty Telegram messages instead of raw log blocks
   if (process.env.TELEGRAM_CHAT_ID) {
