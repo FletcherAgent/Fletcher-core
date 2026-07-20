@@ -35,34 +35,44 @@ function queueLog(emoji: string, ...args: any[]) {
   if (msg.includes("[Scout ⚡ WSS]")) return;
   // Do not forward generic REJECTED logs to Telegram
   if (msg.includes("REJECTED:")) return;
+  // Ignore No V3 pool found
+  if (msg.includes("No V3 pool found")) return;
   
   // Format important alerts as pretty Telegram messages instead of raw log blocks
   if (process.env.TELEGRAM_CHAT_ID) {
     let prettyMsg = null;
     
-    // 1. Grok Analysis Result
+    // 1. Grok Analysis Result (COMMENTED OUT TO PREVENT TELEGRAM SPAM/429 ERROR)
+    /*
     const grokMatch = msg.match(/\[LPEngine\] Grok Result for (.*?): (BULLISH|BEARISH|NEUTRAL) \(Score: (\d+)\) - (.*)/);
     if (grokMatch) {
       prettyMsg = `<b>🧠 Grok AI Analysis: $${grokMatch[1]}</b>\nStatus: <b>${grokMatch[2]}</b> (Score: ${grokMatch[3]})\n\n<i>${grokMatch[4]}</i>`;
     }
+    */
 
-    // 2. Proposing Position
+    // 2. Proposing Position (COMMENTED OUT TO PREVENT TELEGRAM SPAM/429 ERROR)
+    /*
     const proposeMatch = msg.match(/\[LPEngine\] 📋 Proposing position: (.*?)\s*\|\s*dayMode=(.*?)\s*\|\s*dryRun=(.*)/);
     if (proposeMatch) {
       prettyMsg = `<b>📋 Proposing New LP Position</b>\n<b>Token:</b> $${proposeMatch[1]}\n<b>Day Mode:</b> ${proposeMatch[2]}\n<b>Dry Run:</b> ${proposeMatch[3]}`;
     }
+    */
 
-    // 3. Token Passed Screening
+    // 3. Token Passed Screening (COMMENTED OUT TO PREVENT TELEGRAM SPAM/429 ERROR)
+    /* 
     const passedMatch = msg.match(/\[(?:GMGN|MarketData)\] ✅ (.*?) PASSED — score: (\d+), mcap: (.*?), vol: (.*)/);
     if (passedMatch) {
       prettyMsg = `<b>✅ Token Passed Screening: $${passedMatch[1]}</b>\n<b>Score:</b> ${passedMatch[2]}\n<b>Market Cap:</b> ${passedMatch[3]}\n<b>24h Vol:</b> ${passedMatch[4]}`;
     }
+    */
     
-    // 4. Grok Approved
+    // 4. Grok Approved (COMMENTED OUT TO PREVENT TELEGRAM SPAM/429 ERROR)
+    /*
     const approvedMatch = msg.match(/\[LPEngine\] ✅ Grok APPROVED (.*)/);
     if (approvedMatch) {
       prettyMsg = `<b>✅ Grok APPROVED $${approvedMatch[1]}</b>\nSentiment is strongly bullish. Proceeding to execution.`;
     }
+    */
 
     // 5. Userbot Rejected (Grok)
     const userbotRejectMatch = msg.match(/\[Userbot\] ❌ Token (.*) rejected by Grok XAI \(Score (\d+): (.*)\)/);
@@ -92,6 +102,12 @@ function queueLog(emoji: string, ...args: any[]) {
     const genericRejectMatch = msg.match(/\[Userbot\] ❌ Token (.*) rejected: (.*)/);
     if (genericRejectMatch && !userbotRejectMatch) {
       prettyMsg = `❌ <b>Alpha Signal Rejected</b>\nToken: <code>${genericRejectMatch[1]}</code>\n<i>Reason: ${genericRejectMatch[2]}</i>`;
+    }
+
+    if (!prettyMsg && (msg.includes('⚠️') || msg.includes('❌'))) {
+      if (!msg.includes('No V3 pool found')) {
+        prettyMsg = `<pre>${msg}</pre>`;
+      }
     }
 
     // 10. Userbot Grok Processing
