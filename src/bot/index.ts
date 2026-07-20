@@ -181,6 +181,8 @@ bot.command("help", (ctx) => {
 
 🧠 <b>Intelligence Layer</b>
 /grok &lt;token&gt; - AI sentiment analysis for a specific token (uses grok-4.3).
+/grok_toggle on|off - Enable or disable Grok AI screening globally.
+/config - View all system configurations (including GROK_ENABLED).
 /discover - Run an autonomous wallet discovery cycle via GMGN & Grok.
 
 💧 <b>LP Engine (v2.0 Core)</b>
@@ -302,6 +304,47 @@ _${result.reasoning}_
     ctx.reply(msg.trim(), { parse_mode: "Markdown" });
   } catch (e) {
     ctx.reply("❌ Grok API failed.");
+  }
+});
+
+bot.command("grok_toggle", async (ctx) => {
+  const param = ctx.match?.toLowerCase().trim();
+  if (param !== "on" && param !== "off") {
+    return ctx.reply("❌ Usage: `/grok_toggle on` or `/grok_toggle off`", { parse_mode: "Markdown" });
+  }
+
+  const enabled = param === "on" ? "true" : "false";
+  
+  try {
+    await prisma.systemConfig.upsert({
+      where: { key: 'GROK_ENABLED' },
+      update: { value: enabled },
+      create: { key: 'GROK_ENABLED', value: enabled }
+    });
+    ctx.reply(enabled === "true" 
+      ? "✅ **Grok AI Analysis is now ENABLED.** Bot will analyze sentiment for every new token." 
+      : "⏸️ **Grok AI Analysis is now DISABLED.** Bot will skip AI checks and auto-approve tokens to save API usage.", 
+      { parse_mode: "Markdown" });
+  } catch (e) {
+    ctx.reply("❌ Failed to update GROK_ENABLED config in database.");
+  }
+});
+
+bot.command("config", async (ctx) => {
+  try {
+    const configs = await prisma.systemConfig.findMany();
+    if (configs.length === 0) {
+      return ctx.reply("⚙️ **System Config**\n_No configurations found in database._", { parse_mode: "Markdown" });
+    }
+    
+    let msg = "⚙️ **System Configurations**\n\n";
+    for (const conf of configs) {
+      msg += `- **${conf.key}**: \`${conf.value}\`\n`;
+    }
+    
+    ctx.reply(msg, { parse_mode: "Markdown" });
+  } catch (e) {
+    ctx.reply("❌ Failed to fetch configurations from database.");
   }
 });
 

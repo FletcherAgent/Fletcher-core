@@ -1,5 +1,8 @@
 import * as dotenv from 'dotenv';
+import { PrismaClient } from '@prisma/client';
 dotenv.config();
+
+const prisma = new PrismaClient();
 
 const GROK_API_URL = 'https://api.x.ai/v1/chat/completions';
 
@@ -20,6 +23,16 @@ export class IntelligenceLayer {
    * Evaluates the social sentiment of a specific token using Grok.
    */
   static async analyzeSentiment(tokenSymbol: string, tokenAddress: string): Promise<SentimentResult> {
+    try {
+      const config = await prisma.systemConfig.findUnique({ where: { key: 'GROK_ENABLED' } });
+      if (config && config.value === 'false') {
+        console.log(`[IntelligenceLayer] GROK_ENABLED is false. Bypassing Grok analysis for ${tokenSymbol}.`);
+        return { score: 100, label: 'BULLISH', reasoning: 'Grok LLM is disabled by configuration. Auto-approving.' };
+      }
+    } catch(e) {
+      console.warn(`[IntelligenceLayer] Failed to read GROK_ENABLED from DB, defaulting to enabled.`);
+    }
+
     const prompt = `
 You are a crypto sentiment analysis engine. Analyze the current social sentiment and narrative around the token $${tokenSymbol} (Contract: ${tokenAddress}) on X (Twitter).
 Respond ONLY in the following strict JSON format, with no markdown formatting or extra text:
