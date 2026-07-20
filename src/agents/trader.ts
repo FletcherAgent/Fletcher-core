@@ -411,10 +411,13 @@ export class TraderAgent {
            if (otx && otx.to) targetRouter = otx.to;
          } catch(e) {}
       }
-      const { fee: POOL_FEE, expectedOut: rawExpectedOut } = await detectBestFee(
+      const bestFee = await detectBestFee(
         WETH_ADDRESS, tokenOut, amountIn, targetRouter
       );
-      let expectedOut = rawExpectedOut;
+      const POOL_FEE = bestFee.fee;
+      const POOL_TYPE: 'V2' | 'V3' | 'V4' = bestFee.type || 'V4';
+      const POOL_ROUTER = bestFee.routerAddress;
+      let expectedOut = bestFee.expectedOut;
 
       // 3. 2% Supply Cap
       if (totalSupply > 0n && expectedOut > 0n) {
@@ -433,60 +436,86 @@ export class TraderAgent {
       const amountOutMinimum = (expectedOut * 99n) / 100n;
       console.log(`[Trader] 🛡️ BUY amountOutMinimum: ${amountOutMinimum}`);
 
-      // 5. Encode Universal Router execute() payload for Uniswap V4
-      // Command 0x10 = V4_SWAP
-      const commands = '0x10' as `0x${string}`;
+      let calldata: string = '';
+      let finalToAddress = process.env.UNIVERSAL_ROUTER_ADDRESS!;
 
-      // In Universal Router, V4_SWAP input is abi.encode(IV4Router.ExactInputSingleParams)
-      // ExactInputSingleParams = (PoolKey key, bool zeroForOne, uint128 amountIn, uint128 amountOutMinimum, bytes hookData)
-      // PoolKey = (address currency0, address currency1, uint24 fee, int24 tickSpacing, address hooks)
-      
-      const isZeroForOne = BigInt(WETH_ADDRESS) < BigInt(tokenOut);
-      const currency0 = isZeroForOne ? WETH_ADDRESS : tokenOut;
-      const currency1 = isZeroForOne ? tokenOut : WETH_ADDRESS;
-      let tickSpacing = 60;
-      if (POOL_FEE === 500) tickSpacing = 10;
-      else if (POOL_FEE === 10000) tickSpacing = 200;
+      if (POOL_TYPE === 'V2' && POOL_ROUTER) {
+        const v2RouterAbi = parseAbi([
+          'function swapExactTokensForTokens(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) external returns (uint[] memory amounts)'
+        ]);
+        calldata = encodeFunctionData({
+          abi: v2RouterAbi,
+          functionName: 'swapExactTokensForTokens',
+          args: [amountIn, amountOutMinimum, [WETH_ADDRESS as `0x${string}`, tokenOut as `0x${string}`], account!.address, deadline]
+        });
+        finalToAddress = POOL_ROUTER;
+      } else if (POOL_TYPE === 'V3') {
+        const commands = '0x00' as `0x${string}`;
+        const feeHex = POOL_FEE.toString(16).padStart(6, '0');
+        const path = (WETH_ADDRESS + feeHex + tokenOut.replace('0x', '')) as `0x${string}`;
+        
+        const swapInput = encodeAbiParameters(
+          [{type: 'address'}, {type: 'uint256'}, {type: 'uint256'}, {type: 'bytes'}, {type: 'bool'}],
+          [account!.address, amountIn, amountOutMinimum, path, true]
+        );
+        
+        const universalRouterAbi = parseAbi([
+          'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
+        ]);
+        calldata = encodeFunctionData({
+          abi: universalRouterAbi,
+          functionName: 'execute',
+          args: [commands, [swapInput], deadline]
+        });
+      } else {
+        // V4_SWAP
+        const commands = '0x10' as `0x${string}`;
+        const isZeroForOne = BigInt(WETH_ADDRESS) < BigInt(tokenOut);
+        const currency0 = isZeroForOne ? WETH_ADDRESS : tokenOut;
+        const currency1 = isZeroForOne ? tokenOut : WETH_ADDRESS;
+        let tickSpacing = 60;
+        if (POOL_FEE === 500) tickSpacing = 10;
+        else if (POOL_FEE === 10000) tickSpacing = 200;
 
-      const exactInputSingleParamsAbi = [{
-        type: 'tuple',
-        components: [
-          { name: 'poolKey', type: 'tuple', components: [ { name: 'currency0', type: 'address' }, { name: 'currency1', type: 'address' }, { name: 'fee', type: 'uint24' }, { name: 'tickSpacing', type: 'int24' }, { name: 'hooks', type: 'address' } ] },
-          { name: 'zeroForOne', type: 'bool' },
-          { name: 'amountIn', type: 'uint128' },
-          { name: 'amountOutMinimum', type: 'uint128' },
-          { name: 'hookData', type: 'bytes' }
-        ]
-      }];
-      
-      const swapInput = encodeAbiParameters(exactInputSingleParamsAbi as any, [
-        {
-          poolKey: {
-            currency0: currency0 as `0x${string}`,
-            currency1: currency1 as `0x${string}`,
-            fee: POOL_FEE,
-            tickSpacing,
-            hooks: '0x0000000000000000000000000000000000000000' as `0x${string}`
-          },
-          zeroForOne: isZeroForOne,
-          amountIn,
-          amountOutMinimum,
-          hookData: '0x' as `0x${string}`
-        }
-      ]);
+        const exactInputSingleParamsAbi = [{
+          type: 'tuple',
+          components: [
+            { name: 'poolKey', type: 'tuple', components: [ { name: 'currency0', type: 'address' }, { name: 'currency1', type: 'address' }, { name: 'fee', type: 'uint24' }, { name: 'tickSpacing', type: 'int24' }, { name: 'hooks', type: 'address' } ] },
+            { name: 'zeroForOne', type: 'bool' },
+            { name: 'amountIn', type: 'uint128' },
+            { name: 'amountOutMinimum', type: 'uint128' },
+            { name: 'hookData', type: 'bytes' }
+          ]
+        }];
+        
+        const swapInput = encodeAbiParameters(exactInputSingleParamsAbi as any, [
+          {
+            poolKey: {
+              currency0: currency0 as `0x${string}`,
+              currency1: currency1 as `0x${string}`,
+              fee: POOL_FEE,
+              tickSpacing,
+              hooks: '0x0000000000000000000000000000000000000000' as `0x${string}`
+            },
+            zeroForOne: isZeroForOne,
+            amountIn,
+            amountOutMinimum,
+            hookData: '0x' as `0x${string}`
+          }
+        ]);
 
-      const universalRouterAbi = parseAbi([
-        'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
-      ]);
+        const universalRouterAbi = parseAbi([
+          'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
+        ]);
+        calldata = encodeFunctionData({
+          abi: universalRouterAbi,
+          functionName: 'execute',
+          args: [commands, [swapInput], deadline]
+        });
+      }
 
-      const calldata = encodeFunctionData({
-        abi: universalRouterAbi,
-        functionName: 'execute',
-        args: [commands, [swapInput], deadline]
-      });
-
-      console.log(`[Trader] ✅ BUY Calldata (Universal Router V4): ${calldata.substring(0, 66)}...`);
-      return { calldata, amountOutMinimum, expectedOut, toAddress: ROUTER_ADDRESS as `0x${string}`, value: amountIn };
+      console.log(`[Trader] ✅ BUY Calldata (Pool ${POOL_TYPE}): ${calldata.substring(0, 66)}...`);
+      return { calldata, amountOutMinimum, expectedOut, toAddress: finalToAddress as `0x${string}`, value: amountIn };
 
     } catch (error) {
       console.error('[Trader] Failed to build BUY calldata:', error);
@@ -588,10 +617,15 @@ export class TraderAgent {
          } catch(e) {}
       }
 
+      let POOL_TYPE: 'V2' | 'V3' | 'V4' = 'V4';
+      let POOL_ROUTER: string | undefined = undefined;
+
       try {
         const best = await detectBestFee(tokenIn, WETH_ADDRESS, amountIn, targetRouter);
         POOL_FEE = best.fee;
         expectedOut = best.expectedOut;
+        POOL_TYPE = best.type || 'V4';
+        POOL_ROUTER = best.routerAddress;
       } catch (e) {
         console.warn(`[Trader] Quoter failed for WETH. Trying Native... or falling back to default fee 10000.`);
         useNative = true;
@@ -603,58 +637,88 @@ export class TraderAgent {
       const amountOutMinimum = expectedOut > 1n ? (expectedOut * 99n) / 100n : 0n;
       console.log(`[Trader] 🛡️ SELL amountOutMinimum: ${amountOutMinimum}`);
 
-      // 3. Encode Universal Router execute() payload for Uniswap V4
-      // Command 0x10 = V4_SWAP
-      const commands = '0x10' as `0x${string}`;
+      let calldata: string = '';
+      let finalToAddress = ROUTER_ADDRESS!;
 
       const TARGET_OUT = useNative ? '0x0000000000000000000000000000000000000000' : WETH_ADDRESS;
       const isZeroForOne = BigInt(tokenIn) < BigInt(TARGET_OUT);
       const currency0 = isZeroForOne ? tokenIn : TARGET_OUT;
       const currency1 = isZeroForOne ? TARGET_OUT : tokenIn;
-      
-      let tickSpacing = 60;
-      if (POOL_FEE === 500) tickSpacing = 10;
-      else if (POOL_FEE === 10000) tickSpacing = 200;
 
-      const exactInputSingleParamsAbi = [{
-        type: 'tuple',
-        components: [
-          { name: 'poolKey', type: 'tuple', components: [ { name: 'currency0', type: 'address' }, { name: 'currency1', type: 'address' }, { name: 'fee', type: 'uint24' }, { name: 'tickSpacing', type: 'int24' }, { name: 'hooks', type: 'address' } ] },
-          { name: 'zeroForOne', type: 'bool' },
-          { name: 'amountIn', type: 'uint128' },
-          { name: 'amountOutMinimum', type: 'uint128' },
-          { name: 'hookData', type: 'bytes' }
-        ]
-      }];
-      
-      const swapInput = encodeAbiParameters(exactInputSingleParamsAbi as any, [
-        {
-          poolKey: {
-            currency0: currency0 as `0x${string}`,
-            currency1: currency1 as `0x${string}`,
-            fee: POOL_FEE,
-            tickSpacing,
-            hooks: '0x0000000000000000000000000000000000000000' as `0x${string}`
-          },
-          zeroForOne: isZeroForOne,
-          amountIn,
-          amountOutMinimum,
-          hookData: '0x' as `0x${string}`
-        }
-      ]);
+      if (POOL_TYPE === 'V2' && POOL_ROUTER) {
+        const v2RouterAbi = parseAbi([
+          'function swapExactTokensForTokens(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) external returns (uint[] memory amounts)'
+        ]);
+        calldata = encodeFunctionData({
+          abi: v2RouterAbi,
+          functionName: 'swapExactTokensForTokens',
+          args: [amountIn, amountOutMinimum, [tokenIn as `0x${string}`, TARGET_OUT as `0x${string}`], account!.address, deadline]
+        });
+        finalToAddress = POOL_ROUTER;
+      } else if (POOL_TYPE === 'V3') {
+        const commands = '0x00' as `0x${string}`;
+        const feeHex = POOL_FEE.toString(16).padStart(6, '0');
+        const path = (tokenIn.replace('0x', '') + feeHex + TARGET_OUT.replace('0x', '')) as `0x${string}`;
+        
+        const swapInput = encodeAbiParameters(
+          [{type: 'address'}, {type: 'uint256'}, {type: 'uint256'}, {type: 'bytes'}, {type: 'bool'}],
+          [account!.address, amountIn, amountOutMinimum, path, true]
+        );
+        
+        const universalRouterAbi = parseAbi([
+          'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
+        ]);
+        calldata = encodeFunctionData({
+          abi: universalRouterAbi,
+          functionName: 'execute',
+          args: [commands, [swapInput], deadline]
+        });
+      } else {
+        // V4_SWAP
+        const commands = '0x10' as `0x${string}`;
+        let tickSpacing = 60;
+        if (POOL_FEE === 500) tickSpacing = 10;
+        else if (POOL_FEE === 10000) tickSpacing = 200;
 
-      const universalRouterAbi = parseAbi([
-        'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
-      ]);
+        const exactInputSingleParamsAbi = [{
+          type: 'tuple',
+          components: [
+            { name: 'poolKey', type: 'tuple', components: [ { name: 'currency0', type: 'address' }, { name: 'currency1', type: 'address' }, { name: 'fee', type: 'uint24' }, { name: 'tickSpacing', type: 'int24' }, { name: 'hooks', type: 'address' } ] },
+            { name: 'zeroForOne', type: 'bool' },
+            { name: 'amountIn', type: 'uint128' },
+            { name: 'amountOutMinimum', type: 'uint128' },
+            { name: 'hookData', type: 'bytes' }
+          ]
+        }];
+        
+        const swapInput = encodeAbiParameters(exactInputSingleParamsAbi as any, [
+          {
+            poolKey: {
+              currency0: currency0 as `0x${string}`,
+              currency1: currency1 as `0x${string}`,
+              fee: POOL_FEE,
+              tickSpacing,
+              hooks: '0x0000000000000000000000000000000000000000' as `0x${string}`
+            },
+            zeroForOne: isZeroForOne,
+            amountIn,
+            amountOutMinimum,
+            hookData: '0x' as `0x${string}`
+          }
+        ]);
 
-      const calldata = encodeFunctionData({
-        abi: universalRouterAbi,
-        functionName: 'execute',
-        args: [commands, [swapInput], deadline]
-      });
+        const universalRouterAbi = parseAbi([
+          'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
+        ]);
+        calldata = encodeFunctionData({
+          abi: universalRouterAbi,
+          functionName: 'execute',
+          args: [commands, [swapInput], deadline]
+        });
+      }
 
-      console.log(`[Trader] ✅ SELL Calldata (Universal Router): ${calldata.substring(0, 66)}...`);
-      return { calldata, amountOutMinimum, expectedOut, toAddress: ROUTER_ADDRESS as `0x${string}` };
+      console.log(`[Trader] ✅ SELL Calldata (Pool ${POOL_TYPE}): ${calldata.substring(0, 66)}...`);
+      return { calldata, amountOutMinimum, expectedOut, toAddress: finalToAddress as `0x${string}` };
 
     } catch (error) {
       console.error('[Trader] Failed to build SELL calldata:', error);

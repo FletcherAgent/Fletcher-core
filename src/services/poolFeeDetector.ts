@@ -8,9 +8,11 @@ import { prisma } from '../core/db.js';
  */
 const FEE_TIERS = [500, 3000, 10000] as const;
 
-interface FeeDetectionResult {
+export interface FeeDetectionResult {
   fee: number;
   expectedOut: bigint;
+  type?: 'V2' | 'V3' | 'V4';
+  routerAddress?: string;
 }
 
 /**
@@ -46,7 +48,11 @@ export async function detectBestFee(
     console.warn('[PoolFeeDetector] ⚠️ QUOTER_ADDRESS not set in .env! V3 detection skipped.');
   }
 
-  const quoterAbi = [
+  const quoterV3Abi = parseAbi([
+    'function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external returns (uint256 amountOut)'
+  ]);
+
+  const quoterV4Abi = [
     {
       type: 'function',
       name: 'quoteExactInputSingle',
@@ -79,20 +85,33 @@ export async function detectBestFee(
   const currency0 = isZeroForOne ? tokenIn : tokenOut;
   const currency1 = isZeroForOne ? tokenOut : tokenIn;
 
-  let best: FeeDetectionResult = { fee: 3000, expectedOut: 0n };
+  let best: FeeDetectionResult = { fee: 3000, expectedOut: 0n, type: 'V3' };
 
   // Query all fee tiers across all quoters in parallel
-  const quoterPromises = [];
+  const v3Promises = [];
+  const v4Promises = [];
+
   for (const quoter of uniqueQuoters) {
     for (const fee of FEE_TIERS) {
       let tickSpacing = 60;
       if (fee === 500) tickSpacing = 10;
       else if (fee === 10000) tickSpacing = 200;
 
-      quoterPromises.push(
+      // Try V3 Quoter
+      v3Promises.push(
         publicClient.readContract({
           address: quoter as `0x${string}`,
-          abi: quoterAbi,
+          abi: quoterV3Abi,
+          functionName: 'quoteExactInputSingle',
+          args: [tokenIn as `0x${string}`, tokenOut as `0x${string}`, fee, amountIn, 0n]
+        }).then(out => ({ fee, expectedOut: out as bigint, type: 'V3' as const }))
+      );
+
+      // Try V4 Quoter
+      v4Promises.push(
+        publicClient.readContract({
+          address: quoter as `0x${string}`,
+          abi: quoterV4Abi,
           functionName: 'quoteExactInputSingle',
           args: [
             {
@@ -107,12 +126,14 @@ export async function detectBestFee(
             0n,
             '0x' as `0x${string}`
           ]
-        }).then(out => ({ fee, expectedOut: (out as [bigint, bigint])[0] }))
+        }).then(out => ({ fee, expectedOut: (out as [bigint, bigint])[0], type: 'V4' as const }))
       );
     }
   }
 
-  const results = await Promise.allSettled(quoterPromises);
+  const allPromises = [...v3Promises, ...v4Promises];
+  const results = await Promise.allSettled(allPromises);
+  
   for (const result of results) {
     if (result.status === 'fulfilled' && result.value.expectedOut > best.expectedOut) {
       best = result.value;
@@ -120,7 +141,7 @@ export async function detectBestFee(
   }
 
   if (best.expectedOut > 0n) {
-    console.log(`[PoolFeeDetector] ✅ Best V3/V4 pool: fee=${best.fee} → expectedOut=${best.expectedOut}`);
+    console.log(`[PoolFeeDetector] ✅ Best ${best.type} pool: fee=${best.fee} → expectedOut=${best.expectedOut}`);
     return best;
   }
 
@@ -147,7 +168,7 @@ export async function detectBestFee(
       
       if (amountsOut && amountsOut.length > 1 && amountsOut[1] > 0n) {
         if (amountsOut[1] > best.expectedOut) {
-          best = { fee: 3000, expectedOut: amountsOut[1] }; // V2 standard fee
+          best = { fee: 3000, expectedOut: amountsOut[1], type: 'V2', routerAddress: v2Router };
           console.log(`[PoolFeeDetector] ✅ Found V2 pool at ${v2Router} → expectedOut=${best.expectedOut}`);
           
           // Asynchronously save to DB if it's a dynamic target router
