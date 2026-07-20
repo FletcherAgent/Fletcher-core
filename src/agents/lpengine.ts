@@ -333,8 +333,8 @@ export class LPEngineAgent {
       const sentiment = await IntelligenceLayer.analyzeSentiment(candidate.token.symbol, candidate.token.address);
       console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
       
-      if (sentiment.label === 'BEARISH' || sentiment.score < 50) {
-        console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < 50`);
+      if (sentiment.label === 'BEARISH' || sentiment.score < 60) {
+        console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < 60`);
         continue;
       }
       
@@ -390,8 +390,8 @@ export class LPEngineAgent {
       const sentiment = await IntelligenceLayer.analyzeSentiment(candidate.token.symbol, candidate.token.address);
       console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
       
-      if (sentiment.label === 'BEARISH' || sentiment.score < 50) {
-        console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < 50`);
+      if (sentiment.label === 'BEARISH' || sentiment.score < 60) {
+        console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < 60`);
         continue;
       }
       
@@ -446,6 +446,7 @@ export class LPEngineAgent {
     const resolved = await this.resolvePool(token.address, this.wethAddress);
     if (!resolved) {
       console.warn(`[LPEngine] No V3 pool found for ${token.symbol}/WETH`);
+      if (this.onNotification) await this.onNotification(`⚠️ *Batal Open Posisi*\\nPool V3 untuk $${token.symbol}/WETH tidak ditemukan.`);
       return;
     }
     const { poolAddress, feeTier } = resolved;

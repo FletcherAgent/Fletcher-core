@@ -76,7 +76,15 @@ export async function getTrendingPairs(limit = 20): Promise<GMGNToken[]> {
       if (!gtRes.ok) break;
       const gtData = await gtRes.json();
       if (!gtData.data || gtData.data.length === 0) break;
-      allPools = allPools.concat(gtData.data);
+      
+      const wethAddr = process.env.WETH_ADDRESS?.toLowerCase() || '';
+      const validPools = gtData.data.filter((p: any) => {
+        const dex = p.relationships?.dex?.data?.id;
+        const quote = p.relationships?.quote_token?.data?.id;
+        return dex === 'uniswap-v3-robinhood' && quote === `robinhood_${wethAddr}`;
+      });
+      
+      allPools = allPools.concat(validPools);
       page++;
       await new Promise(r => setTimeout(r, 500));
     }
