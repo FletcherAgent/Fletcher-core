@@ -446,7 +446,7 @@ export class LPEngineAgent {
     const resolved = await this.resolvePool(token.address, this.wethAddress);
     if (!resolved) {
       console.warn(`[LPEngine] No V3 pool found for ${token.symbol}/WETH`);
-      if (this.onNotification) await this.onNotification(`⚠️ *Batal Open Posisi*\\nPool V3 untuk $${token.symbol}/WETH tidak ditemukan.`);
+      if (this.onNotification) await this.onNotification(`⚠️ *Open Position Canceled*\\nActive pool for $${token.symbol}/WETH not found.`);
       return;
     }
     const { poolAddress, feeTier } = resolved;
