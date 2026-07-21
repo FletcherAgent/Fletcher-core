@@ -556,6 +556,7 @@ export class LPEngineAgent {
         pool:        poolAddress,
         token0:      t0,
         token1:      t1,
+        managerAddress: npmAddress,
         token0Symbol: t0Symbol,
         token1Symbol: t1Symbol,
         feeTier,
@@ -638,12 +639,13 @@ export class LPEngineAgent {
    * Called by Guardian (LPCloseSignal) or user via /lp close <id>.
    */
   async proposeClosePosition(positionId: string, reason: string): Promise<void> {
-    const { npmAddress } = await this.getAddresses();
     const pos = await prisma.lPPosition.findUnique({ where: { id: positionId } });
     if (!pos || pos.status !== 'OPEN') {
       console.warn(`[LPEngine] proposeClosePosition: position ${positionId} not found or not OPEN`);
       return;
     }
+    const { npmAddress: defaultNpm } = await this.getAddresses();
+    const npmAddress = (pos.managerAddress as `0x${string}`) || defaultNpm;
 
     const tokenId  = BigInt(pos.tokenId);
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 10);
@@ -752,11 +754,12 @@ export class LPEngineAgent {
     const positions = await prisma.lPPosition.findMany({ where });
     const recipient = (process.env.USER_WALLET_ADDRESS ?? '') as Address;
     const tier = await getUserTier(recipient);
-    const { npmAddress } = await this.getAddresses();
+    const { npmAddress: defaultNpm } = await this.getAddresses();
 
     for (const pos of positions) {
       if (pos.tokenId.startsWith('PENDING')) continue;
 
+      const npmAddress = (pos.managerAddress as `0x${string}`) || defaultNpm;
       const tokenId  = BigInt(pos.tokenId);
       const calldata = this.buildCollectCalldata(tokenId, recipient);
 

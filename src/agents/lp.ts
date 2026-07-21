@@ -23,7 +23,11 @@ export class LpManagerAgent {
 
   constructor() {}
 
-  private async getNpmAddress(): Promise<`0x${string}`> {
+  private async getNpmAddress(tokenId?: string): Promise<`0x${string}`> {
+    if (tokenId) {
+      const pos = await prisma.lPPosition.findFirst({ where: { tokenId } });
+      if (pos && pos.managerAddress) return pos.managerAddress as `0x${string}`;
+    }
     const config = await getDexConfig('V3');
     return (config.positionManager || '') as `0x${string}`;
   }
@@ -208,7 +212,7 @@ export class LpManagerAgent {
         functionName: 'decreaseLiquidity',
         args: [{ tokenId: BigInt(tokenId), liquidity: 1000000000000000000n, amount0Min: 0n, amount1Min: 0n, deadline }]
       });
-      const npmAddress = await this.getNpmAddress();
+      const npmAddress = await this.getNpmAddress(tokenId);
       await walletClient.sendTransaction({ account, to: npmAddress, data: decreaseCalldata });
 
       // 2. Collect Fees
@@ -250,7 +254,7 @@ export class LpManagerAgent {
         functionName: 'collect',
         args: [{ tokenId: BigInt(tokenId), recipient: account.address, amount0Max: this.MAX_UINT256, amount1Max: this.MAX_UINT256 }]
       });
-      const npmAddress = await this.getNpmAddress();
+      const npmAddress = await this.getNpmAddress(tokenId);
       await walletClient.sendTransaction({ account, to: npmAddress, data: collectCalldata });
 
       // 2. Increase Liquidity using the collected fees

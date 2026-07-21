@@ -148,7 +148,7 @@ export async function getPoolSlot0(poolAddress: string): Promise<{
 /**
  * Read positions(tokenId) from NPM to get accrued fees.
  */
-export async function getNPMPosition(tokenId: bigint): Promise<{
+export async function getNPMPosition(tokenId: bigint, managerAddress?: string | null): Promise<{
   token0: string;
   token1: string;
   fee: number;
@@ -158,8 +158,11 @@ export async function getNPMPosition(tokenId: bigint): Promise<{
   tokensOwed0: bigint;
   tokensOwed1: bigint;
 }> {
-  const dexConfig = await getDexConfig('V3');
-  const NPM_ADDRESS = dexConfig.positionManager;
+  let NPM_ADDRESS = managerAddress;
+  if (!NPM_ADDRESS) {
+    const dexConfig = await getDexConfig('V3');
+    NPM_ADDRESS = dexConfig.positionManager;
+  }
   if (!NPM_ADDRESS) throw new Error('[lpMath] POSITION_MANAGER not set in DB config');
 
   const r = await publicClient.readContract({

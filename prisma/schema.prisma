@@ -111,6 +111,7 @@ model LPPosition {
   pool             String                     // Pool contract address
   token0           String                     // Token0 address
   token1           String                     // Token1 address
+  managerAddress   String?                    // The specific PositionManager used
   token0Symbol     String?
   token1Symbol     String?
   feeTier          Int                        // 500 | 3000 | 10000

@@ -1,7 +1,7 @@
 import { publicClient } from './viem.js';
 import { parseAbi } from 'viem';
 import { prisma } from '../core/db.js';
-import { getDexConfig } from '../core/dexConfig.js';
+import { getDexConfig, getAllDexConfigs } from '../core/dexConfig.js';
 
 /**
  * All Uniswap V3/V4 fee tiers to probe, sorted by most common first.
@@ -29,20 +29,21 @@ export async function detectBestFee(
   amountIn: bigint,
   targetRouter?: string | null
 ): Promise<FeeDetectionResult> {
-  let V3_QUOTER: string | null = null;
-  let V4_QUOTER: string | null = null;
+  let uniqueV3Quoters: string[] = [];
+  let uniqueV4Quoters: string[] = [];
 
   try {
-    const v3Config = await getDexConfig('V3');
-    const v4Config = await getDexConfig('V4');
-    V3_QUOTER = v3Config.quoterAddress || null;
-    V4_QUOTER = v4Config.quoterAddress || null;
+    const v3Configs = await getAllDexConfigs('V3');
+    const v4Configs = await getAllDexConfigs('V4');
+    uniqueV3Quoters = v3Configs.map(c => c.quoterAddress).filter(Boolean) as string[];
+    uniqueV4Quoters = v4Configs.map(c => c.quoterAddress).filter(Boolean) as string[];
   } catch(e) {
     console.warn(`[PoolFeeDetector] Failed to load dynamic routers from DB`, e);
   }
 
-  const uniqueV3Quoters = V3_QUOTER ? [V3_QUOTER] : [];
-  const uniqueV4Quoters = V4_QUOTER ? [V4_QUOTER] : [];
+  // Remove duplicates
+  uniqueV3Quoters = Array.from(new Set(uniqueV3Quoters));
+  uniqueV4Quoters = Array.from(new Set(uniqueV4Quoters));
 
   if (uniqueV3Quoters.length === 0) {
     console.warn('[PoolFeeDetector] ⚠️ V3 QUOTER not configured! V3 detection skipped.');
@@ -199,12 +200,12 @@ export async function detectBestFee(
   // V2 Fallback
   console.log(`[PoolFeeDetector] ⚠️ V4/V3 Quoters failed. Trying V2 Routers...`);
   
-  let v2RouterConfig = null;
+  let v2Configs: any[] = [];
   try {
-    v2RouterConfig = await getDexConfig('V2');
+    v2Configs = await getAllDexConfigs('V2');
   } catch(e) {}
   
-  const V2_ROUTERS = v2RouterConfig?.routerAddress ? [v2RouterConfig.routerAddress] : [];
+  const V2_ROUTERS = v2Configs.map(c => c.routerAddress).filter(Boolean) as string[];
   if (targetRouter && !V2_ROUTERS.includes(targetRouter)) {
     V2_ROUTERS.unshift(targetRouter); // Try target router first
   }

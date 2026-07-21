@@ -77,7 +77,7 @@ export class GuardianAgent {
 
     try {
       // 1. Fetch live data
-      const npmPos = await getNPMPosition(BigInt(pos.tokenId));
+      const npmPos = await getNPMPosition(BigInt(pos.tokenId), pos.managerAddress);
       const config = await prisma.systemConfig.findUnique({ where: { key: 'lp.ilHourThreshold' } });
       const maxIlHours = parseInt(config?.value ?? '4');
       const capConfig = await prisma.systemConfig.findUnique({ where: { key: 'lp.positionCap' } });
