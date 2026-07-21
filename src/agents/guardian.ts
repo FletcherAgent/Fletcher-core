@@ -70,7 +70,7 @@ export class GuardianAgent {
       } catch (e) {
         console.error(`[Guardian] LP monitor loop error:`, e);
       }
-    }, 60 * 60 * 1000); // 1 hour
+    }, 60 * 1000); // 1 minute (for responsive dashboard PnL updates)
   }
 
   private async evaluateLPPosition(pos: LPPosition): Promise<void> {
