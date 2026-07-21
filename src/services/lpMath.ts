@@ -8,6 +8,7 @@
 
 import { publicClient } from './viem.js';
 import { parseAbi } from 'viem';
+import { getDexConfig } from '../core/dexConfig.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -157,8 +158,9 @@ export async function getNPMPosition(tokenId: bigint): Promise<{
   tokensOwed0: bigint;
   tokensOwed1: bigint;
 }> {
-  const NPM_ADDRESS = process.env.V3_NONFUNGIBLE_POSITION_MANAGER || process.env.POSITION_MANAGER;
-  if (!NPM_ADDRESS) throw new Error('[lpMath] POSITION_MANAGER not set in .env');
+  const dexConfig = await getDexConfig('V3');
+  const NPM_ADDRESS = dexConfig.positionManager;
+  if (!NPM_ADDRESS) throw new Error('[lpMath] POSITION_MANAGER not set in DB config');
 
   const r = await publicClient.readContract({
     address: NPM_ADDRESS as `0x${string}`,

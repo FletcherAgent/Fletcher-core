@@ -1,6 +1,7 @@
 import { encodeFunctionData, parseAbi, decodeEventLog } from 'viem';
 import { publicClient, walletClient, account } from '../services/viem.js';
 import { prisma } from '../core/db.js';
+import { getDexConfig } from '../core/dexConfig.js';
 
 const erc20Abi = parseAbi([
   'function approve(address spender, uint256 amount) external returns (bool)'
@@ -18,10 +19,14 @@ const npmAbi = parseAbi([
 ]);
 
 export class LpManagerAgent {
-  private readonly NPM_ADDRESS = process.env.V3_NONFUNGIBLE_POSITION_MANAGER || process.env.POSITION_MANAGER || process.env.NPM_ADDRESS!;
   private readonly MAX_UINT256 = 115792089237316195423570985008687907853269984665640564039457584007913129639935n;
 
   constructor() {}
+
+  private async getNpmAddress(): Promise<`0x${string}`> {
+    const config = await getDexConfig('V3');
+    return (config.positionManager || '') as `0x${string}`;
+  }
 
   /**
    * Approves the NPM to spend tokens.
@@ -30,10 +35,11 @@ export class LpManagerAgent {
     if (!walletClient || !account) return;
     try {
       console.log(`[LP Manager] 🔑 Auto-Approving ${tokenAddress} for NPM...`);
+      const npmAddress = await this.getNpmAddress();
       const calldata = encodeFunctionData({
         abi: erc20Abi,
         functionName: 'approve',
-        args: [this.NPM_ADDRESS as `0x${string}`, this.MAX_UINT256]
+        args: [npmAddress, this.MAX_UINT256]
       });
 
       const txHash = await walletClient.sendTransaction({
@@ -97,7 +103,7 @@ export class LpManagerAgent {
 
       const txHash = await walletClient.sendTransaction({
         account,
-        to: this.NPM_ADDRESS as `0x${string}`,
+        to: await this.getNpmAddress(),
         data: calldata
       });
 
@@ -202,7 +208,8 @@ export class LpManagerAgent {
         functionName: 'decreaseLiquidity',
         args: [{ tokenId: BigInt(tokenId), liquidity: 1000000000000000000n, amount0Min: 0n, amount1Min: 0n, deadline }]
       });
-      await walletClient.sendTransaction({ account, to: this.NPM_ADDRESS as `0x${string}`, data: decreaseCalldata });
+      const npmAddress = await this.getNpmAddress();
+      await walletClient.sendTransaction({ account, to: npmAddress, data: decreaseCalldata });
 
       // 2. Collect Fees
       console.log(`[LP Manager] Collecting assets and fees...`);
@@ -211,7 +218,7 @@ export class LpManagerAgent {
         functionName: 'collect',
         args: [{ tokenId: BigInt(tokenId), recipient: account.address, amount0Max: this.MAX_UINT256, amount1Max: this.MAX_UINT256 }]
       });
-      await walletClient.sendTransaction({ account, to: this.NPM_ADDRESS as `0x${string}`, data: collectCalldata });
+      await walletClient.sendTransaction({ account, to: npmAddress, data: collectCalldata });
 
       // 3. Mark old position as closed in DB
       await prisma.position.updateMany({
@@ -243,7 +250,8 @@ export class LpManagerAgent {
         functionName: 'collect',
         args: [{ tokenId: BigInt(tokenId), recipient: account.address, amount0Max: this.MAX_UINT256, amount1Max: this.MAX_UINT256 }]
       });
-      await walletClient.sendTransaction({ account, to: this.NPM_ADDRESS as `0x${string}`, data: collectCalldata });
+      const npmAddress = await this.getNpmAddress();
+      await walletClient.sendTransaction({ account, to: npmAddress, data: collectCalldata });
 
       // 2. Increase Liquidity using the collected fees
       console.log(`[LP Manager] Increasing liquidity with collected fees...`);
@@ -252,7 +260,8 @@ export class LpManagerAgent {
         functionName: 'increaseLiquidity',
         args: [{ tokenId: BigInt(tokenId), amount0Desired: 10000n, amount1Desired: 10000n, amount0Min: 0n, amount1Min: 0n, deadline }]
       });
-      await walletClient.sendTransaction({ account, to: this.NPM_ADDRESS as `0x${string}`, data: increaseCalldata });
+      
+      await walletClient.sendTransaction({ account, to: npmAddress, data: increaseCalldata });
 
       console.log(`[LP Manager] ✅ Auto-compound executed successfully.`);
     } catch (e) {

@@ -84,12 +84,22 @@ model WalletPosition {
   updatedAt       DateTime @updatedAt
 }
 
-model DexRouter {
-  id        String   @id @default(uuid())
-  address   String   @unique
-  type      String   @default("V2") // "V2" atau "V3"
-  verified  Boolean  @default(false)
-  createdAt DateTime @default(now())
+model DexProtocol {
+  id                 String   @id @default(uuid())
+  name               String   // Contoh: "Uniswap V4", "PancakeSwap V3"
+  version            String   // "V2", "V3", atau "V4"
+  
+  // Kontrak Ekosistem
+  routerAddress      String?  // Universal Router / SwapRouter
+  factoryAddress     String?  // Untuk mengecek pair/pool baru
+  quoterAddress      String?  // Untuk cek harga / estimasi (V3/V4)
+  positionManager    String?  // Untuk manajemen LP (V3/V4)
+  poolManager        String?  // Khusus V4
+  stateView          String?  // Khusus V4
+  
+  verified           Boolean  @default(false)
+  isDefault          Boolean  @default(false) // Menandakan ini protokol utama
+  createdAt          DateTime @default(now())
 }
 
 // ─── LP Engine v2.0 ──────────────────────────────────────────────────────────

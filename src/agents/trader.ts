@@ -4,6 +4,7 @@ import { dbLogger } from '../services/logger.js';
 import { Bot, InlineKeyboard } from 'grammy';
 import { prisma } from '../core/db.js';
 import { publicClient, walletClient, account } from '../services/viem.js';
+import { getDexConfig } from '../core/dexConfig.js';
 
 export class TraderAgent {
   private bot: Bot;
@@ -309,12 +310,10 @@ export class TraderAgent {
     console.log(`[Trader] Constructing BUY calldata for WETH -> ${tokenOut}...`);
 
     const WETH_ADDRESS = process.env.WETH_ADDRESS;
-    const QUOTER_ADDRESS = process.env.V4_QUOTER || process.env.V3_QUOTER || process.env.QUOTER_ADDRESS;
-    const ROUTER_ADDRESS = process.env.UNIVERSAL_ROUTER || process.env.UNIVERSAL_ROUTER_ADDRESS || process.env.ROUTER_ADDRESS;
     const USER_WALLET = process.env.USER_WALLET_ADDRESS;
 
-    if (!WETH_ADDRESS || !QUOTER_ADDRESS || !ROUTER_ADDRESS || !USER_WALLET) {
-      throw new Error('❌ CRITICAL: WETH_ADDRESS, QUOTER_ADDRESS (or V3/V4), ROUTER_ADDRESS, or USER_WALLET_ADDRESS missing in .env');
+    if (!WETH_ADDRESS || !USER_WALLET) {
+      throw new Error('❌ CRITICAL: WETH_ADDRESS or USER_WALLET_ADDRESS missing in .env');
     }
 
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 5); // 5 mins
@@ -450,7 +449,8 @@ export class TraderAgent {
       console.log(`[Trader] 🛡️ BUY amountOutMinimum: ${amountOutMinimum}`);
 
       let calldata: string = '';
-      let finalToAddress = process.env.UNIVERSAL_ROUTER || process.env.UNIVERSAL_ROUTER_ADDRESS!;
+      const dexConfig = await getDexConfig('V3'); // Universal Router used for all
+      let finalToAddress = dexConfig.routerAddress;
 
       if (POOL_TYPE === 'V2' && POOL_ROUTER) {
         const v2RouterAbi = parseAbi([
@@ -544,12 +544,10 @@ export class TraderAgent {
     console.log(`[Trader] Constructing Universal Router SELL calldata for ${tokenIn} -> WETH...`);
 
     const WETH_ADDRESS = process.env.WETH_ADDRESS;
-    const QUOTER_ADDRESS = process.env.QUOTER_ADDRESS;
-    const ROUTER_ADDRESS = process.env.UNIVERSAL_ROUTER || process.env.UNIVERSAL_ROUTER_ADDRESS || process.env.ROUTER_ADDRESS;
     const USER_WALLET = process.env.USER_WALLET_ADDRESS;
 
-    if (!WETH_ADDRESS || !QUOTER_ADDRESS || !ROUTER_ADDRESS || !USER_WALLET) {
-      throw new Error('❌ CRITICAL: Missing env variables for SELL tx construction.');
+    if (!WETH_ADDRESS || !USER_WALLET) {
+      throw new Error('❌ CRITICAL: WETH_ADDRESS or USER_WALLET_ADDRESS missing in .env');
     }
 
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 5);
@@ -651,7 +649,8 @@ export class TraderAgent {
       console.log(`[Trader] 🛡️ SELL amountOutMinimum: ${amountOutMinimum}`);
 
       let calldata: string = '';
-      let finalToAddress = ROUTER_ADDRESS!;
+      const v3Config = await getDexConfig('V3');
+      let finalToAddress = v3Config.routerAddress!;
 
       const TARGET_OUT = useNative ? '0x0000000000000000000000000000000000000000' : WETH_ADDRESS;
       const isZeroForOne = BigInt(tokenIn) < BigInt(TARGET_OUT);

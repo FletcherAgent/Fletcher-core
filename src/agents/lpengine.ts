@@ -23,6 +23,7 @@ import { getSessionKeyClient, buildAndSendLPUserOperation, type UserOpCall } fro
 import { getUserTier, getTierLimits } from '../services/tierGate.js';
 import { prisma } from '../core/db.js';
 import { logEvent } from '../utils/logger.js';
+import { getDexConfig } from '../core/dexConfig.js';
 import { IntelligenceLayer } from '../services/intelligence.js';
 import {
   screenPairs,
@@ -126,22 +127,24 @@ async function loadLPConfig(): Promise<LPConfig> {
 // ─── LP Engine Agent ──────────────────────────────────────────────────────────
 
 export class LPEngineAgent {
-  private readonly npmAddress: Address;
-  private readonly factoryAddress: Address;
-  private readonly wethAddress: Address;
 
   /** Callback -> Orchestrator: send proposal to approval flow */
   public onProposal?: (proposal: LPProposal) => Promise<void>;
   public onNotification?: (message: string) => Promise<void>;
 
-  constructor() {
-    this.npmAddress     = ((process.env.V3_NONFUNGIBLE_POSITION_MANAGER || process.env.POSITION_MANAGER) ?? '') as Address;
-    this.factoryAddress = (process.env.UNISWAP_V3_FACTORY_ADDRESS ?? '') as Address;
-    this.wethAddress    = (process.env.WETH_ADDRESS    ?? '') as Address;
+  constructor() {}
 
-    if (!this.npmAddress)     console.warn('[LPEngine] ⚠️ POSITION_MANAGER not set');
-    if (!this.factoryAddress) console.warn('[LPEngine] ⚠️ UNISWAP_V3_FACTORY_ADDRESS not set');
-    if (!this.wethAddress)    console.warn('[LPEngine] ⚠️ WETH_ADDRESS not set');
+  private async getAddresses() {
+    const dexConfig = await getDexConfig('V3');
+    const npmAddress = (dexConfig.positionManager || '') as Address;
+    const factoryAddress = (dexConfig.factoryAddress || '') as Address;
+    const wethAddress = (process.env.WETH_ADDRESS || '') as Address;
+
+    if (!npmAddress)     console.warn('[LPEngine] ⚠️ POSITION_MANAGER not set');
+    if (!factoryAddress) console.warn('[LPEngine] ⚠️ UNISWAP_V3_FACTORY_ADDRESS not set');
+    if (!wethAddress)    console.warn('[LPEngine] ⚠️ WETH_ADDRESS not set');
+
+    return { npmAddress, factoryAddress, wethAddress };
   }
 
   // ─── Position Cap Check ─────────────────────────────────────────────────────
@@ -169,6 +172,7 @@ export class LPEngineAgent {
     token1: string,
     preferredFee = 3000
   ): Promise<{ poolAddress: string; feeTier: number } | null> {
+    const { factoryAddress } = await this.getAddresses();
     const feesToTry = [preferredFee, 500, 3000, 10000].filter(
       (v, i, arr) => arr.indexOf(v) === i
     );
@@ -176,7 +180,7 @@ export class LPEngineAgent {
     for (const fee of feesToTry) {
       try {
         const poolAddr = await publicClient.readContract({
-          address: this.factoryAddress,
+          address: factoryAddress,
           abi: FACTORY_ABI,
           functionName: 'getPool',
           args: [token0 as Address, token1 as Address, fee],
@@ -439,11 +443,12 @@ export class LPEngineAgent {
     const token     = candidate.token;
     const modeCfg   = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
     const isDryRun  = (modeCfg?.value || 'LIVE') === 'DRY_RUN';
+    const { npmAddress, wethAddress } = await this.getAddresses();
 
     console.log(`[LPEngine] 📋 Proposing position: ${token.symbol} | dayMode=${options.dayMode} | dryRun=${isDryRun}`);
 
     // Resolve pool address via factory
-    const resolved = await this.resolvePool(token.address, this.wethAddress);
+    const resolved = await this.resolvePool(token.address, wethAddress);
     if (!resolved) {
       console.warn(`[LPEngine] No V3 pool found for ${token.symbol}/WETH`);
       if (this.onNotification) await this.onNotification(`⚠️ *Open Position Canceled*\\nActive pool for $${token.symbol}/WETH not found.`);
@@ -454,13 +459,13 @@ export class LPEngineAgent {
     // Get token meta
     const [tokenMeta, wethMeta] = await Promise.all([
       this.getTokenMeta(token.address),
-      this.getTokenMeta(this.wethAddress),
+      this.getTokenMeta(wethAddress),
     ]);
 
     // Ensure token0 < token1 (Uniswap V3 requirement)
-    const isToken0 = BigInt(token.address) < BigInt(this.wethAddress);
-    const t0 = isToken0 ? token.address : this.wethAddress;
-    const t1 = isToken0 ? this.wethAddress : token.address;
+    const isToken0 = BigInt(token.address) < BigInt(wethAddress);
+    const t0 = isToken0 ? token.address : wethAddress;
+    const t1 = isToken0 ? wethAddress : token.address;
     const t0Symbol = isToken0 ? tokenMeta.symbol : wethMeta.symbol;
     const t1Symbol = isToken0 ? wethMeta.symbol  : tokenMeta.symbol;
     const t0Dec = isToken0 ? tokenMeta.decimals : wethMeta.decimals;
@@ -582,7 +587,7 @@ export class LPEngineAgent {
       tickUpper,
       entryValueUsd: config.startSize,
       calldata,
-      to: this.npmAddress,
+      to: npmAddress,
       dayMode: options.dayMode,
       nightMode: options.nightMode,
       mode: 'MANUAL',
@@ -595,7 +600,7 @@ export class LPEngineAgent {
         const tier = await getUserTier(recipient);
         const client = await getSessionKeyClient('FULL', tier);
         const calls: UserOpCall[] = [{
-          target: this.npmAddress,
+          target: npmAddress,
           data: calldata
         }];
 
@@ -626,8 +631,6 @@ export class LPEngineAgent {
     }
   }
 
-
-
   // ─── Close Position ─────────────────────────────────────────────────────────
 
   /**
@@ -635,6 +638,7 @@ export class LPEngineAgent {
    * Called by Guardian (LPCloseSignal) or user via /lp close <id>.
    */
   async proposeClosePosition(positionId: string, reason: string): Promise<void> {
+    const { npmAddress } = await this.getAddresses();
     const pos = await prisma.lPPosition.findUnique({ where: { id: positionId } });
     if (!pos || pos.status !== 'OPEN') {
       console.warn(`[LPEngine] proposeClosePosition: position ${positionId} not found or not OPEN`);
@@ -649,7 +653,7 @@ export class LPEngineAgent {
     let liquidity = 0n;
     try {
       const data = await publicClient.readContract({
-        address: this.npmAddress,
+        address: npmAddress,
         abi: NPM_ABI,
         functionName: 'positions',
         args: [tokenId],
@@ -690,7 +694,7 @@ export class LPEngineAgent {
       tickUpper: pos.tickUpper,
       entryValueUsd: pos.entryValue,
       calldata: decreaseCalldata,
-      to: this.npmAddress,
+      to: npmAddress,
       dayMode: pos.dayMode,
       nightMode: pos.nightMode,
       mode: pos.mode as 'MANUAL' | 'SEMI' | 'FULL',
@@ -706,8 +710,8 @@ export class LPEngineAgent {
         
         // Batch: Decrease + Collect
         const calls: UserOpCall[] = [
-          { target: this.npmAddress, data: decreaseCalldata },
-          { target: this.npmAddress, data: collectCalldata }
+          { target: npmAddress, data: decreaseCalldata },
+          { target: npmAddress, data: collectCalldata }
         ];
 
         const txHash = await buildAndSendLPUserOperation(client, calls);
@@ -748,6 +752,7 @@ export class LPEngineAgent {
     const positions = await prisma.lPPosition.findMany({ where });
     const recipient = (process.env.USER_WALLET_ADDRESS ?? '') as Address;
     const tier = await getUserTier(recipient);
+    const { npmAddress } = await this.getAddresses();
 
     for (const pos of positions) {
       if (pos.tokenId.startsWith('PENDING')) continue;
@@ -768,7 +773,7 @@ export class LPEngineAgent {
         tickUpper: pos.tickUpper,
         entryValueUsd: pos.entryValue,
         calldata,
-        to: this.npmAddress,
+        to: npmAddress,
         dayMode: pos.dayMode,
         nightMode: pos.nightMode,
         mode: pos.mode as 'MANUAL' | 'SEMI' | 'FULL',
@@ -786,7 +791,7 @@ export class LPEngineAgent {
         try {
           const client = await getSessionKeyClient(pos.mode as 'SEMI' | 'FULL', tier);
           const calls: UserOpCall[] = [
-            { target: this.npmAddress, data: calldata }
+            { target: npmAddress, data: calldata }
           ];
 
           const txHash = await buildAndSendLPUserOperation(client, calls);

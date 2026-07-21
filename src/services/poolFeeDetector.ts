@@ -1,6 +1,7 @@
 import { publicClient } from './viem.js';
 import { parseAbi } from 'viem';
 import { prisma } from '../core/db.js';
+import { getDexConfig } from '../core/dexConfig.js';
 
 /**
  * All Uniswap V3/V4 fee tiers to probe, sorted by most common first.
@@ -28,30 +29,26 @@ export async function detectBestFee(
   amountIn: bigint,
   targetRouter?: string | null
 ): Promise<FeeDetectionResult> {
-  let dbQuoters: string[] = [];
-  let dbV2Routers: string[] = [];
+  let V3_QUOTER: string | null = null;
+  let V4_QUOTER: string | null = null;
+
   try {
-    const activeRouters = await prisma.dexRouter.findMany({ where: { verified: true } });
-    for (const r of activeRouters) {
-      if (r.type === 'V3') dbQuoters.push(r.address);
-      else dbV2Routers.push(r.address);
-    }
+    const v3Config = await getDexConfig('V3');
+    const v4Config = await getDexConfig('V4');
+    V3_QUOTER = v3Config.quoterAddress || null;
+    V4_QUOTER = v4Config.quoterAddress || null;
   } catch(e) {
     console.warn(`[PoolFeeDetector] Failed to load dynamic routers from DB`, e);
   }
 
-  const V3_QUOTERS_ENV = process.env.V3_QUOTER ? process.env.V3_QUOTER.split(',').map(s => s.trim()).filter(Boolean) : [];
-  const V4_QUOTERS_ENV = process.env.V4_QUOTER ? process.env.V4_QUOTER.split(',').map(s => s.trim()).filter(Boolean) : [];
-  const LEGACY_QUOTERS_ENV = process.env.QUOTER_ADDRESS ? process.env.QUOTER_ADDRESS.split(',').map(s => s.trim()).filter(Boolean) : [];
-
-  const uniqueV3Quoters = Array.from(new Set([...V3_QUOTERS_ENV, ...LEGACY_QUOTERS_ENV, ...dbQuoters]));
-  const uniqueV4Quoters = Array.from(new Set([...V4_QUOTERS_ENV, ...LEGACY_QUOTERS_ENV, ...dbQuoters])); // Allow fallback for legacy config
+  const uniqueV3Quoters = V3_QUOTER ? [V3_QUOTER] : [];
+  const uniqueV4Quoters = V4_QUOTER ? [V4_QUOTER] : [];
 
   if (uniqueV3Quoters.length === 0) {
-    console.warn('[PoolFeeDetector] ⚠️ V3_QUOTER not set in .env! V3 detection skipped.');
+    console.warn('[PoolFeeDetector] ⚠️ V3 QUOTER not configured! V3 detection skipped.');
   }
   if (uniqueV4Quoters.length === 0) {
-    console.warn('[PoolFeeDetector] ⚠️ V4_QUOTER not set in .env! V4 detection skipped.');
+    console.warn('[PoolFeeDetector] ⚠️ V4 QUOTER not configured! V4 detection skipped.');
   }
 
   const quoterV3Abi = parseAbi([
@@ -201,7 +198,13 @@ export async function detectBestFee(
 
   // V2 Fallback
   console.log(`[PoolFeeDetector] ⚠️ V4/V3 Quoters failed. Trying V2 Routers...`);
-  const V2_ROUTERS = [...dbV2Routers];
+  
+  let v2RouterConfig = null;
+  try {
+    v2RouterConfig = await getDexConfig('V2');
+  } catch(e) {}
+  
+  const V2_ROUTERS = v2RouterConfig?.routerAddress ? [v2RouterConfig.routerAddress] : [];
   if (targetRouter && !V2_ROUTERS.includes(targetRouter)) {
     V2_ROUTERS.unshift(targetRouter); // Try target router first
   }
@@ -227,11 +230,15 @@ export async function detectBestFee(
           
           // Asynchronously save to DB if it's a dynamic target router
           if (v2Router === targetRouter) {
-            prisma.dexRouter.upsert({
-              where: { address: v2Router },
-              update: { verified: true },
-              create: { address: v2Router, type: 'V2', verified: true }
-            }).then(() => console.log(`[PoolFeeDetector] 💾 Saved new verified V2 Router to DB: ${v2Router}`))
+            prisma.dexProtocol.findFirst({ where: { routerAddress: v2Router } })
+              .then((existing: any) => {
+                if (!existing) {
+                  return prisma.dexProtocol.create({
+                    data: { name: 'Auto-Detected V2', version: 'V2', routerAddress: v2Router, verified: true }
+                  });
+                }
+              })
+              .then(() => console.log(`[PoolFeeDetector] 💾 Saved new verified V2 Router to DB: ${v2Router}`))
               .catch((err: any) => console.warn(`[PoolFeeDetector] Failed to save router to DB`, err));
           }
 
