@@ -509,6 +509,7 @@ export class LPEngineAgent {
     // Tick range
     let tickLower: number;
     let tickUpper: number;
+    const { currentTick: entryTick } = await getPoolSlot0(poolAddress);
 
     if (options.dayMode) {
       const ticks = fullRangeTicks(feeTier);
@@ -516,9 +517,8 @@ export class LPEngineAgent {
       tickUpper = ticks.tickUpper;
     } else {
       // NIGHT mode: get current tick from pool
-      const { currentTick } = await getPoolSlot0(poolAddress);
       const ticks = calcNightTickRange(
-        currentTick,
+        entryTick,
         options.nightRange ?? 0.25,
         feeTier
       );
