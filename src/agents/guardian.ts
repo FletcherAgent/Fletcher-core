@@ -88,7 +88,23 @@ export class GuardianAgent {
       const positionCap = parseFloat(capConfig?.value ?? '2000');
 
       // (Simulate token price from Uniswap V3 current tick)
-      const rangeStatus = await checkPositionRange(pos.pool, pos.tickLower, pos.tickUpper);
+      let rangeStatus: any;
+      try {
+        rangeStatus = await checkPositionRange(pos.pool, pos.tickLower, pos.tickUpper);
+      } catch (err) {
+        if (pos.tradingMode === 'DRY_RUN') {
+          // Fallback gracefully for simulated V2/unsupported pools
+          rangeStatus = { 
+            inRange: true, 
+            currentTick: pos.entryTick || 0, 
+            tickLower: pos.tickLower, 
+            tickUpper: pos.tickUpper, 
+            distanceToBoundaryPct: 50 
+          };
+        } else {
+          throw err;
+        }
+      }
       const currentPrice = tickToPrice(rangeStatus.currentTick);
 
       // 2. Calc IL
