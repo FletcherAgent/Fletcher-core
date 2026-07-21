@@ -565,10 +565,10 @@ export class LPEngineAgent {
     const defaultModeRecord = await prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } });
     const currentMode = (defaultModeRecord?.value as 'MANUAL' | 'SEMI' | 'FULL') || 'MANUAL';
 
-    // Save PENDING record to DB (will be updated with tokenId after approve + tx receipt)
+    // Save PENDING record to DB (or OPEN if DRY RUN simulation)
     const dbRecord = await prisma.lPPosition.create({
       data: {
-        tokenId:     `PENDING-${Date.now()}`, // placeholder, updated after tx
+        tokenId:     isDryRun ? `SIM-${Date.now()}` : `PENDING-${Date.now()}`,
         pool:        poolAddress,
         token0:      t0,
         token1:      t1,
@@ -580,7 +580,7 @@ export class LPEngineAgent {
         tickUpper,
         entryValue:  config.startSize,
         mode:        currentMode,
-        status:      'PENDING',
+        status:      isDryRun ? 'OPEN' : 'PENDING',
         dayMode:     options.dayMode,
         nightMode:   options.nightMode,
         source:      options.source ?? 'SYSTEM',
@@ -611,7 +611,12 @@ export class LPEngineAgent {
       description,
     };
 
-    if (currentMode === 'FULL' && !isDryRun) {
+    if (currentMode === 'FULL') {
+      if (isDryRun) {
+        proposal.description = `✅ *Auto-Opened LP (Simulated)*\n` + proposal.description;
+        if (this.onProposal) await this.onProposal(proposal);
+        return;
+      }
       console.log(`[LPEngine] Mode FULL — Executing automatically via Alchemy Session Key`);
       try {
         const tier = await getUserTier(recipient);
@@ -664,22 +669,27 @@ export class LPEngineAgent {
     const { npmAddress: defaultNpm } = await this.getAddresses();
     const npmAddress = (pos.managerAddress as `0x${string}`) || defaultNpm;
 
-    const tokenId  = BigInt(pos.tokenId);
+    const isSim = pos.tokenId.startsWith('SIM-') || pos.tradingMode === 'DRY_RUN';
+    const tokenId = isSim ? 0n : BigInt(pos.tokenId);
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 10);
     const recipient = (process.env.USER_WALLET_ADDRESS ?? '') as Address;
 
-    // Read current liquidity from NPM
+    // Read current liquidity from NPM (skip if simulated)
     let liquidity = 0n;
-    try {
-      const data = await publicClient.readContract({
-        address: npmAddress,
-        abi: NPM_ABI,
-        functionName: 'positions',
-        args: [tokenId],
-      }) as unknown as any[];
-      liquidity = data[7] as bigint;
-    } catch (e) {
-      console.error('[LPEngine] Failed to read position liquidity:', e);
+    if (!isSim) {
+      try {
+        const data = await publicClient.readContract({
+          address: npmAddress,
+          abi: NPM_ABI,
+          functionName: 'positions',
+          args: [tokenId],
+        }) as unknown as any[];
+        liquidity = data[7] as bigint;
+      } catch (e: any) {
+        console.error(`[LPEngine] NPM positions() failed: ${e.message}`);
+      }
+    } else {
+      liquidity = 1000000000n; // Dummy liquidity for simulation proposal
     }
 
     // Decrease 100% liquidity
@@ -720,7 +730,12 @@ export class LPEngineAgent {
       description,
     };
 
-    if (pos.mode === 'FULL' && pos.tradingMode !== 'DRY_RUN') {
+    if (pos.mode === 'FULL') {
+      if (pos.tradingMode === 'DRY_RUN') {
+        proposal.description = `✅ *Auto-Closed LP (Simulated)*\n` + proposal.description;
+        if (this.onProposal) await this.onProposal(proposal);
+        return;
+      }
       console.log(`[LPEngine] Mode FULL — Auto-closing position via Alchemy Session Key`);
       try {
         const tier = await getUserTier(recipient);
@@ -775,10 +790,13 @@ export class LPEngineAgent {
 
     for (const pos of positions) {
       if (pos.tokenId.startsWith('PENDING')) continue;
+      const isSim = pos.tokenId.startsWith('SIM-') || pos.tradingMode === 'DRY_RUN';
 
-      const npmAddress = (pos.managerAddress as `0x${string}`) || defaultNpm;
-      const tokenId  = BigInt(pos.tokenId);
-      const calldata = this.buildCollectCalldata(tokenId, recipient);
+      const tokenId = isSim ? 0n : BigInt(pos.tokenId);
+      const recipient = (process.env.USER_WALLET_ADDRESS ?? '') as Address;
+      const npmAddress = (pos.managerAddress as `0x${string}`) || (await this.getAddresses()).npmAddress;
+
+      const calldata = isSim ? '0x' : this.buildCollectCalldata(tokenId, recipient);
 
       const proposal: LPProposal = {
         type: 'HARVEST',
@@ -806,7 +824,12 @@ export class LPEngineAgent {
 
       await logEvent('INFO', `[LP] HARVEST Proposal created for ${pos.token0Symbol}/${pos.token1Symbol}`, { positionId: pos.id });
 
-      if ((pos.mode === 'SEMI' || pos.mode === 'FULL') && pos.tradingMode !== 'DRY_RUN') {
+      if (pos.mode === 'SEMI' || pos.mode === 'FULL') {
+        if (pos.tradingMode === 'DRY_RUN') {
+          proposal.description = `✅ *Auto-Harvested LP (Simulated)*\n` + proposal.description;
+          if (this.onProposal) await this.onProposal(proposal);
+          continue;
+        }
         console.log(`[LPEngine] Mode ${pos.mode} — Auto-harvesting via Alchemy Session Key`);
         try {
           const client = await getSessionKeyClient(pos.mode as 'SEMI' | 'FULL', tier);

@@ -4,6 +4,7 @@ import { prisma } from '../core/db.js';
 import type { Position, LPPosition } from '@prisma/client';
 import { detectBestFee } from '../services/poolFeeDetector.js';
 import { calcAnnualizedFeeRate, calcIL, getNPMPosition, checkPositionRange, isPastDayCloseTime, tickToPrice } from '../services/lpMath.js';
+import { getTokenInfo } from '../services/gmgn.js';
 import { logEvent } from '../utils/logger.js';
 
 export class GuardianAgent {
@@ -77,7 +78,10 @@ export class GuardianAgent {
 
     try {
       // 1. Fetch live data
-      const npmPos = await getNPMPosition(BigInt(pos.tokenId), pos.managerAddress);
+      let npmPos: any = null;
+      if (!pos.tokenId.startsWith('SIM-') && pos.tradingMode !== 'DRY_RUN') {
+        npmPos = await getNPMPosition(BigInt(pos.tokenId), pos.managerAddress);
+      }
       const config = await prisma.systemConfig.findUnique({ where: { key: 'lp.ilHourThreshold' } });
       const maxIlHours = parseInt(config?.value ?? '4');
       const capConfig = await prisma.systemConfig.findUnique({ where: { key: 'lp.positionCap' } });
@@ -104,14 +108,34 @@ export class GuardianAgent {
       });
 
       // 3. Calc Fees
-      // Simplified USD estimation
-      const feesUsd = (Number(npmPos.tokensOwed0) + Number(npmPos.tokensOwed1)) / 1e18 * wethPrice;
+      let feesUsd = 0;
+      if (pos.tokenId.startsWith('SIM-') || pos.tradingMode === 'DRY_RUN') {
+        try {
+          const tokenAddress = pos.token0 === (process.env.WETH_ADDRESS ?? '0') ? pos.token1 : pos.token0;
+          const tokenInfo = await getTokenInfo(tokenAddress);
+          if (tokenInfo) {
+             const poolLiquidityUsd = tokenInfo.liquidity || 500000;
+             const ourShare = pos.entryValue / poolLiquidityUsd;
+             const volume = tokenInfo.volume24h;
+             const feeTierPerc = pos.feeTier / 1_000_000;
+             const hourlyFee = (volume / 24) * feeTierPerc * ourShare;
+             
+             const hoursOpen = Math.max(0.1, (Date.now() - pos.createdAt.getTime()) / 3600000);
+             feesUsd = hourlyFee * hoursOpen;
+             feesUsd *= (pos.nightMode ? 5 : 1);
+          }
+        } catch(e) {
+          console.warn(`[Guardian] Failed to estimate fees for SIM position ${pos.id}`);
+        }
+      } else {
+        feesUsd = (Number(npmPos.tokensOwed0) + Number(npmPos.tokensOwed1)) / 1e18 * wethPrice;
+      }
       
       const hoursOpen = Math.max(1, (Date.now() - pos.createdAt.getTime()) / 3600000);
       const feeRate = calcAnnualizedFeeRate(feesUsd, pos.entryValue, hoursOpen);
       const ilRate = calcAnnualizedFeeRate(Math.abs(ilData.ilUsd), pos.entryValue, hoursOpen);
 
-      console.log(`[Guardian] LP ${pos.id.slice(0,8)} | FeeRate: ${(feeRate*100).toFixed(1)}% | ILRate: ${(ilRate*100).toFixed(1)}%`);
+      console.log(`[Guardian] LP ${pos.id.slice(0,8)} ${pos.tokenId.startsWith('SIM-') ? '(SIM)' : ''} | FeeRate: ${(feeRate*100).toFixed(1)}% | ILRate: ${(ilRate*100).toFixed(1)}%`);
 
       // 4. Rule §3.4 Logic
       let ilHours = pos.ilAboveFeeHours;
