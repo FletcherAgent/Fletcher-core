@@ -598,6 +598,7 @@ export class LPEngineAgent {
         tickLower,
         tickUpper,
         entryValue:  config.startSize,
+        entryTick,
         mode:        currentMode,
         status:      isDryRun ? 'OPEN' : 'PENDING',
         dayMode:     options.dayMode,

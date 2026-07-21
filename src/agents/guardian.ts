@@ -95,8 +95,9 @@ export class GuardianAgent {
       // Simplification: WETH base price = 3500
       const isToken0 = BigInt(pos.token0) < BigInt(process.env.WETH_ADDRESS ?? '0');
       const wethPrice = 3500;
-      const entryP0 = isToken0 ? wethPrice * currentPrice : wethPrice; 
-      const entryP1 = isToken0 ? wethPrice : wethPrice / currentPrice;
+      const entryPriceBase = tickToPrice(pos.entryTick || rangeStatus.currentTick);
+      const entryP0 = isToken0 ? wethPrice * entryPriceBase : wethPrice; 
+      const entryP1 = isToken0 ? wethPrice : wethPrice / entryPriceBase;
       const curP0 = isToken0 ? wethPrice * currentPrice : wethPrice;
       const curP1 = isToken0 ? wethPrice : wethPrice / currentPrice;
 
