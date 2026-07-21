@@ -732,6 +732,10 @@ export class LPEngineAgent {
 
     if (pos.mode === 'FULL') {
       if (pos.tradingMode === 'DRY_RUN') {
+        await prisma.lPPosition.update({
+          where: { id: positionId },
+          data: { status: 'CLOSED' } as any,
+        });
         proposal.description = `✅ *Auto-Closed LP (Simulated)*\n` + proposal.description;
         if (this.onProposal) await this.onProposal(proposal);
         return;

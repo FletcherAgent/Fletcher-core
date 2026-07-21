@@ -95,8 +95,8 @@ export class GuardianAgent {
       // Simplification: WETH base price = 3500
       const isToken0 = BigInt(pos.token0) < BigInt(process.env.WETH_ADDRESS ?? '0');
       const wethPrice = 3500;
-      const entryP0 = isToken0 ? (pos.entryValue / 2) / (wethPrice * currentPrice) : wethPrice; 
-      const entryP1 = isToken0 ? wethPrice : (pos.entryValue / 2) / (wethPrice / currentPrice);
+      const entryP0 = isToken0 ? wethPrice * currentPrice : wethPrice; 
+      const entryP1 = isToken0 ? wethPrice : wethPrice / currentPrice;
       const curP0 = isToken0 ? wethPrice * currentPrice : wethPrice;
       const curP1 = isToken0 ? wethPrice : wethPrice / currentPrice;
 
@@ -137,14 +137,15 @@ export class GuardianAgent {
 
       console.log(`[Guardian] LP ${pos.id.slice(0,8)} ${pos.tokenId.startsWith('SIM-') ? '(SIM)' : ''} | FeeRate: ${(feeRate*100).toFixed(1)}% | ILRate: ${(ilRate*100).toFixed(1)}%`);
 
-      // 4. Rule §3.4 Logic
+      // 4. Rule §3.4 Logic (1 interval = 1 minute)
       let ilHours = pos.ilAboveFeeHours;
       let feeHours = pos.feeAboveILHours;
+      const maxIlIntervals = maxIlHours * 60; // scale hours to minutes since polling is every 1 min
 
       if (ilData.ilUsd < 0 && Math.abs(ilData.ilUsd) > feesUsd) {
         ilHours += 1;
         feeHours = 0;
-        if (ilHours >= maxIlHours) {
+        if (ilHours >= maxIlIntervals) {
           console.log(`[Guardian] 🚨 LP ${pos.id} IL > Fee for ${maxIlHours}h. Triggering CLOSE.`);
           await logEvent('WARN', `[LP] Guardian triggered CLOSE: IL > Fee for ${maxIlHours}h`, { positionId: pos.id });
           if (this.onLPCloseSignal) this.onLPCloseSignal(pos, `IL > Fee for ${maxIlHours} consecutive hours`);
