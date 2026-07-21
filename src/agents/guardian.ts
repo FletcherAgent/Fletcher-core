@@ -162,13 +162,15 @@ export class GuardianAgent {
       }
 
       // Update DB counters
+      const newFees = Math.max(pos.feesCollected || 0, feesUsd);
+      
       await prisma.lPPosition.update({
         where: { id: pos.id },
         data: { 
           ilAboveFeeHours: ilHours, 
           feeAboveILHours: feeHours,
           ilRunning: ilData.ilUsd,
-          feesCollected: feesUsd
+          feesCollected: newFees
         }
       });
 
