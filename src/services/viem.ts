@@ -37,10 +37,11 @@ export const publicClient = createPublicClient({
 });
 
 const wssUrl = process.env.ROBINHOOD_WSS_URL;
+const isWs = wssUrl && (wssUrl.startsWith('ws://') || wssUrl.startsWith('wss://'));
 
 export const wssClient = createPublicClient({
   chain: robinhoodChain,
-  transport: wssUrl ? webSocket(wssUrl) : http(rpcUrl),
+  transport: isWs ? webSocket(wssUrl) : http(rpcUrl),
   // TODO: Same as above. If using a premium RPC or true WSS, remove this pollingInterval.
   pollingInterval: 15_000,
 });
