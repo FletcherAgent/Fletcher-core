@@ -411,9 +411,22 @@ export class TraderAgent {
            if (otx && otx.to) targetRouter = otx.to;
          } catch(e) {}
       }
-      const bestFee = await detectBestFee(
-        WETH_ADDRESS, tokenOut, amountIn, targetRouter
-      );
+      let bestFee = null;
+      let attempt = 0;
+      while (attempt < 3 && !bestFee) {
+        try {
+          bestFee = await detectBestFee(WETH_ADDRESS, tokenOut, amountIn, targetRouter);
+        } catch (e: any) {
+          if (attempt < 2) {
+            console.warn(`[Trader] detectBestFee failed for ${tokenOut} (Attempt ${attempt + 1}). Retrying in 2s...`);
+            await new Promise(r => setTimeout(r, 2000));
+          } else {
+            throw e; // Let it be caught by the outer block
+          }
+        }
+        attempt++;
+      }
+      if (!bestFee) throw new Error("detectBestFee returned null");
       const POOL_FEE = bestFee.fee;
       const POOL_TYPE: 'V2' | 'V3' | 'V4' = bestFee.type || 'V4';
       const POOL_ROUTER = bestFee.routerAddress;
