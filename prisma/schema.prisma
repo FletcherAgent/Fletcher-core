@@ -1,6 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -12,22 +9,22 @@ datasource db {
 model Position {
   id           String   @id @default(uuid())
   tokenAddress String
-  tokenName    String?
-  tokenSymbol  String?
-  type         String   // "TRENCH" or "LP"
-  status       String   // "OPEN" or "CLOSED"
+  type         String
+  status       String
   entryPrice   Float
   size         Float
   exitPrice    Float?
-  exitReason   String?  // Reason for exiting (e.g., TP, SL, RUG, etc.)
-  pnl          Float?   // PnL ratio ((exitPrice - entryPrice) / entryPrice)
-  tokenId      String?  // Storage for Uniswap V3 LP NFT
-  txHash       String?  // Hash of the opening transaction for recovery
-  source       String   @default("SCOUT") // "SCOUT" or "COPYTRADE"
-  copiedFrom   String?  // Wallet address if source is COPYTRADE
-  tradingMode  String   @default("LIVE") // "LIVE" or "DRY_RUN"
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+  tokenId      String?
+  copiedFrom   String?
+  source       String   @default("SCOUT")
+  pnl          Float?
+  tokenName    String?
+  tokenSymbol  String?
+  txHash       String?
+  tradingMode  String   @default("LIVE")
+  exitReason   String?
 }
 
 model Signal {
@@ -36,34 +33,34 @@ model Signal {
   score        Float
   passed       Boolean
   rawContext   Json
-  source       String   @default("SCOUT") // "SCOUT" or "COPYTRADE"
-  copiedFrom   String?  // Wallet address if source is COPYTRADE
   createdAt    DateTime @default(now())
+  copiedFrom   String?
+  source       String   @default("SCOUT")
 }
 
 model Log {
   id        String   @id @default(uuid())
-  level     String   // "INFO", "WARN", "ERROR"
+  level     String
   message   String
   meta      Json?
   createdAt DateTime @default(now())
 }
 
 model TrackedWallet {
-  id            String   @id @default(uuid())
-  address       String   @unique
-  label         String?
-  tier          Int      @default(2)
-  bundleId      String?
-  status        String   @default("ACTIVE") // ACTIVE, PAUSED, DEMOTED
-  entrySource   String?
-  totalSignals  Int      @default(0)
-  copiedSignals Int      @default(0)
-  winRate       Float?
-  avgPnlR       Float?
-  consecutiveLosses Int @default(0)
-  lastTradeAt   DateTime?
-  createdAt     DateTime @default(now())
+  id                String    @id @default(uuid())
+  address           String    @unique
+  label             String?
+  tier              Int       @default(2)
+  bundleId          String?
+  status            String    @default("ACTIVE")
+  entrySource       String?
+  totalSignals      Int       @default(0)
+  copiedSignals     Int       @default(0)
+  winRate           Float?
+  avgPnlR           Float?
+  lastTradeAt       DateTime?
+  createdAt         DateTime  @default(now())
+  consecutiveLosses Int       @default(0)
 }
 
 model SystemConfig {
@@ -72,79 +69,69 @@ model SystemConfig {
 }
 
 model WalletPosition {
-  id              String   @id @default(uuid())
-  walletAddress   String
-  tokenAddress    String
-  status          String   @default("OPEN")
-  totalWethSpent  Float    
-  totalTokens     Float    
-  avgEntryPrice   Float    
-  realizedPnl     Float?   
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id             String   @id @default(uuid())
+  walletAddress  String
+  tokenAddress   String
+  status         String   @default("OPEN")
+  totalWethSpent Float
+  totalTokens    Float
+  avgEntryPrice  Float
+  realizedPnl    Float?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 }
 
 model DexProtocol {
-  id                 String   @id @default(uuid())
-  name               String   // Contoh: "Uniswap V4", "PancakeSwap V3"
-  version            String   // "V2", "V3", atau "V4"
-  
-  // Kontrak Ekosistem
-  routerAddress      String?  // Universal Router / SwapRouter
-  factoryAddress     String?  // Untuk mengecek pair/pool baru
-  quoterAddress      String?  // Untuk cek harga / estimasi (V3/V4)
-  positionManager    String?  // Untuk manajemen LP (V3/V4)
-  poolManager        String?  // Khusus V4
-  stateView          String?  // Khusus V4
-  
-  verified           Boolean  @default(false)
-  isDefault          Boolean  @default(false) // Menandakan ini protokol utama
-  createdAt          DateTime @default(now())
+  id              String   @id @default(uuid())
+  name            String
+  version         String
+  routerAddress   String?
+  factoryAddress  String?
+  quoterAddress   String?
+  positionManager String?
+  poolManager     String?
+  stateView       String?
+  verified        Boolean  @default(false)
+  isDefault       Boolean  @default(false)
+  createdAt       DateTime @default(now())
 }
-
-// ─── LP Engine v2.0 ──────────────────────────────────────────────────────────
 
 /// Tracks Uniswap V3 LP positions managed by LP Engine
 model LPPosition {
-  id               String   @id @default(uuid())
-  tokenId          String   @unique           // Uniswap V3 NFT tokenId (set after mint confirmed)
-  pool             String                     // Pool contract address
-  token0           String                     // Token0 address
-  token1           String                     // Token1 address
-  managerAddress   String?                    // The specific PositionManager used
-  token0Symbol     String?
-  token1Symbol     String?
-  feeTier          Int                        // 500 | 3000 | 10000
-  tickLower        Int
-  tickUpper        Int
-  entryValue       Float                      // USD value at open
-  feesCollected    Float    @default(0)       // Cumulative fee collected (USD)
-  ilRunning        Float    @default(0)       // Running impermanent loss vs HODL baseline (USD)
-  // Fee-vs-IL counters for Guardian rule §3.4
-  feeAboveILHours  Int      @default(0)       // Consecutive hours fee > IL
-  ilAboveFeeHours  Int      @default(0)       // Consecutive hours IL > fee (close trigger at 4)
-  // Mode: MANUAL = all via Telegram | SEMI = collect+compound auto | FULL = all auto
-  mode             String   @default("MANUAL")
-  // Status flow: PENDING → OPEN → (OUT_OF_RANGE) → CLOSED
-  status           String   @default("PENDING")
-  dayMode          Boolean  @default(false)   // true = DAY mode (full range, close at 23:00 WIB)
-  nightMode        Boolean  @default(false)   // true = NIGHT mode (concentrated)
-  source           String   @default("SYSTEM") // SYSTEM | ALPHA (Userbot)
-  sessionKeyId     String?                    // FK to SessionKey (Phase 3, nullable)
-  tradingMode      String   @default("DRY_RUN") // mirrors TRADING_MODE env
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  id              String   @id @default(uuid())
+  tokenId         String   @unique
+  pool            String
+  token0          String
+  token1          String
+  token0Symbol    String?
+  token1Symbol    String?
+  feeTier         Int
+  tickLower       Int
+  tickUpper       Int
+  entryValue      Float
+  feesCollected   Float    @default(0)
+  ilRunning       Float    @default(0)
+  feeAboveILHours Int      @default(0)
+  ilAboveFeeHours Int      @default(0)
+  mode            String   @default("MANUAL")
+  status          String   @default("PENDING")
+  dayMode         Boolean  @default(false)
+  nightMode       Boolean  @default(false)
+  sessionKeyId    String?
+  tradingMode     String   @default("DRY_RUN")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  source          String   @default("SYSTEM")
+  managerAddress  String?
 }
-
-// ─── Phase 3: Alchemy Session Keys ──────────────────────────────────────────
 
 model SessionKey {
   id          String   @id @default(uuid())
   userId      String
   keyAddress  String   @unique
-  scope       Json     // { mode, contracts, functions, swapEnabled, spendCap }
+  scope       Json
   expiry      DateTime
-  status      String   @default("ACTIVE") // ACTIVE | REVOKED | EXPIRED
+  status      String   @default("ACTIVE")
   sdkProvider String   @default("alchemy")
   createdAt   DateTime @default(now())
 }

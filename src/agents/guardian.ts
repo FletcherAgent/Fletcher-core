@@ -166,7 +166,8 @@ export class GuardianAgent {
         data: { 
           ilAboveFeeHours: ilHours, 
           feeAboveILHours: feeHours,
-          ilRunning: ilData.ilUsd 
+          ilRunning: ilData.ilUsd,
+          feesCollected: feesUsd
         }
       });
 
