@@ -326,6 +326,7 @@ export class LPEngineAgent {
     const canOpen = await this.canOpenNewPosition();
     if (!canOpen.ok) {
       console.warn(`[LPEngine] ⛔ DAY mode blocked: ${canOpen.reason}`);
+      await logEvent('WARN', `[LP] DAY mode blocked: ${canOpen.reason}`);
       if (this.onNotification) await this.onNotification(`⛔ *DAY mode blocked:* ${canOpen.reason}`);
       return;
     }
@@ -360,6 +361,7 @@ export class LPEngineAgent {
 
     if (!selectedCandidate) {
       console.warn('[LPEngine] DAY mode: No pairs passed Grok sentiment analysis');
+      await logEvent('WARN', '[LP] DAY mode: No pairs passed Grok sentiment analysis');
       return;
     }
 
@@ -380,6 +382,7 @@ export class LPEngineAgent {
     const canOpen   = await this.canOpenNewPosition();
     if (!canOpen.ok) {
       console.warn(`[LPEngine] ⛔ NIGHT mode blocked: ${canOpen.reason}`);
+      await logEvent('WARN', `[LP] NIGHT mode blocked: ${canOpen.reason}`);
       if (this.onNotification) await this.onNotification(`⛔ *NIGHT mode blocked:* ${canOpen.reason}`);
       return;
     }
@@ -430,6 +433,7 @@ export class LPEngineAgent {
     const canOpen = await this.canOpenNewPosition();
     if (!canOpen.ok) {
       console.warn(`[LPEngine] ⛔ Alpha Signal blocked: ${canOpen.reason}`);
+      await logEvent('WARN', `[LP] Alpha Signal blocked: ${canOpen.reason}`);
       if (this.onNotification) await this.onNotification(`⛔ *Alpha Signal blocked:* ${canOpen.reason}`);
       return;
     }
@@ -455,11 +459,13 @@ export class LPEngineAgent {
     const { wethAddress } = await this.getAddresses();
 
     console.log(`[LPEngine] 📋 Proposing position: ${token.symbol} | dayMode=${options.dayMode} | dryRun=${isDryRun}`);
+    await logEvent('INFO', `[LP] Proposing position: ${token.symbol} | dayMode=${options.dayMode} | dryRun=${isDryRun}`);
 
     // Resolve pool address via factory
     const resolved = await this.resolvePool(token.address, wethAddress);
     if (!resolved) {
       console.warn(`[LPEngine] No V3 pool found for ${token.symbol}/WETH`);
+      await logEvent('WARN', `[LP] No V3 pool found for ${token.symbol}/WETH`);
       if (this.onNotification) await this.onNotification(`⚠️ *Open Position Canceled*\\nActive pool for $${token.symbol}/WETH not found.`);
       return;
     }
@@ -652,6 +658,7 @@ export class LPEngineAgent {
     const pos = await prisma.lPPosition.findUnique({ where: { id: positionId } });
     if (!pos || pos.status !== 'OPEN') {
       console.warn(`[LPEngine] proposeClosePosition: position ${positionId} not found or not OPEN`);
+      await logEvent('WARN', `[LP] proposeClosePosition: position ${positionId} not found or not OPEN`);
       return;
     }
     const { npmAddress: defaultNpm } = await this.getAddresses();
