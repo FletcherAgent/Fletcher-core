@@ -193,7 +193,7 @@ export async function detectBestFee(
   }
 
   if (best.expectedOut > 0n) {
-    console.log(`[PoolFeeDetector] ✅ Best ${best.type} pool: fee=${best.fee} → expectedOut=${best.expectedOut}`);
+    process.stdout.write(`[PoolFeeDetector] ✅ Best ${best.type} pool: fee=${best.fee} → expectedOut=${best.expectedOut}\n`);
     return best;
   }
 
@@ -227,7 +227,7 @@ export async function detectBestFee(
       if (amountsOut && amountsOut.length > 1 && amountsOut[1] > 0n) {
         if (amountsOut[1] > best.expectedOut) {
           best = { fee: 3000, expectedOut: amountsOut[1], type: 'V2', routerAddress: v2Router };
-          console.log(`[PoolFeeDetector] ✅ Found V2 pool at ${v2Router} → expectedOut=${best.expectedOut}`);
+          process.stdout.write(`[PoolFeeDetector] ✅ Found V2 pool at ${v2Router} → expectedOut=${best.expectedOut}\n`);
           
           // Asynchronously save to DB if it's a dynamic target router
           if (v2Router === targetRouter) {
