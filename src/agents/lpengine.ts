@@ -23,7 +23,7 @@ import { getSessionKeyClient, buildAndSendLPUserOperation, type UserOpCall } fro
 import { getUserTier, getTierLimits } from '../services/tierGate.js';
 import { prisma } from '../core/db.js';
 import { logEvent } from '../utils/logger.js';
-import { getDexConfig } from '../core/dexConfig.js';
+import { getDexConfig, getAllDexConfigs } from '../core/dexConfig.js';
 import { IntelligenceLayer } from '../services/intelligence.js';
 import {
   screenPairs,
@@ -171,27 +171,36 @@ export class LPEngineAgent {
     token0: string,
     token1: string,
     preferredFee = 3000
-  ): Promise<{ poolAddress: string; feeTier: number } | null> {
-    const { factoryAddress } = await this.getAddresses();
+  ): Promise<{ poolAddress: string; feeTier: number; factoryAddress: string; managerAddress: string } | null> {
+    const v3Configs = await getAllDexConfigs('V3');
     const feesToTry = [preferredFee, 500, 3000, 10000].filter(
       (v, i, arr) => arr.indexOf(v) === i
     );
 
-    for (const fee of feesToTry) {
-      try {
-        const poolAddr = await publicClient.readContract({
-          address: factoryAddress,
-          abi: FACTORY_ABI,
-          functionName: 'getPool',
-          args: [token0 as Address, token1 as Address, fee],
-        }) as string;
+    for (const config of v3Configs) {
+      if (!config.factoryAddress || !config.positionManager) continue;
 
-        if (poolAddr && poolAddr !== '0x0000000000000000000000000000000000000000') {
-          console.log(`[LPEngine] ✅ Pool found: ${poolAddr} (fee: ${fee})`);
-          return { poolAddress: poolAddr, feeTier: fee };
+      for (const fee of feesToTry) {
+        try {
+          const poolAddr = await publicClient.readContract({
+            address: config.factoryAddress as Address,
+            abi: FACTORY_ABI,
+            functionName: 'getPool',
+            args: [token0 as Address, token1 as Address, fee],
+          }) as string;
+
+          if (poolAddr && poolAddr !== '0x0000000000000000000000000000000000000000') {
+            console.log(`[LPEngine] ✅ Pool found: ${poolAddr} on factory ${config.factoryAddress} (fee: ${fee})`);
+            return { 
+              poolAddress: poolAddr, 
+              feeTier: fee, 
+              factoryAddress: config.factoryAddress, 
+              managerAddress: config.positionManager 
+            };
+          }
+        } catch (error) {
+          console.warn(`[LPEngine] ⚠️ getPool failed on factory ${config.factoryAddress} (fee: ${fee}):`, error);
         }
-      } catch {
-        // try next fee
       }
     }
     return null;
@@ -443,7 +452,7 @@ export class LPEngineAgent {
     const token     = candidate.token;
     const modeCfg   = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
     const isDryRun  = (modeCfg?.value || 'LIVE') === 'DRY_RUN';
-    const { npmAddress, wethAddress } = await this.getAddresses();
+    const { wethAddress } = await this.getAddresses();
 
     console.log(`[LPEngine] 📋 Proposing position: ${token.symbol} | dayMode=${options.dayMode} | dryRun=${isDryRun}`);
 
@@ -454,7 +463,8 @@ export class LPEngineAgent {
       if (this.onNotification) await this.onNotification(`⚠️ *Open Position Canceled*\\nActive pool for $${token.symbol}/WETH not found.`);
       return;
     }
-    const { poolAddress, feeTier } = resolved;
+    const { poolAddress, feeTier, managerAddress } = resolved;
+    const npmAddress = managerAddress as `0x${string}`;
 
     // Get token meta
     const [tokenMeta, wethMeta] = await Promise.all([
