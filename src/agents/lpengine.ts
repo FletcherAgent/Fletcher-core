@@ -611,7 +611,7 @@ export class LPEngineAgent {
       description,
     };
 
-    if (currentMode === 'FULL') {
+    if (currentMode === 'FULL' && !isDryRun) {
       console.log(`[LPEngine] Mode FULL — Executing automatically via Alchemy Session Key`);
       try {
         const tier = await getUserTier(recipient);
@@ -720,7 +720,7 @@ export class LPEngineAgent {
       description,
     };
 
-    if (pos.mode === 'FULL') {
+    if (pos.mode === 'FULL' && pos.tradingMode !== 'DRY_RUN') {
       console.log(`[LPEngine] Mode FULL — Auto-closing position via Alchemy Session Key`);
       try {
         const tier = await getUserTier(recipient);
@@ -806,7 +806,7 @@ export class LPEngineAgent {
 
       await logEvent('INFO', `[LP] HARVEST Proposal created for ${pos.token0Symbol}/${pos.token1Symbol}`, { positionId: pos.id });
 
-      if (pos.mode === 'SEMI' || pos.mode === 'FULL') {
+      if ((pos.mode === 'SEMI' || pos.mode === 'FULL') && pos.tradingMode !== 'DRY_RUN') {
         console.log(`[LPEngine] Mode ${pos.mode} — Auto-harvesting via Alchemy Session Key`);
         try {
           const client = await getSessionKeyClient(pos.mode as 'SEMI' | 'FULL', tier);
