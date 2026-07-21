@@ -40,12 +40,18 @@ export async function detectBestFee(
     console.warn(`[PoolFeeDetector] Failed to load dynamic routers from DB`, e);
   }
 
-  const QUOTER_ADDRESSES = process.env.QUOTER_ADDRESS ? process.env.QUOTER_ADDRESS.split(',').map(s => s.trim()).filter(Boolean) : [];
-  QUOTER_ADDRESSES.push(...dbQuoters);
-  const uniqueQuoters = Array.from(new Set(QUOTER_ADDRESSES));
+  const V3_QUOTERS_ENV = process.env.V3_QUOTER ? process.env.V3_QUOTER.split(',').map(s => s.trim()).filter(Boolean) : [];
+  const V4_QUOTERS_ENV = process.env.V4_QUOTER ? process.env.V4_QUOTER.split(',').map(s => s.trim()).filter(Boolean) : [];
+  const LEGACY_QUOTERS_ENV = process.env.QUOTER_ADDRESS ? process.env.QUOTER_ADDRESS.split(',').map(s => s.trim()).filter(Boolean) : [];
 
-  if (uniqueQuoters.length === 0) {
-    console.warn('[PoolFeeDetector] ⚠️ QUOTER_ADDRESS not set in .env! V3 detection skipped.');
+  const uniqueV3Quoters = Array.from(new Set([...V3_QUOTERS_ENV, ...LEGACY_QUOTERS_ENV, ...dbQuoters]));
+  const uniqueV4Quoters = Array.from(new Set([...V4_QUOTERS_ENV, ...LEGACY_QUOTERS_ENV, ...dbQuoters])); // Allow fallback for legacy config
+
+  if (uniqueV3Quoters.length === 0) {
+    console.warn('[PoolFeeDetector] ⚠️ V3_QUOTER not set in .env! V3 detection skipped.');
+  }
+  if (uniqueV4Quoters.length === 0) {
+    console.warn('[PoolFeeDetector] ⚠️ V4_QUOTER not set in .env! V4 detection skipped.');
   }
 
   const quoterV3Abi = parseAbi([
@@ -119,12 +125,8 @@ export async function detectBestFee(
   const v3_V2Promises = [];
   const v4Promises = [];
 
-  for (const quoter of uniqueQuoters) {
+  for (const quoter of uniqueV3Quoters) {
     for (const fee of FEE_TIERS) {
-      let tickSpacing = 60;
-      if (fee === 500) tickSpacing = 10;
-      else if (fee === 10000) tickSpacing = 200;
-
       // Try V3 Quoter V1 ABI
       v3Promises.push(
         publicClient.readContract({
@@ -150,6 +152,14 @@ export async function detectBestFee(
           }]
         }).then((out: any) => ({ fee, expectedOut: out[0] as bigint, type: 'V3' as const }))
       );
+    }
+  }
+
+  for (const quoter of uniqueV4Quoters) {
+    for (const fee of FEE_TIERS) {
+      let tickSpacing = 60;
+      if (fee === 500) tickSpacing = 10;
+      else if (fee === 10000) tickSpacing = 200;
 
       // Try V4 Quoter
       v4Promises.push(

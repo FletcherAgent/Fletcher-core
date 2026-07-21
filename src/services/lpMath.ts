@@ -157,7 +157,7 @@ export async function getNPMPosition(tokenId: bigint): Promise<{
   tokensOwed0: bigint;
   tokensOwed1: bigint;
 }> {
-  const NPM_ADDRESS = process.env.POSITION_MANAGER;
+  const NPM_ADDRESS = process.env.V3_NONFUNGIBLE_POSITION_MANAGER || process.env.POSITION_MANAGER;
   if (!NPM_ADDRESS) throw new Error('[lpMath] POSITION_MANAGER not set in .env');
 
   const r = await publicClient.readContract({

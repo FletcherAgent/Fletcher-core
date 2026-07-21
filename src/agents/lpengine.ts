@@ -135,7 +135,7 @@ export class LPEngineAgent {
   public onNotification?: (message: string) => Promise<void>;
 
   constructor() {
-    this.npmAddress     = (process.env.POSITION_MANAGER ?? '') as Address;
+    this.npmAddress     = ((process.env.V3_NONFUNGIBLE_POSITION_MANAGER || process.env.POSITION_MANAGER) ?? '') as Address;
     this.factoryAddress = (process.env.UNISWAP_V3_FACTORY_ADDRESS ?? '') as Address;
     this.wethAddress    = (process.env.WETH_ADDRESS    ?? '') as Address;
 

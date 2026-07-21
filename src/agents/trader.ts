@@ -309,12 +309,12 @@ export class TraderAgent {
     console.log(`[Trader] Constructing BUY calldata for WETH -> ${tokenOut}...`);
 
     const WETH_ADDRESS = process.env.WETH_ADDRESS;
-    const QUOTER_ADDRESS = process.env.QUOTER_ADDRESS;
-    const ROUTER_ADDRESS = process.env.ROUTER_ADDRESS;
+    const QUOTER_ADDRESS = process.env.V4_QUOTER || process.env.V3_QUOTER || process.env.QUOTER_ADDRESS;
+    const ROUTER_ADDRESS = process.env.UNIVERSAL_ROUTER || process.env.UNIVERSAL_ROUTER_ADDRESS || process.env.ROUTER_ADDRESS;
     const USER_WALLET = process.env.USER_WALLET_ADDRESS;
 
     if (!WETH_ADDRESS || !QUOTER_ADDRESS || !ROUTER_ADDRESS || !USER_WALLET) {
-      throw new Error('❌ CRITICAL: WETH_ADDRESS, QUOTER_ADDRESS, ROUTER_ADDRESS, or USER_WALLET_ADDRESS missing in .env');
+      throw new Error('❌ CRITICAL: WETH_ADDRESS, QUOTER_ADDRESS (or V3/V4), ROUTER_ADDRESS, or USER_WALLET_ADDRESS missing in .env');
     }
 
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 5); // 5 mins
@@ -450,7 +450,7 @@ export class TraderAgent {
       console.log(`[Trader] 🛡️ BUY amountOutMinimum: ${amountOutMinimum}`);
 
       let calldata: string = '';
-      let finalToAddress = process.env.UNIVERSAL_ROUTER_ADDRESS!;
+      let finalToAddress = process.env.UNIVERSAL_ROUTER || process.env.UNIVERSAL_ROUTER_ADDRESS!;
 
       if (POOL_TYPE === 'V2' && POOL_ROUTER) {
         const v2RouterAbi = parseAbi([
@@ -545,7 +545,7 @@ export class TraderAgent {
 
     const WETH_ADDRESS = process.env.WETH_ADDRESS;
     const QUOTER_ADDRESS = process.env.QUOTER_ADDRESS;
-    const ROUTER_ADDRESS = process.env.ROUTER_ADDRESS;
+    const ROUTER_ADDRESS = process.env.UNIVERSAL_ROUTER || process.env.UNIVERSAL_ROUTER_ADDRESS || process.env.ROUTER_ADDRESS;
     const USER_WALLET = process.env.USER_WALLET_ADDRESS;
 
     if (!WETH_ADDRESS || !QUOTER_ADDRESS || !ROUTER_ADDRESS || !USER_WALLET) {
