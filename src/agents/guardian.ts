@@ -245,6 +245,13 @@ export class GuardianAgent {
         // Calculate current exchange rate (WETH per 1 wei of Token)
         const currentQuote = Number(wethTestAmount) / Number(tokensOut);
 
+        // Update real-time PnL in database
+        const currentPnl = (currentQuote - initialQuote) / initialQuote;
+        await prisma.position.update({
+          where: { id: pos.id },
+          data: { pnl: currentPnl }
+        }).catch(() => {}); // silently catch to prevent loop crash on DB lock
+
         // Update High Watermark
         if (currentQuote > highestQuote) {
           highestQuote = currentQuote;
