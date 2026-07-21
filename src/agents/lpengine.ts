@@ -461,6 +461,25 @@ export class LPEngineAgent {
     console.log(`[LPEngine] 📋 Proposing position: ${token.symbol} | dayMode=${options.dayMode} | dryRun=${isDryRun}`);
     await logEvent('INFO', `[LP] Proposing position: ${token.symbol} | dayMode=${options.dayMode} | dryRun=${isDryRun}`);
 
+    // Enforce No Duplicate Token
+    const existingTokenPosition = await prisma.lPPosition.findFirst({
+      where: {
+        status: { in: ['OPEN', 'PENDING'] },
+        OR: [
+          { token0: { equals: token.address, mode: 'insensitive' } },
+          { token1: { equals: token.address, mode: 'insensitive' } }
+        ]
+      }
+    });
+
+    if (existingTokenPosition) {
+      const msg = `⚠️ Skipped duplicate LP position for $${token.symbol} (already open/pending).`;
+      console.warn(`[LPEngine] ${msg}`);
+      await logEvent('WARN', `[LP] Skipped duplicate position for ${token.symbol}`);
+      if (this.onNotification) await this.onNotification(msg);
+      return;
+    }
+
     // Resolve pool address via factory
     const resolved = await this.resolvePool(token.address, wethAddress);
     if (!resolved) {
