@@ -152,7 +152,7 @@ export async function getTrendingPairs(limit = 20): Promise<GMGNToken[]> {
   if (cached) return cached;
 
   try {
-    const response = await gmgnClientGet<{ data: { rank: any[] } }>(`/rank/${CHAIN}/swaps/1h`, { orderby: 'swaps', direction: 'desc' });
+    const response = await gmgnClientGet<{ data: { rank: any[] } }>('/market/rank', { chain: CHAIN, interval: '1h', orderby: 'swaps', direction: 'desc' });
     const tokens = (response?.data?.rank || []).slice(0, limit).map(normalizeToken);
     GMGNCache.set(cacheKey, tokens, 60);
     return tokens;
@@ -175,10 +175,10 @@ export async function getTokenInfo(tokenAddress: string): Promise<GMGNToken | nu
   if (cached) return cached;
 
   try {
-    const response = await gmgnClientGet<{ data: any }>(`/token/${CHAIN}/${tokenAddress}`);
-    if (!response || !response.data) throw new Error('No data');
-    const token = normalizeToken(response.data);
-    token.quoteToken = response.data.quote_address || process.env.WETH_ADDRESS || '';
+    const response = await gmgnClientGet<any>('/token/info', { chain: CHAIN, address: tokenAddress });
+    if (!response || !response.address) throw new Error('No data');
+    const token = normalizeToken(response);
+    token.quoteToken = response.quote_address || process.env.WETH_ADDRESS || '';
     GMGNCache.set(cacheKey, token, 30);
     return token;
   } catch (e: any) {
@@ -199,8 +199,8 @@ export async function fetchTopTraders(tokenAddress: string) {
   if (cached) return cached;
 
   try {
-    const response = await gmgnClientGet<{ data: any[] }>(`/token/${CHAIN}/${tokenAddress}/top_traders`);
-    const traders = (response?.data || []).map((trader: any) => ({
+    const response = await gmgnClientGet<{ list: any[] }>('/market/token_top_traders', { chain: CHAIN, address: tokenAddress });
+    const traders = (response?.list || []).map((trader: any) => ({
       address: trader.address,
       winRate: trader.win_rate ? parseFloat(trader.win_rate) * 100 : 0,
       totalTrades: trader.total_trades || 0,
