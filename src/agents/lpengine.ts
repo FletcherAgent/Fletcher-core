@@ -878,6 +878,10 @@ export class LPEngineAgent {
       if (pos.mode === 'SEMI' || pos.mode === 'FULL') {
         if (pos.tradingMode === 'DRY_RUN') {
           proposal.description = `✅ *Auto-Harvested LP (Simulated)*\n` + proposal.description;
+          await prisma.lPPosition.update({
+            where: { id: pos.id },
+            data: { harvestedFees: { increment: pos.feesCollected } }
+          });
           if (this.onProposal) await this.onProposal(proposal);
           continue;
         }
@@ -890,6 +894,11 @@ export class LPEngineAgent {
 
           const txHash = await buildAndSendLPUserOperation(client, calls);
           await logEvent('INFO', `[LP] Position Auto-Harvested via Session Key`, { positionId: pos.id, txHash });
+
+          await prisma.lPPosition.update({
+            where: { id: pos.id },
+            data: { harvestedFees: { increment: pos.feesCollected } }
+          });
 
           proposal.description = `✅ *Auto-Harvested LP*\n` + proposal.description + `\nTx: \`${txHash.slice(0, 10)}...\``;
           if (this.onProposal) await this.onProposal(proposal);
