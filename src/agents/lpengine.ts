@@ -365,6 +365,8 @@ export class LPEngineAgent {
       console.log(`[LPEngine] ✅ Grok APPROVED ${candidate.token.symbol}`);
       if (this.onNotification) await this.onNotification(`✅ *Grok APPROVED $${candidate.token.symbol}*\nScore: ${sentiment.score}\n_Wait for V3 pool..._`);
       
+      candidate.grokScore = sentiment.score;
+      candidate.grokLabel = sentiment.label;
       selectedCandidate = candidate;
       break; // Found the top candidate that passed Grok
     }
@@ -423,6 +425,9 @@ export class LPEngineAgent {
       
       console.log(`[LPEngine] ✅ Grok APPROVED ${candidate.token.symbol}`);
       if (this.onNotification) await this.onNotification(`✅ *Grok APPROVED $${candidate.token.symbol}*\nScore: ${sentiment.score}\n_Wait for V3 pool..._`);
+      
+      candidate.grokScore = sentiment.score;
+      candidate.grokLabel = sentiment.label;
       toOpen.push(candidate);
     }
 
@@ -459,7 +464,7 @@ export class LPEngineAgent {
   // ─── Core: Propose Open Position ────────────────────────────────────────────
 
   private async proposeOpenPosition(
-    candidate: { token: GMGNToken; score: number },
+    candidate: { token: GMGNToken; score: number; grokScore?: number; grokLabel?: string },
     options: { dayMode: boolean; nightMode: boolean; nightRange?: number; source?: string }
   ): Promise<void> {
     const config    = await loadLPConfig();
@@ -612,7 +617,8 @@ export class LPEngineAgent {
       `Pair: ${t0Symbol}/${t1Symbol} (fee: ${feeTier / 10000}%)\n` +
       `Range: ${rangeLabel}\n` +
       `Size: $${isDryRun ? config.startSizeDryRun : config.startSizeLive}\n` +
-      `Score: ${candidate.score}/100\n` +
+      `Grok Score: ${candidate.grokScore ?? 'N/A'}/100 (${candidate.grokLabel ?? 'N/A'})\n` +
+      `Est APR: ${(candidate.score).toFixed(2)}%\n` +
       `MCap: $${(token.marketCap / 1000).toFixed(0)}K | Vol24h: $${(token.volume24h / 1000).toFixed(0)}K`;
 
     const defaultModeRecord = await prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } });
@@ -638,7 +644,7 @@ export class LPEngineAgent {
         dayMode:     options.dayMode,
         nightMode:   options.nightMode,
         source:      options.source ?? 'SYSTEM',
-        tradingMode: (modeCfg?.value || 'LIVE'),
+        tradingMode: isDryRun ? 'DRY_RUN' : 'LIVE',
         simulatedLiquidity: isDryRun ? simulatedLiquidity.toString() : null,
       },
     });
