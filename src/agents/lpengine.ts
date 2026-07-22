@@ -16,7 +16,7 @@
  * Zero-custody: agent only builds calldata & proposes. User signs.
  */
 
-import { encodeFunctionData, parseAbi, parseUnits, type Address, type Hex } from 'viem';
+import { encodeFunctionData, parseAbi, parseUnits, decodeEventLog, type Address, type Hex } from 'viem';
 import { PrismaClient } from '@prisma/client';
 import { publicClient } from '../services/viem.js';
 import { getSessionKeyClient, buildAndSendLPUserOperation, type UserOpCall } from '../services/sessionKey.js';
@@ -59,6 +59,8 @@ const NPM_ABI = parseAbi([
   'function burn(uint256 tokenId) external payable',
   // positions (for reading)
   'function positions(uint256 tokenId) external view returns (uint96 nonce, address operator, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128, uint128 tokensOwed0, uint128 tokensOwed1)',
+  // events
+  'event IncreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)'
 ]);
 
 const ERC20_ABI = parseAbi([
@@ -648,9 +650,34 @@ export class LPEngineAgent {
 
         const txHash = await buildAndSendLPUserOperation(client, calls);
         
+        console.log(`[LPEngine] 📜 Waiting for receipt to extract TokenID...`);
+        const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+        
+        let realTokenId = dbRecord.tokenId; // Fallback to PENDING-...
+        try {
+          for (const log of receipt.logs) {
+            try {
+              const decoded = decodeEventLog({
+                abi: NPM_ABI,
+                data: log.data,
+                topics: log.topics,
+              });
+              if (decoded.eventName === 'IncreaseLiquidity') {
+                realTokenId = (decoded.args as any).tokenId.toString();
+                console.log(`[LPEngine] 🎯 Successfully extracted Real TokenID: ${realTokenId}`);
+                break;
+              }
+            } catch (e) {
+              // Ignore logs that don't match our ABI
+            }
+          }
+        } catch (err) {
+          console.warn(`[LPEngine] Could not decode logs for TokenID extraction`);
+        }
+        
         await prisma.lPPosition.update({
           where: { id: dbRecord.id },
-          data: { status: 'OPEN' }
+          data: { status: 'OPEN', tokenId: realTokenId }
         });
 
         proposal.description = `✅ *Auto-Opened LP*\n` + proposal.description + `\nTx: \`${txHash.slice(0, 10)}...\``;
