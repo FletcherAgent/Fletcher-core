@@ -105,7 +105,8 @@ export interface LPProposal {
 interface LPConfig {
   maxPositions: number;
   positionCap:  number;
-  startSize:    number;
+  startSizeLive: number;
+  startSizeDryRun: number;
   nightRange:   number;
   dayCloseTime: string;
   ilHourThreshold: number;
@@ -113,7 +114,7 @@ interface LPConfig {
 
 async function loadLPConfig(): Promise<LPConfig> {
   const keys = [
-    'lp.maxPositions', 'lp.positionCap', 'lp.startSize',
+    'lp.maxPositions', 'lp.positionCap', 'lp.startSize.live', 'lp.startSize.dryrun',
     'lp.nightRange', 'lp.dayCloseTime', 'lp.ilHourThreshold',
   ];
   const configs = await prisma.systemConfig.findMany({ where: { key: { in: keys } } });
@@ -122,7 +123,8 @@ async function loadLPConfig(): Promise<LPConfig> {
   return {
     maxPositions:     parseInt(map['lp.maxPositions']    ?? '3'),
     positionCap:      parseFloat(map['lp.positionCap']   ?? '2000'),
-    startSize:        parseFloat(map['lp.startSize']     ?? '500'),
+    startSizeLive:    parseFloat(map['lp.startSize.live'] ?? '10'),
+    startSizeDryRun:  parseFloat(map['lp.startSize.dryrun'] ?? '500'),
     nightRange:       parseFloat(map['lp.nightRange']    ?? '0.25'),
     dayCloseTime:     map['lp.dayCloseTime'] ?? '23:00',
     ilHourThreshold:  parseInt(map['lp.ilHourThreshold'] ?? '4'),
@@ -532,7 +534,8 @@ export class LPEngineAgent {
     }
 
     // Amount calculation: split startSize 50/50 between token0 and token1
-    const halfUsd = config.startSize / 2;
+    const currentStartSize = isDryRun ? config.startSizeDryRun : config.startSizeLive;
+    const halfUsd = currentStartSize / 2;
     const poolPriceRaw = Number((BigInt(sqrtPriceX96) * 10000000n) / (2n ** 96n)) / 10000000;
     const poolPrice = poolPriceRaw ** 2; 
     const decimalAdjustedPoolPrice = poolPrice * (10 ** (t0Dec - t1Dec));
@@ -605,7 +608,7 @@ export class LPEngineAgent {
       `Pool: \`${poolAddress.slice(0, 10)}...\`\n` +
       `Pair: ${t0Symbol}/${t1Symbol} (fee: ${feeTier / 10000}%)\n` +
       `Range: ${rangeLabel}\n` +
-      `Size: $${config.startSize}\n` +
+      `Size: $${isDryRun ? config.startSizeDryRun : config.startSizeLive}\n` +
       `Score: ${candidate.score}/100\n` +
       `MCap: $${(token.marketCap / 1000).toFixed(0)}K | Vol24h: $${(token.volume24h / 1000).toFixed(0)}K`;
 
@@ -625,7 +628,7 @@ export class LPEngineAgent {
         feeTier,
         tickLower,
         tickUpper,
-        entryValue:  config.startSize,
+        entryValue:  isDryRun ? config.startSizeDryRun : config.startSizeLive,
         entryTick,
         mode:        currentMode,
         status:      isDryRun ? 'OPEN' : 'PENDING',
@@ -651,7 +654,7 @@ export class LPEngineAgent {
       feeTier,
       tickLower,
       tickUpper,
-      entryValueUsd: config.startSize,
+      entryValueUsd: isDryRun ? config.startSizeDryRun : config.startSizeLive,
       calldata,
       to: npmAddress,
       dayMode: options.dayMode,
