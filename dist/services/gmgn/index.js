@@ -11,7 +11,6 @@ export async function loadScreeningCriteria() {
         blacklist: JSON.parse(map['lp.blacklist'] ?? '["nsfw","scam"]')
     };
 }
-// Export them so other modules can use them
 export { getTrendingPairs, getTokenInfo, fetchTopTraders };
 export async function screenPairs(criteria) {
     const config = criteria ?? (await loadScreeningCriteria());

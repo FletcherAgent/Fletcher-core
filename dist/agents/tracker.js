@@ -49,7 +49,7 @@ export class TrackerAgent {
                         metrics: {
                             totalSignals,
                             openPositionsCount,
-                            tradingMode: tradingModeConfig?.value || 'LIVE',
+                            tradingMode: tradingModeConfig?.value || 'SEMI',
                             maxPositionSize: maxPosConfig?.value ? parseInt(maxPosConfig.value, 10) : 2000
                         }
                     }));
@@ -78,6 +78,32 @@ export class TrackerAgent {
                     }
                     catch (e) {
                         console.error(`[Tracker] Webhook error:`, e);
+                        res.writeHead(500);
+                        res.end();
+                    }
+                });
+            }
+            else if (req.method === 'POST' && req.url === '/api/settings/mode') {
+                let body = '';
+                req.on('data', chunk => { body += chunk.toString(); });
+                req.on('end', async () => {
+                    try {
+                        const payload = JSON.parse(body);
+                        if (['MANUAL', 'SEMI', 'FULL'].includes(payload.mode)) {
+                            await prisma.systemConfig.upsert({
+                                where: { key: 'TRADING_MODE' },
+                                update: { value: payload.mode },
+                                create: { key: 'TRADING_MODE', value: payload.mode }
+                            });
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ status: 'success', mode: payload.mode }));
+                        }
+                        else {
+                            res.writeHead(400);
+                            res.end(JSON.stringify({ error: 'Invalid mode' }));
+                        }
+                    }
+                    catch (e) {
                         res.writeHead(500);
                         res.end();
                     }

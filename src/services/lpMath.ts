@@ -235,17 +235,46 @@ export function calcIL(params: {
 }): ILResult {
   const { entryPrice0, entryPrice1, currentPrice0, currentPrice1, entryValue } = params;
 
-  // Price ratio change
-  const priceRatio0 = entryPrice0 > 0 ? currentPrice0 / entryPrice0 : 1;
-  const priceRatio1 = entryPrice1 > 0 ? currentPrice1 / entryPrice1 : 1;
+  // Base prices in terms of token1/token0 ratio (assuming token1 is quote, e.g. USD)
+  // price = P1 / P0 in terms of their USD values.
+  const P0 = entryPrice1 > 0 ? entryPrice0 / entryPrice1 : 1; 
+  const P  = currentPrice1 > 0 ? currentPrice0 / currentPrice1 : 1;
 
-  // Uniswap V2-equivalent IL formula (approximation for concentrated range):
-  // LP_value = entryValue * 2 * sqrt(priceRatio0 * priceRatio1) / (priceRatio0 + priceRatio1) * avgPriceChange
-  // Simplified: IL_factor = 2*sqrt(k)/(1+k) where k = priceRatio0/priceRatio1
-  const k = priceRatio0 / (priceRatio1 || 1);
-  const ilFactor  = (2 * Math.sqrt(k)) / (1 + k);
-  const hodlValue = entryValue * (priceRatio0 * 0.5 + priceRatio1 * 0.5); // 50/50 HODL
-  const lpValue   = entryValue * ilFactor * ((priceRatio0 + priceRatio1) / 2);
+  const Pa = tickToPrice(params.tickLower);
+  const Pb = tickToPrice(params.tickUpper);
+
+  // If entry price is out of bounds, we clamp it for the purpose of finding initial token amounts.
+  // Realistically it shouldn't be, but this protects the math.
+  const clampedP0 = Math.max(Pa, Math.min(Pb, P0));
+
+  // Let L = 1
+  const x0 = (Math.sqrt(Pb) - Math.sqrt(clampedP0)) / (Math.sqrt(clampedP0) * Math.sqrt(Pb));
+  const y0 = Math.sqrt(clampedP0) - Math.sqrt(Pa);
+
+  // HODL value in terms of token1
+  const hodl_unit_value = x0 * P + y0;
+
+  // LP value in terms of token1
+  let lp_unit_value = 0;
+  if (P < Pa) {
+    lp_unit_value = ((Math.sqrt(Pb) - Math.sqrt(Pa)) / (Math.sqrt(Pa) * Math.sqrt(Pb))) * P;
+  } else if (P > Pb) {
+    lp_unit_value = Math.sqrt(Pb) - Math.sqrt(Pa);
+  } else {
+    lp_unit_value = 2 * Math.sqrt(P) - (P / Math.sqrt(Pb)) - Math.sqrt(Pa);
+  }
+
+  // To get values in USD, we normalize against the entry value.
+  // entry_unit_value is lp_unit_value at P0
+  let entry_unit_value = 2 * Math.sqrt(clampedP0) - (clampedP0 / Math.sqrt(Pb)) - Math.sqrt(Pa);
+  if (entry_unit_value <= 0) entry_unit_value = 1e-18; // protect div0
+
+  // The actual LP value in USD today
+  // We use currentPrice1 to convert the token1-denominated unit value to USD
+  // Wait, entryValue is in USD. So at entry, L = entryValue / (entry_unit_value * entryPrice1)
+  const L_usd = entryValue / (entry_unit_value * entryPrice1);
+  const lpValue = L_usd * lp_unit_value * currentPrice1;
+  const hodlValue = L_usd * hodl_unit_value * currentPrice1;
 
   const ilUsd = lpValue - hodlValue; // negative = loss
   const ilPct = hodlValue > 0 ? (ilUsd / hodlValue) * 100 : 0;

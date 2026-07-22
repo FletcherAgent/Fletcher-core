@@ -15,7 +15,7 @@
  *
  * Zero-custody: agent only builds calldata & proposes. User signs.
  */
-import { encodeFunctionData, parseAbi } from 'viem';
+import { encodeFunctionData, parseAbi, decodeEventLog } from 'viem';
 import { publicClient } from '../services/viem.js';
 import { getSessionKeyClient, buildAndSendLPUserOperation } from '../services/sessionKey.js';
 import { getUserTier, getTierLimits } from '../services/tierGate.js';
@@ -43,6 +43,8 @@ const NPM_ABI = parseAbi([
     'function burn(uint256 tokenId) external payable',
     // positions (for reading)
     'function positions(uint256 tokenId) external view returns (uint96 nonce, address operator, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128, uint128 tokensOwed0, uint128 tokensOwed1)',
+    // events
+    'event IncreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)'
 ]);
 const ERC20_ABI = parseAbi([
     'function decimals() view returns (uint8)',
@@ -410,7 +412,7 @@ export class LPEngineAgent {
         const token1Price = isToken0 ? 1 : token.priceUsd;
         const amount0Desired = this.usdToTokenAmount(halfUsd, token0Price, t0Dec);
         const amount1Desired = this.usdToTokenAmount(halfUsd, token1Price, t1Dec);
-        const recipient = (process.env.USER_WALLET_ADDRESS ?? '');
+        const recipient = ((process.env.LP_WALLET_ADDRESS || process.env.USER_WALLET_ADDRESS) ?? '');
         const tier = await getUserTier(recipient);
         const limits = getTierLimits(tier);
         // Enforce Active Positions Limit
@@ -513,9 +515,34 @@ export class LPEngineAgent {
                         data: calldata
                     }];
                 const txHash = await buildAndSendLPUserOperation(client, calls);
+                console.log(`[LPEngine] 📜 Waiting for receipt to extract TokenID...`);
+                const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+                let realTokenId = dbRecord.tokenId; // Fallback to PENDING-...
+                try {
+                    for (const log of receipt.logs) {
+                        try {
+                            const decoded = decodeEventLog({
+                                abi: NPM_ABI,
+                                data: log.data,
+                                topics: log.topics,
+                            });
+                            if (decoded.eventName === 'IncreaseLiquidity') {
+                                realTokenId = decoded.args.tokenId.toString();
+                                console.log(`[LPEngine] 🎯 Successfully extracted Real TokenID: ${realTokenId}`);
+                                break;
+                            }
+                        }
+                        catch (e) {
+                            // Ignore logs that don't match our ABI
+                        }
+                    }
+                }
+                catch (err) {
+                    console.warn(`[LPEngine] Could not decode logs for TokenID extraction`);
+                }
                 await prisma.lPPosition.update({
                     where: { id: dbRecord.id },
-                    data: { status: 'OPEN' }
+                    data: { status: 'OPEN', tokenId: realTokenId, txHash }
                 });
                 proposal.description = `✅ *Auto-Opened LP*\n` + proposal.description + `\nTx: \`${txHash.slice(0, 10)}...\``;
                 await logEvent('INFO', `[LP] Position Auto-Opened via Session Key`, { positionId: dbRecord.id, txHash });
@@ -556,7 +583,7 @@ export class LPEngineAgent {
         const isSim = pos.tokenId.startsWith('SIM-') || pos.tradingMode === 'DRY_RUN';
         const tokenId = isSim ? 0n : BigInt(pos.tokenId);
         const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 10);
-        const recipient = (process.env.USER_WALLET_ADDRESS ?? '');
+        const recipient = ((process.env.LP_WALLET_ADDRESS || process.env.USER_WALLET_ADDRESS) ?? '');
         // Read current liquidity from NPM (skip if simulated)
         let liquidity = 0n;
         if (!isSim) {
@@ -662,7 +689,7 @@ export class LPEngineAgent {
             ? { id: positionId, status: 'OPEN' }
             : { status: 'OPEN' };
         const positions = await prisma.lPPosition.findMany({ where });
-        const recipient = (process.env.USER_WALLET_ADDRESS ?? '');
+        const recipient = ((process.env.LP_WALLET_ADDRESS || process.env.USER_WALLET_ADDRESS) ?? '');
         const tier = await getUserTier(recipient);
         const { npmAddress: defaultNpm } = await this.getAddresses();
         for (const pos of positions) {
@@ -670,7 +697,7 @@ export class LPEngineAgent {
                 continue;
             const isSim = pos.tokenId.startsWith('SIM-') || pos.tradingMode === 'DRY_RUN';
             const tokenId = isSim ? 0n : BigInt(pos.tokenId);
-            const recipient = (process.env.USER_WALLET_ADDRESS ?? '');
+            const recipient = ((process.env.LP_WALLET_ADDRESS || process.env.USER_WALLET_ADDRESS) ?? '');
             const npmAddress = pos.managerAddress || (await this.getAddresses()).npmAddress;
             const calldata = isSim ? '0x' : this.buildCollectCalldata(tokenId, recipient);
             const proposal = {
@@ -734,12 +761,12 @@ export class LPEngineAgent {
      * Called by bot after user approve + tx confirmed.
      * Parse tokenId from receipt event and update DB.
      */
-    async onOpenConfirmed(positionId, realTokenId) {
+    async onOpenConfirmed(positionId, realTokenId, txHash) {
         await prisma.lPPosition.update({
             where: { id: positionId },
-            data: { status: 'OPEN', tokenId: realTokenId },
+            data: { status: 'OPEN', tokenId: realTokenId, txHash },
         });
-        await logEvent('INFO', `[LP] Position Opened (Confirmed) - TokenID: ${realTokenId}`, { positionId });
+        await logEvent('INFO', `[LP] Position Opened (Confirmed) - TokenID: ${realTokenId}`, { positionId, txHash });
         console.log(`[LPEngine] ✅ Position ${positionId} confirmed — tokenId: ${realTokenId}`);
     }
     async onCloseConfirmed(positionId, feesCollectedUsd) {

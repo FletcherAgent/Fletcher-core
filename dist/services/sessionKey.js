@@ -115,7 +115,7 @@ export async function getSessionKeyClient(modeRequired, tier) {
         throw new Error(`No valid SessionKey found for mode ${modeRequired}`);
     }
     // Simulated: We use the master PRIVATE_KEY to act on behalf of the smart account
-    const pk = process.env.PRIVATE_KEY;
+    const pk = (process.env.LP_PRIVATE_KEY || process.env.PRIVATE_KEY);
     if (!pk)
         throw new Error('PRIVATE_KEY not found in .env');
     return await createSmartAccount(pk, tier);

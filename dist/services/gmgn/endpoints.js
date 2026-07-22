@@ -21,35 +21,123 @@ function normalizeToken(d) {
         isVerified: Boolean(d?.is_open_source ?? d?.verified ?? true),
     };
 }
+// ─── FALLBACKS (GeckoTerminal & DexScreener) ─────────────────────────────────
+async function getTrendingPairsFallback(limit = 20) {
+    console.log('[Fallback] Using GeckoTerminal for trending...');
+    try {
+        let allPools = [];
+        let page = 1;
+        while (allPools.length < limit && page <= 5) {
+            const res = await fetch(`https://api.geckoterminal.com/api/v2/networks/robinhood/trending_pools?page=${page}`);
+            if (!res.ok)
+                break;
+            const data = await res.json();
+            if (!data.data || data.data.length === 0)
+                break;
+            const validPools = data.data.filter((p) => p.relationships?.dex?.data?.id === 'uniswap-v3-robinhood');
+            allPools = allPools.concat(validPools);
+            page++;
+            await new Promise(r => setTimeout(r, 500));
+        }
+        return allPools.slice(0, limit).map((pool) => {
+            const attrs = pool.attributes;
+            return {
+                address: pool.relationships?.base_token?.data?.id?.replace('robinhood_', '') || attrs.address,
+                symbol: attrs.name.split(' / ')[0] || 'TKN',
+                name: attrs.name,
+                marketCap: parseFloat(attrs.market_cap_usd || '0'),
+                volume24h: parseFloat(attrs.volume_usd?.h24 || '0'),
+                liquidity: parseFloat(attrs.reserve_in_usd || '0'),
+                priceUsd: parseFloat(attrs.base_token_price_usd || '0'),
+                category: ['tech', 'RWA', 'launchpad', 'ai'][Math.floor(Math.random() * 4)],
+                launchPad: 'None',
+                isHoneypot: false,
+                buyTax: 0,
+                sellTax: 0,
+                isVerified: true,
+                quoteToken: pool.relationships?.quote_token?.data?.id?.replace('robinhood_', '') || ''
+            };
+        });
+    }
+    catch (err) {
+        console.error('[Fallback] GeckoTerminal failed:', err);
+        return [];
+    }
+}
+async function getTokenInfoFallback(tokenAddress) {
+    console.log(`[Fallback] Using DexScreener for ${tokenAddress}...`);
+    try {
+        const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${tokenAddress}`);
+        if (!res.ok)
+            return null;
+        const data = await res.json();
+        const pairs = data.pairs || [];
+        const rbPairs = pairs.filter((p) => p.chainId === 'robinhood');
+        if (rbPairs.length === 0)
+            return null;
+        const mainPair = rbPairs[0];
+        const token = {
+            address: tokenAddress,
+            symbol: mainPair.baseToken?.symbol || '',
+            name: mainPair.baseToken?.name || '',
+            marketCap: parseFloat(mainPair.fdv || '0'),
+            volume24h: rbPairs.reduce((acc, p) => acc + parseFloat(p.volume?.h24 || '0'), 0),
+            liquidity: rbPairs.reduce((acc, p) => acc + parseFloat(p.liquidity?.usd || '0'), 0),
+            priceUsd: parseFloat(mainPair.priceUsd || '0'),
+            category: 'meme',
+            launchPad: 'None',
+            isHoneypot: false,
+            buyTax: 0, sellTax: 0, isVerified: true,
+            quoteToken: mainPair.quoteToken?.address || ''
+        };
+        // GoPlus Security
+        try {
+            const gpRes = await fetch(`https://api.gopluslabs.io/api/v1/token_security/4663?contract_addresses=${tokenAddress}`);
+            if (gpRes.ok) {
+                const gpData = await gpRes.json();
+                const sec = gpData.result?.[tokenAddress.toLowerCase()];
+                if (sec) {
+                    token.isHoneypot = sec.is_honeypot === "1";
+                    token.buyTax = parseFloat(sec.buy_tax || '0') * 100;
+                    token.sellTax = parseFloat(sec.sell_tax || '0') * 100;
+                    token.isVerified = sec.is_open_source === "1";
+                }
+            }
+        }
+        catch (gperr) { /* ignore */ }
+        return token;
+    }
+    catch (err) {
+        return null;
+    }
+}
+// ─── MAIN EXPORTS (WITH FALLBACKS) ──────────────────────────────────────────
 /**
- * Fetches Trending Pairs from GMGN with 60s cache
+ * Fetches Trending Pairs from GMGN with 60s cache. Fallback to GT.
  */
 export async function getTrendingPairs(limit = 20) {
     const cacheKey = `gmgn:trending:${limit}`;
     const cached = GMGNCache.get(cacheKey);
-    if (cached) {
-        console.log('[GMGN Endpoints] ⚡ Returning cached Trending Pairs');
+    if (cached)
         return cached;
-    }
-    console.log('[GMGN Endpoints] 🌐 Fetching Trending Pairs from GMGN...');
     try {
-        // We request the rank/trending endpoint from GMGN
-        const response = await gmgnClientGet(`/rank/${CHAIN}/swaps/1h`, {
-            orderby: 'swaps',
-            direction: 'desc'
-        });
+        const response = await gmgnClientGet('/market/rank', { chain: CHAIN, interval: '1h', orderby: 'swaps', direction: 'desc' });
         const tokens = (response?.data?.rank || []).slice(0, limit).map(normalizeToken);
-        // Cache for 60 seconds
         GMGNCache.set(cacheKey, tokens, 60);
         return tokens;
     }
     catch (e) {
-        console.error('[GMGN Endpoints] ❌ Failed to fetch trending pairs:', e);
-        return [];
+        if (e.message.includes('DEGRADATION MODE')) {
+            console.warn('[GMGN Endpoints] 📉 Degradation Mode is active, switching to GeckoTerminal');
+        }
+        else {
+            console.warn('[GMGN Endpoints] ⚠️ GMGN Fetch failed, falling back to GeckoTerminal:', e.message);
+        }
+        return getTrendingPairsFallback(limit);
     }
 }
 /**
- * Fetches Token Info from GMGN with 30s cache
+ * Fetches Token Info from GMGN with 30s cache. Fallback to DexScreener.
  */
 export async function getTokenInfo(tokenAddress) {
     const cacheKey = `gmgn:token:${tokenAddress}`;
@@ -57,19 +145,20 @@ export async function getTokenInfo(tokenAddress) {
     if (cached)
         return cached;
     try {
-        const response = await gmgnClientGet(`/token/${CHAIN}/${tokenAddress}`);
-        if (!response || !response.data)
-            return null;
-        const token = normalizeToken(response.data);
-        // Fallbacks if data is missing or specific GMGN quirks
-        token.quoteToken = response.data.quote_address || process.env.WETH_ADDRESS || '';
-        // Cache for 30 seconds
+        const response = await gmgnClientGet('/token/info', { chain: CHAIN, address: tokenAddress });
+        if (!response || !response.address)
+            throw new Error('No data');
+        const token = normalizeToken(response);
+        token.quoteToken = response.quote_address || process.env.WETH_ADDRESS || '';
         GMGNCache.set(cacheKey, token, 30);
         return token;
     }
     catch (e) {
-        console.error(`[GMGN Endpoints] ❌ Failed to fetch info for ${tokenAddress}:`, e);
-        return null;
+        if (e.message.includes('DEGRADATION MODE')) {
+            return getTokenInfoFallback(tokenAddress);
+        }
+        console.error(`[GMGN Endpoints] ❌ Failed to fetch info for ${tokenAddress}:`, e.message);
+        return getTokenInfoFallback(tokenAddress); // Also fallback on individual failure
     }
 }
 /**
@@ -81,19 +170,18 @@ export async function fetchTopTraders(tokenAddress) {
     if (cached)
         return cached;
     try {
-        const response = await gmgnClientGet(`/token/${CHAIN}/${tokenAddress}/top_traders`);
-        const traders = (response?.data || []).map((trader) => ({
+        const response = await gmgnClientGet('/market/token_top_traders', { chain: CHAIN, address: tokenAddress });
+        const traders = (response?.list || []).map((trader) => ({
             address: trader.address,
             winRate: trader.win_rate ? parseFloat(trader.win_rate) * 100 : 0,
             totalTrades: trader.total_trades || 0,
             realizedPnlUsd: trader.realized_profit || 0
         }));
-        // Cache for 300 seconds (5 mins)
         GMGNCache.set(cacheKey, traders, 300);
         return traders;
     }
     catch (e) {
-        console.error(`[GMGN Endpoints] ❌ fetchTopTraders failed for ${tokenAddress}:`, e);
-        return [];
+        console.error(`[GMGN Endpoints] ❌ fetchTopTraders failed for ${tokenAddress}`);
+        return []; // No fallback for Top Traders since DS/GT don't provide it
     }
 }
