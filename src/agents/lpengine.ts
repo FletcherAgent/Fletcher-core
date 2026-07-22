@@ -354,8 +354,8 @@ export class LPEngineAgent {
       const sentiment = await IntelligenceLayer.analyzeSentiment(candidate.token.symbol, candidate.token.address);
       console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
       
-      if (sentiment.label === 'BEARISH' || sentiment.score < 50) {
-        console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < 50`);
+      if (sentiment.label === 'BEARISH' || sentiment.score < 75) {
+        console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < 75`);
         continue;
       }
       
@@ -413,8 +413,8 @@ export class LPEngineAgent {
       const sentiment = await IntelligenceLayer.analyzeSentiment(candidate.token.symbol, candidate.token.address);
       console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
       
-      if (sentiment.label === 'BEARISH' || sentiment.score < 50) {
-        console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < 50`);
+      if (sentiment.label === 'BEARISH' || sentiment.score < 75) {
+        console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < 75`);
         continue;
       }
       
