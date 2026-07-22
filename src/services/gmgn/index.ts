@@ -10,7 +10,9 @@ const FACTORY_ABI = parseAbi([
 export interface PoolCandidate {
   pool:       GMGNPool;
   token:      GMGNToken;
-  score:      number;
+  score:      number; // This is actually the GMGN Estimated Fee APR score
+  grokScore?: number;
+  grokLabel?: string;
 }
 
 export interface LPScreeningCriteria {
