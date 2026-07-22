@@ -27,11 +27,20 @@ export const publicClient = createPublicClient({
     transport: http(rpcUrl, {
         batch: true,
     }),
+    // TODO: Once you upgrade to a premium RPC (like Alchemy), remove or reduce this interval (default is 4000)
+    // so the Scout agent can detect events much faster (real-time).
+    pollingInterval: 15_000,
 });
-const wssUrl = process.env.ROBINHOOD_WSS_URL || 'wss://robinhood-mainnet.g.alchemy.com/v2/ubcuebFzxN1SaqLkuNrIJ';
+const wssUrl = process.env.ROBINHOOD_WSS_URL;
+const isWs = wssUrl && (wssUrl.startsWith('ws://') || wssUrl.startsWith('wss://'));
 export const wssClient = createPublicClient({
     chain: robinhoodChain,
-    transport: webSocket(wssUrl),
+    transport: isWs ? webSocket(wssUrl, {
+        keepAlive: true,
+        reconnect: true,
+    }) : http(rpcUrl),
+    // TODO: Same as above. If using a premium RPC or true WSS, remove this pollingInterval.
+    pollingInterval: 15_000,
 });
 export const account = process.env.PRIVATE_KEY
     ? privateKeyToAccount(process.env.PRIVATE_KEY)

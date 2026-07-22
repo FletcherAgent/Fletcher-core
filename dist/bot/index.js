@@ -2,6 +2,9 @@ import { Bot } from "grammy";
 import * as dotenv from "dotenv";
 import { Orchestrator } from "../core/orchestrator.js";
 import { connectDb, prisma } from "../core/db.js";
+import { screenPairs } from "../services/gmgn.js";
+import { getUserTier, clearTierCache } from "../services/tierGate.js";
+import { startUserbot } from "./userbot.js";
 dotenv.config();
 const botToken = process.env.TELEGRAM_BOT_TOKEN;
 if (!botToken) {
@@ -24,6 +27,90 @@ function queueLog(emoji, ...args) {
     }).join(' ');
     if (msg.includes("[Tracker]") || msg.includes("Received webhook activity") || msg.includes("Swap activity detected"))
         return;
+    // Ignore Scout WSS spam
+    if (msg.includes("[Scout ⚡ WSS]"))
+        return;
+    // Do not forward generic REJECTED logs to Telegram
+    if (msg.includes("REJECTED:"))
+        return;
+    // Ignore No V3 pool found
+    if (msg.includes("No V3 pool found"))
+        return;
+    // Ignore GMGN fallback warning to prevent Telegram 429 spam
+    if (msg.includes("GMGN API failed"))
+        return;
+    // Format important alerts as pretty Telegram messages instead of raw log blocks
+    if (process.env.TELEGRAM_CHAT_ID) {
+        let prettyMsg = null;
+        // 1. Grok Analysis Result (COMMENTED OUT TO PREVENT TELEGRAM SPAM/429 ERROR)
+        /*
+        const grokMatch = msg.match(/\[LPEngine\] Grok Result for (.*?): (BULLISH|BEARISH|NEUTRAL) \(Score: (\d+)\) - (.*)/);
+        if (grokMatch) {
+          prettyMsg = `<b>🧠 Grok AI Analysis: $${grokMatch[1]}</b>\nStatus: <b>${grokMatch[2]}</b> (Score: ${grokMatch[3]})\n\n<i>${grokMatch[4]}</i>`;
+        }
+        */
+        // 2. Proposing Position (COMMENTED OUT TO PREVENT TELEGRAM SPAM/429 ERROR)
+        /*
+        const proposeMatch = msg.match(/\[LPEngine\] 📋 Proposing position: (.*?)\s*\|\s*dayMode=(.*?)\s*\|\s*dryRun=(.*)/);
+        if (proposeMatch) {
+          prettyMsg = `<b>📋 Proposing New LP Position</b>\n<b>Token:</b> $${proposeMatch[1]}\n<b>Day Mode:</b> ${proposeMatch[2]}\n<b>Dry Run:</b> ${proposeMatch[3]}`;
+        }
+        */
+        // 3. Token Passed Screening (COMMENTED OUT TO PREVENT TELEGRAM SPAM/429 ERROR)
+        /*
+        const passedMatch = msg.match(/\[(?:GMGN|MarketData)\] ✅ (.*?) PASSED — score: (\d+), mcap: (.*?), vol: (.*)/);
+        if (passedMatch) {
+          prettyMsg = `<b>✅ Token Passed Screening: $${passedMatch[1]}</b>\n<b>Score:</b> ${passedMatch[2]}\n<b>Market Cap:</b> ${passedMatch[3]}\n<b>24h Vol:</b> ${passedMatch[4]}`;
+        }
+        */
+        // 4. Grok Approved (COMMENTED OUT TO PREVENT TELEGRAM SPAM/429 ERROR)
+        /*
+        const approvedMatch = msg.match(/\[LPEngine\] ✅ Grok APPROVED (.*)/);
+        if (approvedMatch) {
+          prettyMsg = `<b>✅ Grok APPROVED $${approvedMatch[1]}</b>\nSentiment is strongly bullish. Proceeding to execution.`;
+        }
+        */
+        // 5. Userbot Rejected (Grok)
+        const userbotRejectMatch = msg.match(/\[Userbot\] ❌ Token (.*) rejected by Grok XAI \(Score (\d+): (.*)\)/);
+        if (userbotRejectMatch) {
+            prettyMsg = `❌ <b>Alpha Signal Rejected</b>\nToken: <code>${userbotRejectMatch[1]}</code>\n<b>Score:</b> ${userbotRejectMatch[2]}\n\n<i>${userbotRejectMatch[3]}</i>`;
+        }
+        // 6. Userbot Signal Detected
+        const signalMatch = msg.match(/\[Userbot\] 🚨 Signal detected! Address: (.*)/);
+        if (signalMatch) {
+            prettyMsg = `🚨 <b>Alpha Signal Detected!</b>\nAddress: <code>${signalMatch[1]}</code>`;
+        }
+        // 7. Userbot Verifying
+        const verifyingMatch = msg.match(/\[Userbot\] Verifying (.*) with DexScreener\/GoPlus\.\.\./);
+        if (verifyingMatch) {
+            prettyMsg = `🔍 <b>Verifying Token</b>\nAddress: <code>${verifyingMatch[1]}</code>\n<i>Checking DexScreener & GoPlus...</i>`;
+        }
+        // 8. Userbot Not Found / No Pool
+        const notFoundMatch = msg.match(/\[Userbot\] ❌ Token (.*) not found or no pool exists yet\./);
+        if (notFoundMatch) {
+            prettyMsg = `❌ <b>Alpha Signal Rejected</b>\nToken: <code>${notFoundMatch[1]}</code>\n<i>Not found on DexScreener or no liquidity pool exists yet.</i>`;
+        }
+        // 9. Userbot Generic Reject (Catch all other rejections)
+        const genericRejectMatch = msg.match(/\[Userbot\] ❌ Token (.*) rejected: (.*)/);
+        if (genericRejectMatch && !userbotRejectMatch) {
+            prettyMsg = `❌ <b>Alpha Signal Rejected</b>\nToken: <code>${genericRejectMatch[1]}</code>\n<i>Reason: ${genericRejectMatch[2]}</i>`;
+        }
+        if (!prettyMsg && (msg.includes('⚠️') || msg.includes('❌'))) {
+            if (!msg.includes('No V3 pool found')) {
+                prettyMsg = `<pre>${msg}</pre>`;
+            }
+        }
+        // 10. Userbot Grok Processing
+        const grokProcessingMatch = msg.match(/\[Userbot\] Running Grok XAI to check token quality\.\.\./);
+        if (grokProcessingMatch) {
+            prettyMsg = `🧠 <i>Running Grok XAI to analyze token quality...</i>`;
+        }
+        if (prettyMsg) {
+            bot.api.sendMessage(process.env.TELEGRAM_CHAT_ID, prettyMsg, { parse_mode: 'HTML' })
+                .catch(err => originalError("Failed to send formatted msg", err));
+            return; // Stop here, do not add to the standard logBuffer
+        }
+    }
     logBuffer.push(`${emoji} ${msg}`);
 }
 console.log = (...args) => {
@@ -66,11 +153,31 @@ bot.command("help", (ctx) => {
 🚀 <b>Core System</b>
 /start - Start the bot and show initial status.
 /status - Show agent status, network, and active positions.
+/tier - Check your current VIP tier status and FLETCH balance.
 /help - Show this guide and command list.
 
 🕹️ <b>Operation Mode</b>
 /mode auto - (Sniper Mode) Bot automatically buys new tokens without confirmation.
 /mode confirm - (Manual Mode) Bot sends [Confirm] / [Reject] buttons before buying.
+
+🧠 <b>Intelligence Layer</b>
+/grok &lt;token&gt; - AI sentiment analysis for a specific token (uses grok-4.3).
+/grok_toggle on|off - Enable or disable Grok AI screening globally.
+/config - View all system configurations (including GROK_ENABLED).
+/discover - Run an autonomous wallet discovery cycle via GMGN & Grok.
+
+💧 <b>LP Engine (v2.0 Core)</b>
+/lp status - Show all active LP positions (fee, IL, APR, range).
+/lp scan - Run pair screening and show candidates that pass filters.
+/lp close &lt;id&gt; - Propose closing a specific LP position.
+/lp blacklist &lt;address&gt; - Blacklist a token (owner only).
+/lp mode manual - Set LP execution to MANUAL (all tx via Telegram).
+/lp mode semi - Set LP execution to SEMI (collect+compound auto).
+/lp mode full - Set LP execution to FULL autonomous.
+/lpmeta - View or edit LP screening config (owner only).
+/harvest - Collect fees from all eligible open LP positions.
+/daymode - Manually trigger LP Engine Day Mode (find 1 best token).
+/nightmode - Manually trigger LP Engine Night Mode (find up to 3 tokens).
 
 🎯 <b>Copy-Trade (Smart Money)</b>
 /track &lt;address&gt; [label] [tier] - Add a wallet to copy-trade.
@@ -151,6 +258,76 @@ bot.command("untrack", async (ctx) => {
         ctx.reply("❌ Failed to remove or not found.");
     }
 });
+bot.command("grok", async (ctx) => {
+    const token = ctx.match?.trim();
+    if (!token)
+        return ctx.reply("❌ Usage: `/grok <tokenSymbol>`\\nExample: `/grok PEPE`", { parse_mode: "Markdown" });
+    ctx.reply(`🧠 Asking Grok about $${token}...`);
+    try {
+        const { IntelligenceLayer } = await import('../services/intelligence.js');
+        const result = await IntelligenceLayer.analyzeSentiment(token, '0x...'); // Dummy address for now
+        const emoji = result.label === 'BULLISH' ? '🟢' : result.label === 'BEARISH' ? '🔴' : '🟡';
+        const msg = `
+${emoji} **Grok Sentiment Analysis for $${token}**
+- **Score:** ${result.score}/100
+- **Label:** ${result.label}
+
+**Reasoning:**
+_${result.reasoning}_
+`;
+        ctx.reply(msg.trim(), { parse_mode: "Markdown" });
+    }
+    catch (e) {
+        ctx.reply("❌ Grok API failed.");
+    }
+});
+bot.command("grok_toggle", async (ctx) => {
+    const param = ctx.match?.toLowerCase().trim();
+    if (param !== "on" && param !== "off") {
+        return ctx.reply("❌ Usage: `/grok_toggle on` or `/grok_toggle off`", { parse_mode: "Markdown" });
+    }
+    const enabled = param === "on" ? "true" : "false";
+    try {
+        await prisma.systemConfig.upsert({
+            where: { key: 'GROK_ENABLED' },
+            update: { value: enabled },
+            create: { key: 'GROK_ENABLED', value: enabled }
+        });
+        ctx.reply(enabled === "true"
+            ? "✅ **Grok AI Analysis is now ENABLED.** Bot will analyze sentiment for every new token."
+            : "⏸️ **Grok AI Analysis is now DISABLED.** Bot will skip AI checks and auto-approve tokens to save API usage.", { parse_mode: "Markdown" });
+    }
+    catch (e) {
+        ctx.reply("❌ Failed to update GROK_ENABLED config in database.");
+    }
+});
+bot.command("config", async (ctx) => {
+    try {
+        const configs = await prisma.systemConfig.findMany();
+        if (configs.length === 0) {
+            return ctx.reply("⚙️ **System Config**\n_No configurations found in database._", { parse_mode: "Markdown" });
+        }
+        let msg = "⚙️ **System Configurations**\n\n";
+        for (const conf of configs) {
+            msg += `- **${conf.key}**: \`${conf.value}\`\n`;
+        }
+        ctx.reply(msg, { parse_mode: "Markdown" });
+    }
+    catch (e) {
+        ctx.reply("❌ Failed to fetch configurations from database.");
+    }
+});
+bot.command("discover", async (ctx) => {
+    ctx.reply("🔍 Running Autonomous Wallet Discovery Cycle via GMGN & Grok...");
+    try {
+        const { DiscoveryAgent } = await import('../agents/discovery.js');
+        const count = await DiscoveryAgent.runDiscoveryCycle();
+        ctx.reply(`✅ Cycle complete. Discovered and automatically added **${count}** new profitable wallets to the registry.`, { parse_mode: "Markdown" });
+    }
+    catch (e) {
+        ctx.reply("❌ Discovery cycle failed.");
+    }
+});
 bot.command("wallets", async (ctx) => {
     try {
         const wallets = await prisma.trackedWallet.findMany();
@@ -219,6 +396,334 @@ bot.command("copyexit", async (ctx) => {
     }
 });
 const orchestrator = new Orchestrator(bot);
+// ─── LP ENGINE COMMANDS ──────────────────────────────────────────────────────
+/** /lp <subcommand> dispatcher */
+bot.command("tier", async (ctx) => {
+    const args = ctx.match?.trim();
+    const wallet = process.env.USER_WALLET_ADDRESS;
+    if (!wallet)
+        return ctx.reply("❌ Wallet address not configured in ENV.");
+    if (args === "refresh") {
+        clearTierCache(wallet);
+        ctx.reply("🔄 Tier cache cleared.");
+    }
+    const tier = await getUserTier(wallet);
+    let label = "Tier 0 (Basic)";
+    if (tier === 1)
+        label = "Tier 1 (Base)";
+    if (tier === 2)
+        label = "Tier 2 (Pro)";
+    if (tier === 3)
+        label = "Tier 3 (VIP)";
+    ctx.reply(`🏅 *Your FLETCH Status*\n- Address: \`${wallet}\`\n- Level: **${label}**\n\n_Use /tier refresh to update immediately._`, { parse_mode: 'Markdown' });
+});
+bot.command("lp", async (ctx) => {
+    const args = ctx.match?.trim().split(/\s+/) ?? [];
+    const sub = args[0]?.toLowerCase();
+    const wallet = process.env.USER_WALLET_ADDRESS;
+    if (!wallet)
+        return ctx.reply("❌ Wallet address not configured in ENV.");
+    const tier = await getUserTier(wallet);
+    if (tier === 0 && sub !== 'status') {
+        return ctx.reply("❌ **Access Denied**\nYou need at least Tier 1 (10,000 $FLETCH) to use LP features.", { parse_mode: 'Markdown' });
+    }
+    const lpEngine = orchestrator.getLPEngine();
+    // /lp status
+    if (!sub || sub === 'status') {
+        try {
+            const summary = await lpEngine.getStatusSummary();
+            ctx.reply(summary, { parse_mode: 'Markdown' });
+        }
+        catch (e) {
+            ctx.reply('❌ Failed to fetch LP positions.');
+        }
+        return;
+    }
+    // /lp scan
+    if (sub === 'scan') {
+        ctx.reply('🔍 *Scanning pairs...* (this may take a few seconds)', { parse_mode: 'Markdown' });
+        try {
+            const candidates = await screenPairs();
+            if (candidates.length === 0) {
+                return ctx.reply('📭 *No pairs passed screening right now.*\n\nCheck `/lpmeta` to review filter criteria.', { parse_mode: 'Markdown' });
+            }
+            let msg = `✅ *${candidates.length} pair(s) passed screening:*\n\n`;
+            for (const c of candidates.slice(0, 5)) {
+                msg +=
+                    `• *${c.token.symbol}* — score: ${c.score}/100\n` +
+                        `  MCap: $${(c.token.marketCap / 1000).toFixed(0)}K | Vol: $${(c.token.volume24h / 1000).toFixed(0)}K\n` +
+                        `  \`${c.token.address.slice(0, 10)}...\`\n\n`;
+            }
+            ctx.reply(msg, { parse_mode: 'Markdown' });
+        }
+        catch (e) {
+            ctx.reply(`❌ Scan failed: ${e?.message ?? 'unknown error'}`);
+        }
+        return;
+    }
+    // /lp close <id>
+    if (sub === 'close') {
+        const posId = args[1];
+        if (!posId)
+            return ctx.reply('❌ Usage: `/lp close <position_id>`', { parse_mode: 'Markdown' });
+        try {
+            await lpEngine.proposeClosePosition(posId, 'Manual close via Telegram');
+            ctx.reply(`🔴 Close proposal sent for position \`${posId.slice(0, 8)}\`.`, { parse_mode: 'Markdown' });
+        }
+        catch (e) {
+            ctx.reply(`❌ Failed to propose close: ${e?.message}`);
+        }
+        return;
+    }
+    // /lp blacklist <addr>
+    if (sub === 'blacklist') {
+        const addr = args[1]?.toLowerCase();
+        if (!addr || !/^0x[a-f0-9]{40}$/i.test(addr)) {
+            return ctx.reply('❌ Usage: `/lp blacklist <0x...>`', { parse_mode: 'Markdown' });
+        }
+        const wallet = process.env.USER_WALLET_ADDRESS ?? '';
+        const tier = await getUserTier(wallet);
+        if (tier < 3) {
+            return ctx.reply(`❌ **Access Denied**\nBlacklist requests require Tier 3 (VIP). You are Tier ${tier}.`, { parse_mode: 'Markdown' });
+        }
+        const ownerChatId = process.env.TELEGRAM_CHAT_ID;
+        const msg = `⚠️ *Blacklist Request*\nUser ${ctx.from?.username || ctx.from?.first_name} (Tier 3) requests to blacklist:\n\`${addr}\`\n\nApprove this action?`;
+        // Use raw telegram API via ctx.api to send to owner (if ctx is not owner)
+        try {
+            await ctx.api.sendMessage(ownerChatId, msg, {
+                parse_mode: 'Markdown',
+                reply_markup: {
+                    inline_keyboard: [
+                        [
+                            { text: '✅ Approve', callback_data: `blacklist_approve:${addr}` },
+                            { text: '❌ Reject', callback_data: `blacklist_reject:${addr}` }
+                        ]
+                    ]
+                }
+            });
+            ctx.reply(`✅ Blacklist request for \`${addr}\` sent to Owner for approval.`, { parse_mode: 'Markdown' });
+        }
+        catch (e) {
+            ctx.reply(`❌ Failed to send request to owner: ${e.message}`);
+        }
+        return;
+    }
+    // /lp mode manual|semi|full
+    if (sub === 'mode') {
+        const modeArg = args[1]?.toLowerCase();
+        if (!['manual', 'semi', 'full'].includes(modeArg ?? '')) {
+            return ctx.reply('❌ Usage: `/lp mode manual|semi|full`', { parse_mode: 'Markdown' });
+        }
+        const wallet = process.env.USER_WALLET_ADDRESS ?? '';
+        const tier = await getUserTier(wallet);
+        if (modeArg === 'semi' && tier < 2) {
+            return ctx.reply(`❌ **Access Denied**\nMode SEMI requires Tier 2 (Pro) or higher. You are currently Tier ${tier}.`, { parse_mode: 'Markdown' });
+        }
+        if (modeArg === 'full' && tier < 3) {
+            return ctx.reply(`❌ **Access Denied**\nMode FULL requires Tier 3 (VIP). You are currently Tier ${tier}.`, { parse_mode: 'Markdown' });
+        }
+        try {
+            await prisma.systemConfig.upsert({
+                where: { key: 'lp.defaultMode' },
+                update: { value: modeArg.toUpperCase() },
+                create: { key: 'lp.defaultMode', value: modeArg.toUpperCase() },
+            });
+            const emoji = modeArg === 'full' ? '🤖' : modeArg === 'semi' ? '⚡' : '🛡️';
+            let msg = `${emoji} LP mode set to **${modeArg.toUpperCase()}**.`;
+            if (modeArg === 'semi')
+                msg += `\n⚠️ *Auto-Compound is active.* Bot will execute harvests via Alchemy Session Key automatically.`;
+            if (modeArg === 'full')
+                msg += `\n⚠️ *FULL AUTONOMOUS active.* Bot will Open, Close, and Compound LP positions via Alchemy without asking for approval!`;
+            ctx.reply(msg, { parse_mode: 'Markdown' });
+        }
+        catch (e) {
+            ctx.reply('❌ Failed to update LP mode.');
+        }
+        return;
+    }
+    // /lp day  (manual trigger DAY mode)
+    if (sub === 'day') {
+        ctx.reply('☀️ *Triggering DAY mode manually...*', { parse_mode: 'Markdown' });
+        lpEngine.runDayMode().catch(e => ctx.reply(`❌ DAY mode error: ${e?.message}`));
+        return;
+    }
+    // /lp night  (manual trigger NIGHT mode)
+    if (sub === 'night') {
+        ctx.reply('🌙 *Triggering NIGHT mode manually...*', { parse_mode: 'Markdown' });
+        lpEngine.runNightMode().catch(e => ctx.reply(`❌ NIGHT mode error: ${e?.message}`));
+        return;
+    }
+    ctx.reply('❌ Unknown LP subcommand. See /help for available commands.');
+});
+/** /lpmeta — view or edit LP screening config (owner only) */
+bot.command('lpmeta', async (ctx) => {
+    const ownerWallet = process.env.USER_WALLET_ADDRESS?.toLowerCase();
+    // Simple ownership check — Telegram doesn't expose wallet, check by chat ID vs env TELEGRAM_CHAT_ID
+    if (ctx.chat.id.toString() !== process.env.TELEGRAM_CHAT_ID) {
+        return ctx.reply('⛔ This command is owner-only.');
+    }
+    const args = ctx.match?.trim();
+    const lpKeys = [
+        'lp.minMcap', 'lp.minVol', 'lp.categories', 'lp.blacklist',
+        'lp.nightWindow', 'lp.dayCloseTime', 'lp.nightRange',
+        'lp.maxPositions', 'lp.positionCap', 'lp.startSize',
+        'lp.ilHourThreshold', 'lp.defaultMode',
+    ];
+    // /lpmeta <key> <value>  → update
+    if (args && args.includes(' ')) {
+        const spaceIdx = args.indexOf(' ');
+        const key = args.slice(0, spaceIdx).trim();
+        const value = args.slice(spaceIdx + 1).trim();
+        if (!key.startsWith('lp.')) {
+            return ctx.reply('❌ Key must start with `lp.`', { parse_mode: 'Markdown' });
+        }
+        try {
+            await prisma.systemConfig.upsert({
+                where: { key },
+                update: { value },
+                create: { key, value },
+            });
+            ctx.reply(`✅ Updated \`${key}\` = \`${value}\``, { parse_mode: 'Markdown' });
+        }
+        catch (e) {
+            ctx.reply('❌ Failed to update config.');
+        }
+        return;
+    }
+    // /lpmeta  → show all
+    try {
+        const configs = await prisma.systemConfig.findMany({ where: { key: { in: lpKeys } } });
+        const map = Object.fromEntries(configs.map(c => [c.key, c.value]));
+        let msg = '⚙️ *LP Engine MetaConfig*\n\n';
+        for (const k of lpKeys) {
+            msg += `\`${k}\` = \`${map[k] ?? '(not set)'}\`\n`;
+        }
+        msg += '\n_Edit: `/lpmeta <key> <value>`_';
+        ctx.reply(msg, { parse_mode: 'Markdown' });
+    }
+    catch (e) {
+        ctx.reply('❌ Failed to fetch LP config.');
+    }
+});
+/** /harvest — collect fees from all open LP positions */
+bot.command('harvest', async (ctx) => {
+    const lpEngine = orchestrator.getLPEngine();
+    ctx.reply('🌾 *Proposing harvest for all open positions...*', { parse_mode: 'Markdown' });
+    try {
+        await lpEngine.proposeHarvest();
+    }
+    catch (e) {
+        ctx.reply(`❌ Harvest failed: ${e?.message}`);
+    }
+});
+bot.command('daymode', async (ctx) => {
+    const lpEngine = orchestrator.getLPEngine();
+    ctx.reply('☀️ *Triggering LP Engine DAY Mode manually...*', { parse_mode: 'Markdown' });
+    try {
+        await lpEngine.runDayMode();
+    }
+    catch (e) {
+        ctx.reply(`❌ Day Mode failed: ${e?.message}`);
+    }
+});
+bot.command('nightmode', async (ctx) => {
+    const lpEngine = orchestrator.getLPEngine();
+    ctx.reply('🌙 *Triggering LP Engine NIGHT Mode manually...*', { parse_mode: 'Markdown' });
+    try {
+        await lpEngine.runNightMode();
+    }
+    catch (e) {
+        ctx.reply(`❌ Night Mode failed: ${e?.message}`);
+    }
+});
+// ─── LP INLINE KEYBOARD CALLBACKS ───────────────────────────────────────────
+bot.on('callback_query:data', async (ctx) => {
+    const data = ctx.callbackQuery.data;
+    // LP approve/reject: format = "lp_approve:<posId>:<type>" or "lp_reject:..."
+    if (data.startsWith('lp_approve:') || data.startsWith('lp_reject:')) {
+        const [action, posId, type] = data.split(':');
+        const isApprove = action === 'lp_approve';
+        const lpEngine = orchestrator.getLPEngine();
+        await ctx.answerCallbackQuery();
+        if (!isApprove) {
+            // Rejected — clean up PENDING position
+            try {
+                if (type === 'OPEN') {
+                    await prisma.lPPosition.update({
+                        where: { id: posId },
+                        data: { status: 'REJECTED' },
+                    });
+                }
+                else if (type === 'CLOSE' || type === 'REBALANCE') {
+                    await prisma.lPPosition.update({
+                        where: { id: posId },
+                        data: { status: 'OPEN' }, // revert EXITING back to OPEN
+                    });
+                }
+            }
+            catch (_) { }
+            await ctx.editMessageText(`❌ *LP ${type} proposal rejected.*`, { parse_mode: 'Markdown' });
+            return;
+        }
+        // Approved
+        const config = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
+        const isDryRun = (config?.value || 'LIVE') === 'DRY_RUN';
+        if (isDryRun) {
+            // DRY_RUN: simulate confirmation
+            if (type === 'OPEN') {
+                const fakeTokenId = `DRY-${Date.now()}`;
+                await lpEngine.onOpenConfirmed(posId, fakeTokenId);
+                await ctx.editMessageText(`✅ *[DRY RUN] LP OPEN simulated*\nFake tokenId: \`${fakeTokenId}\``, { parse_mode: 'Markdown' });
+            }
+            else if (type === 'CLOSE') {
+                await lpEngine.onCloseConfirmed(posId, 0);
+                await ctx.editMessageText(`✅ *[DRY RUN] LP CLOSE simulated*`, { parse_mode: 'Markdown' });
+            }
+            else if (type === 'HARVEST') {
+                await ctx.editMessageText(`✅ *[DRY RUN] HARVEST simulated*`, { parse_mode: 'Markdown' });
+            }
+            else {
+                await ctx.editMessageText(`✅ *[DRY RUN] LP ${type} simulated*`, { parse_mode: 'Markdown' });
+            }
+            return;
+        }
+        // LIVE — calldata is already built during proposal creation
+        // Only notification here; actual tx broadcast requires wallet signer
+        // (same as existing trench flow: user copies calldata or uses web3 wallet)
+        await ctx.editMessageText(`⏳ *LP ${type} approved.* Broadcasting transaction...\n` +
+            `_(Check your wallet or Fletcher web dashboard for tx status)_`, { parse_mode: 'Markdown' });
+        return;
+    }
+    // Blacklist approve/reject
+    if (data.startsWith('blacklist_approve:') || data.startsWith('blacklist_reject:')) {
+        const [action, addr] = data.split(':');
+        const isApprove = action === 'blacklist_approve';
+        await ctx.answerCallbackQuery();
+        if (!isApprove) {
+            await ctx.editMessageText(`❌ *Blacklist request rejected* for \`${addr}\`.`, { parse_mode: 'Markdown' });
+            return;
+        }
+        try {
+            const config = await prisma.systemConfig.findUnique({ where: { key: 'lp.blacklist' } });
+            const currentList = config?.value ? JSON.parse(config.value) : [];
+            if (!currentList.includes(addr)) {
+                currentList.push(addr);
+                await prisma.systemConfig.upsert({
+                    where: { key: 'lp.blacklist' },
+                    update: { value: JSON.stringify(currentList) },
+                    create: { key: 'lp.blacklist', value: JSON.stringify(currentList) },
+                });
+            }
+            await ctx.editMessageText(`✅ *Token Blacklisted*\n\`${addr}\` added to LP blacklist.`, { parse_mode: 'Markdown' });
+        }
+        catch (e) {
+            await ctx.editMessageText(`❌ *Failed to update blacklist:* ${e.message}`, { parse_mode: 'Markdown' });
+        }
+        return;
+    }
+    // Fall through: let existing trench callbacks handle (don't double-answer)
+    // Existing bot handles its own callback_query separately via Telegraf middleware
+});
 async function startApp() {
     try {
         // Connect Database
@@ -240,7 +745,10 @@ async function startApp() {
                 setTimeout(startBot, 5000);
             }
         };
+        // Start main bot (without waiting so we can start userbot too)
         startBot();
+        // Start Userbot listener
+        await startUserbot(bot, orchestrator);
     }
     catch (error) {
         console.error("[System] Critical startup error:", error);

@@ -3,6 +3,7 @@ import { publicClient } from '../services/viem.js';
 import { ScoutAgent } from '../agents/scout.js';
 import { TraderAgent } from '../agents/trader.js';
 import { LpManagerAgent } from '../agents/lp.js';
+import { LPEngineAgent } from '../agents/lpengine.js';
 import { RiskWardenAgent } from '../agents/risk.js';
 import { GuardianAgent } from '../agents/guardian.js';
 import { TrackerAgent } from '../agents/tracker.js';
@@ -11,6 +12,7 @@ export class Orchestrator {
     scout;
     trader;
     lpManager;
+    lpEngine;
     riskWarden;
     guardian;
     tracker;
@@ -21,9 +23,68 @@ export class Orchestrator {
         this.scout = new ScoutAgent(bot);
         this.trader = new TraderAgent(bot);
         this.lpManager = new LpManagerAgent();
+        this.lpEngine = new LPEngineAgent();
         this.riskWarden = new RiskWardenAgent();
         this.guardian = new GuardianAgent();
         this.tracker = new TrackerAgent();
+        // ─── LP Engine proposal handler ────────────────────────────────────────
+        this.lpEngine.onProposal = async (proposal) => {
+            const chatId = process.env.TELEGRAM_CHAT_ID;
+            if (!chatId) {
+                console.warn('[Orchestrator] TELEGRAM_CHAT_ID not set — LP proposal dropped');
+                return;
+            }
+            const modeCfg = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
+            const isDryRun = (modeCfg?.value || 'LIVE') === 'DRY_RUN';
+            const dryRunTag = isDryRun ? '\n🧪 *DRY RUN — no tx will be sent*' : '';
+            const isAuto = proposal.description.includes('✅ *Auto-') || proposal.description.includes('❌ *Auto-');
+            const msgOptions = { parse_mode: 'Markdown' };
+            if (!isAuto) {
+                // Inline keyboard: Approve / Reject (only for manual flows)
+                const approveData = `lp_approve:${proposal.positionId}:${proposal.type}`;
+                const rejectData = `lp_reject:${proposal.positionId}:${proposal.type}`;
+                msgOptions.reply_markup = {
+                    inline_keyboard: [[
+                            { text: '✅ Approve', callback_data: approveData },
+                            { text: '❌ Reject', callback_data: rejectData },
+                        ]],
+                };
+            }
+            try {
+                await bot.api.sendMessage(chatId, `${proposal.description}${dryRunTag}`, msgOptions);
+                console.log(`[Orchestrator] LP proposal sent to Telegram: ${proposal.type} | pos: ${proposal.positionId}`);
+            }
+            catch (e) {
+                console.error('[Orchestrator] Failed to send LP proposal to Telegram:', e);
+            }
+        };
+        // ─── LP Engine notification handler ──────────────────────────────────────
+        this.lpEngine.onNotification = async (message) => {
+            const chatId = process.env.TELEGRAM_CHAT_ID;
+            if (!chatId)
+                return;
+            try {
+                await bot.api.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+            }
+            catch (e) {
+                console.error('[Orchestrator] Failed to send telegram notification:', e);
+            }
+        };
+        // ─── LP Guardian Events ────────────────────────────────────────────────
+        this.guardian.onLPCloseSignal = async (pos, reason) => {
+            console.log(`[Orchestrator] 🚨 Guardian requested LP CLOSE for ${pos.id}. Reason: ${reason}`);
+            await this.lpEngine.proposeClosePosition(pos.id, reason).catch(console.error);
+        };
+        this.guardian.onLPCompoundSignal = async (pos) => {
+            console.log(`[Orchestrator] 🌾 Guardian requested LP COMPOUND for ${pos.id}`);
+            // In MANUAL mode, this forwards harvest proposal
+            await this.lpEngine.proposeHarvest(pos.id).catch(console.error);
+        };
+        this.guardian.onLPRebalanceSignal = async (pos, reason) => {
+            console.log(`[Orchestrator] ⚖️ Guardian requested LP REBALANCE for ${pos.id}. Reason: ${reason}`);
+            // For MVP, rebalance is just close.
+            await this.lpEngine.proposeClosePosition(pos.id, reason).catch(console.error);
+        };
         // Wire up events
         this.guardian.onExitSignal = async (pos, reason, txHash) => {
             const tokenAddress = pos.tokenAddress;
@@ -296,6 +357,107 @@ export class Orchestrator {
         this.trader.executionMode = mode;
         console.log(`[Orchestrator] Trader execution mode set to ${mode}`);
     }
+    // Expose lpEngine for bot commands
+    getLPEngine() {
+        return this.lpEngine;
+    }
+    scheduleLPCron() {
+        const runCron = () => {
+            const now = new Date();
+            const fmt = new Intl.DateTimeFormat('en-US', {
+                timeZone: 'Asia/Jakarta', hour: 'numeric', minute: 'numeric', hour12: false,
+            });
+            const parts = fmt.formatToParts(now);
+            const h = parseInt(parts.find(p => p.type === 'hour').value);
+            const m = parseInt(parts.find(p => p.type === 'minute').value);
+            // NIGHT mode (Aggressive Scouting): Run every hour
+            if (m === 0) {
+                console.log(`[Orchestrator] 🚀 LP Engine hourly scan triggered (Hour: ${h})`);
+                this.lpEngine.runNightMode().catch(console.error);
+            }
+        };
+        // Poll every minute
+        setInterval(runCron, 60_000);
+        console.log('[Orchestrator] LP cron scheduled (Hourly scan at minute :00)');
+    }
+    async processAlphaSpotSignal(tokenAddress, score) {
+        const lowerToken = tokenAddress.toLowerCase();
+        if (this.processingTokens.has(lowerToken)) {
+            console.log(`[Orchestrator] ℹ️ Dedup: Already processing a signal for ${tokenAddress}, ignoring Alpha signal.`);
+            return;
+        }
+        this.processingTokens.add(lowerToken);
+        try {
+            const COOLDOWN_MS = 60 * 60 * 1000;
+            const existingPos = await prisma.position.findFirst({
+                where: {
+                    tokenAddress: { equals: tokenAddress, mode: 'insensitive' },
+                    OR: [
+                        { status: { in: ['OPEN', 'PENDING', 'EXITING'] } },
+                        { createdAt: { gte: new Date(Date.now() - COOLDOWN_MS) } }
+                    ]
+                }
+            });
+            if (existingPos) {
+                console.log(`[Orchestrator] ℹ️ Dedup: Active position or cooldown exists for ${tokenAddress}, ignoring Alpha signal.`);
+                return;
+            }
+            console.log(`[Orchestrator] Received Alpha Spot signal for ${tokenAddress}, consulting Risk Warden...`);
+            try {
+                await prisma.signal.create({
+                    data: {
+                        tokenAddress,
+                        score: score,
+                        passed: true,
+                        rawContext: { source: 'ALPHA' },
+                        source: 'ALPHA'
+                    }
+                });
+            }
+            catch (e) {
+                console.error(`[Orchestrator] Failed to save ALPHA signal to DB`, e);
+            }
+            const riskEvaluation = await this.riskWarden.evaluateSignal(tokenAddress);
+            if (riskEvaluation.approved) {
+                console.log(`[Orchestrator] Risk Warden approved Alpha Spot. Forwarding to Trader with size ${riskEvaluation.recommendedSize}...`);
+                // Spawn async retry loop (Sniper Mode)
+                (async () => {
+                    try {
+                        let attempts = 0;
+                        let success = false;
+                        while (attempts < 5 && !success) {
+                            attempts++;
+                            console.log(`[Orchestrator] 🎯 Alpha Buy Attempt ${attempts}/5 for ${tokenAddress}...`);
+                            const muteFailure = attempts < 5; // Mute Telegram failure message until the last attempt
+                            success = await this.trader.processSignal(tokenAddress, riskEvaluation.recommendedSize, 'ALPHA', undefined, undefined, muteFailure);
+                            if (!success && attempts < 5) {
+                                console.log(`[Orchestrator] ⏳ Retry in 60s for ${tokenAddress}...`);
+                                await new Promise(r => setTimeout(r, 60000));
+                            }
+                        }
+                        if (!success) {
+                            console.warn(`[Orchestrator] ❌ Gave up on Alpha Spot buy for ${tokenAddress} after 5 attempts.`);
+                        }
+                    }
+                    catch (err) {
+                        console.error(`[Orchestrator] Error in Alpha Spot retry loop:`, err);
+                    }
+                    finally {
+                        this.processingTokens.delete(lowerToken);
+                    }
+                })();
+                return; // Return immediately so we don't block the caller
+            }
+            else {
+                console.warn(`[Orchestrator] Risk Warden rejected Alpha signal for ${tokenAddress}. Reason: ${riskEvaluation.reason}`);
+                this.processingTokens.delete(lowerToken);
+            }
+        }
+        catch (e) {
+            console.error(`[Orchestrator] Error processing Alpha Spot Signal:`, e);
+            this.processingTokens.delete(lowerToken);
+        }
+    }
     async startAll() {
         console.log("🚀 Orchestrator: Starting all Fletcher agents (Minimum Viable Swarm)...");
         // Recover any pending transactions that crashed during deployment
@@ -306,6 +468,8 @@ export class Orchestrator {
         this.tracker.startListening();
         // Start Guardian DB polling
         this.guardian.init();
+        // ─── LP Engine: DAY mode cron (09:00 WIB) ──────────────────────────────
+        this.scheduleLPCron();
         // Start Dormant cleanup cronjob (every 12 hours)
         setInterval(async () => {
             try {

@@ -4,6 +4,7 @@ import { dbLogger } from '../services/logger.js';
 import { InlineKeyboard } from 'grammy';
 import { prisma } from '../core/db.js';
 import { publicClient, walletClient, account } from '../services/viem.js';
+import { getDexConfig } from '../core/dexConfig.js';
 export class TraderAgent {
     bot;
     executionMode = 'AUTO';
@@ -28,21 +29,22 @@ export class TraderAgent {
         const config = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
         return config ? config.value : 'LIVE';
     }
-    async processSignal(tokenAddress, sizeInWeth, source = 'SCOUT', copiedFrom, txHash) {
+    async processSignal(tokenAddress, sizeInWeth, source = 'SCOUT', copiedFrom, txHash, muteFailure = false) {
         const tradeId = Math.random().toString(36).substring(7);
         console.log(`[Trader] Processing Signal for ${tokenAddress} - Size: ${sizeInWeth}`);
         if (!walletClient || !account) {
             console.error("[Trader] Auto-trading disabled (no PRIVATE_KEY). Aborting trade.");
-            return;
+            return false;
         }
         const calldataResult = await this.constructUnsignedSwapTx(tokenAddress, sizeInWeth, txHash);
         if (!calldataResult) {
             console.error(`[Trader] ❌ Failed to construct BUY calldata for ${tokenAddress}.`);
             this.emitToSigningBoundary(tokenAddress, "FAILED", 'BUY REJECTED (NO ROUTE/POOL OR CALLDATA FAIL)');
             const chatId = process.env.TELEGRAM_CHAT_ID;
-            if (chatId)
+            if (chatId && !muteFailure) {
                 this.bot.api.sendMessage(chatId, `❌ **BUY Failed**\nToken: \`${tokenAddress}\`\nReason: Failed to construct transaction (Pool not found or Universal Router parsing failed).`, { parse_mode: 'Markdown' }).catch(console.error);
-            return;
+            }
+            return false;
         }
         if (calldataResult) {
             const { calldata, amountOutMinimum, expectedOut, toAddress, value } = calldataResult;
@@ -60,7 +62,7 @@ export class TraderAgent {
                         .text("✅ Confirm Buy", `confirm_${tradeId}`)
                         .text("❌ Reject", `reject_${tradeId}`);
                     await this.bot.api.sendMessage(process.env.TELEGRAM_CHAT_ID, `🚨 **PENDING BUY**\nToken: \`${tokenAddress}\`\nSize: \`${Number(sizeInWeth) / 1e18} WETH\`\n\nDo you want to execute this trade?`, { parse_mode: 'Markdown', reply_markup: keyboard });
-                    return;
+                    return true;
                 }
                 if (!walletClient || !account)
                     throw new Error("WalletClient is null");
@@ -103,13 +105,16 @@ export class TraderAgent {
                     await this.failPendingPosition(txHash);
                     throw new Error('Transaction reverted by network');
                 }
+                return true;
             }
             catch (error) {
                 console.error(`[Trader] ❌ BUY TX Failed:`, error);
                 dbLogger.error(`BUY TX Failed`, { token: tokenAddress, error: String(error) });
                 this.emitToSigningBoundary(tokenAddress, "FAILED", 'BUY REJECTED');
+                return false;
             }
         }
+        return false; // Fallback
     }
     async executePendingTrade(tradeId, chatId) {
         const trade = this.pendingTrades.get(tradeId);
@@ -293,11 +298,9 @@ export class TraderAgent {
     async constructUnsignedSwapTx(tokenOut, amountIn, txHash) {
         console.log(`[Trader] Constructing BUY calldata for WETH -> ${tokenOut}...`);
         const WETH_ADDRESS = process.env.WETH_ADDRESS;
-        const QUOTER_ADDRESS = process.env.QUOTER_ADDRESS;
-        const ROUTER_ADDRESS = process.env.ROUTER_ADDRESS;
         const USER_WALLET = process.env.USER_WALLET_ADDRESS;
-        if (!WETH_ADDRESS || !QUOTER_ADDRESS || !ROUTER_ADDRESS || !USER_WALLET) {
-            throw new Error('❌ CRITICAL: WETH_ADDRESS, QUOTER_ADDRESS, ROUTER_ADDRESS, or USER_WALLET_ADDRESS missing in .env');
+        if (!WETH_ADDRESS || !USER_WALLET) {
+            throw new Error('❌ CRITICAL: WETH_ADDRESS or USER_WALLET_ADDRESS missing in .env');
         }
         const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 5); // 5 mins
         // --- UNIVERSAL DYNAMIC DUPLICATION ---
@@ -395,8 +398,29 @@ export class TraderAgent {
                 }
                 catch (e) { }
             }
-            const { fee: POOL_FEE, expectedOut: rawExpectedOut } = await detectBestFee(WETH_ADDRESS, tokenOut, amountIn, targetRouter);
-            let expectedOut = rawExpectedOut;
+            let bestFee = null;
+            let attempt = 0;
+            while (attempt < 3 && !bestFee) {
+                try {
+                    bestFee = await detectBestFee(WETH_ADDRESS, tokenOut, amountIn, targetRouter);
+                }
+                catch (e) {
+                    if (attempt < 2) {
+                        console.warn(`[Trader] detectBestFee failed for ${tokenOut} (Attempt ${attempt + 1}). Retrying in 2s...`);
+                        await new Promise(r => setTimeout(r, 2000));
+                    }
+                    else {
+                        throw e; // Let it be caught by the outer block
+                    }
+                }
+                attempt++;
+            }
+            if (!bestFee)
+                throw new Error("detectBestFee returned null");
+            const POOL_FEE = bestFee.fee;
+            const POOL_TYPE = bestFee.type || 'V4';
+            const POOL_ROUTER = bestFee.routerAddress;
+            let expectedOut = bestFee.expectedOut;
             // 3. 2% Supply Cap
             if (totalSupply > 0n && expectedOut > 0n) {
                 const twoPercent = (totalSupply * 2n) / 100n;
@@ -412,55 +436,81 @@ export class TraderAgent {
             }
             const amountOutMinimum = (expectedOut * 99n) / 100n;
             console.log(`[Trader] 🛡️ BUY amountOutMinimum: ${amountOutMinimum}`);
-            // 5. Encode Universal Router execute() payload for Uniswap V4
-            // Command 0x10 = V4_SWAP
-            const commands = '0x10';
-            // In Universal Router, V4_SWAP input is abi.encode(IV4Router.ExactInputSingleParams)
-            // ExactInputSingleParams = (PoolKey key, bool zeroForOne, uint128 amountIn, uint128 amountOutMinimum, bytes hookData)
-            // PoolKey = (address currency0, address currency1, uint24 fee, int24 tickSpacing, address hooks)
-            const isZeroForOne = BigInt(WETH_ADDRESS) < BigInt(tokenOut);
-            const currency0 = isZeroForOne ? WETH_ADDRESS : tokenOut;
-            const currency1 = isZeroForOne ? tokenOut : WETH_ADDRESS;
-            let tickSpacing = 60;
-            if (POOL_FEE === 500)
-                tickSpacing = 10;
-            else if (POOL_FEE === 10000)
-                tickSpacing = 200;
-            const exactInputSingleParamsAbi = [{
-                    type: 'tuple',
-                    components: [
-                        { name: 'poolKey', type: 'tuple', components: [{ name: 'currency0', type: 'address' }, { name: 'currency1', type: 'address' }, { name: 'fee', type: 'uint24' }, { name: 'tickSpacing', type: 'int24' }, { name: 'hooks', type: 'address' }] },
-                        { name: 'zeroForOne', type: 'bool' },
-                        { name: 'amountIn', type: 'uint128' },
-                        { name: 'amountOutMinimum', type: 'uint128' },
-                        { name: 'hookData', type: 'bytes' }
-                    ]
-                }];
-            const swapInput = encodeAbiParameters(exactInputSingleParamsAbi, [
-                {
-                    poolKey: {
-                        currency0: currency0,
-                        currency1: currency1,
-                        fee: POOL_FEE,
-                        tickSpacing,
-                        hooks: '0x0000000000000000000000000000000000000000'
-                    },
-                    zeroForOne: isZeroForOne,
-                    amountIn,
-                    amountOutMinimum,
-                    hookData: '0x'
-                }
-            ]);
-            const universalRouterAbi = parseAbi([
-                'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
-            ]);
-            const calldata = encodeFunctionData({
-                abi: universalRouterAbi,
-                functionName: 'execute',
-                args: [commands, [swapInput], deadline]
-            });
-            console.log(`[Trader] ✅ BUY Calldata (Universal Router V4): ${calldata.substring(0, 66)}...`);
-            return { calldata, amountOutMinimum, expectedOut, toAddress: ROUTER_ADDRESS, value: amountIn };
+            let calldata = '';
+            const dexConfig = await getDexConfig('V3'); // Universal Router used for all
+            let finalToAddress = dexConfig.routerAddress;
+            if (POOL_TYPE === 'V2' && POOL_ROUTER) {
+                const v2RouterAbi = parseAbi([
+                    'function swapExactTokensForTokens(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) external returns (uint[] memory amounts)'
+                ]);
+                calldata = encodeFunctionData({
+                    abi: v2RouterAbi,
+                    functionName: 'swapExactTokensForTokens',
+                    args: [amountIn, amountOutMinimum, [WETH_ADDRESS, tokenOut], account.address, deadline]
+                });
+                finalToAddress = POOL_ROUTER;
+            }
+            else if (POOL_TYPE === 'V3') {
+                const commands = '0x00';
+                const feeHex = POOL_FEE.toString(16).padStart(6, '0');
+                const path = (WETH_ADDRESS + feeHex + tokenOut.replace('0x', ''));
+                const swapInput = encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }, { type: 'uint256' }, { type: 'bytes' }, { type: 'bool' }], [account.address, amountIn, amountOutMinimum, path, true]);
+                const universalRouterAbi = parseAbi([
+                    'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
+                ]);
+                calldata = encodeFunctionData({
+                    abi: universalRouterAbi,
+                    functionName: 'execute',
+                    args: [commands, [swapInput], deadline]
+                });
+            }
+            else {
+                // V4_SWAP
+                const commands = '0x10';
+                const isZeroForOne = BigInt(WETH_ADDRESS) < BigInt(tokenOut);
+                const currency0 = isZeroForOne ? WETH_ADDRESS : tokenOut;
+                const currency1 = isZeroForOne ? tokenOut : WETH_ADDRESS;
+                let tickSpacing = 60;
+                if (POOL_FEE === 500)
+                    tickSpacing = 10;
+                else if (POOL_FEE === 10000)
+                    tickSpacing = 200;
+                const exactInputSingleParamsAbi = [{
+                        type: 'tuple',
+                        components: [
+                            { name: 'poolKey', type: 'tuple', components: [{ name: 'currency0', type: 'address' }, { name: 'currency1', type: 'address' }, { name: 'fee', type: 'uint24' }, { name: 'tickSpacing', type: 'int24' }, { name: 'hooks', type: 'address' }] },
+                            { name: 'zeroForOne', type: 'bool' },
+                            { name: 'amountIn', type: 'uint128' },
+                            { name: 'amountOutMinimum', type: 'uint128' },
+                            { name: 'hookData', type: 'bytes' }
+                        ]
+                    }];
+                const swapInput = encodeAbiParameters(exactInputSingleParamsAbi, [
+                    {
+                        poolKey: {
+                            currency0: currency0,
+                            currency1: currency1,
+                            fee: POOL_FEE,
+                            tickSpacing,
+                            hooks: '0x0000000000000000000000000000000000000000'
+                        },
+                        zeroForOne: isZeroForOne,
+                        amountIn,
+                        amountOutMinimum,
+                        hookData: '0x'
+                    }
+                ]);
+                const universalRouterAbi = parseAbi([
+                    'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
+                ]);
+                calldata = encodeFunctionData({
+                    abi: universalRouterAbi,
+                    functionName: 'execute',
+                    args: [commands, [swapInput], deadline]
+                });
+            }
+            console.log(`[Trader] ✅ BUY Calldata (Pool ${POOL_TYPE}): ${calldata.substring(0, 66)}...`);
+            return { calldata, amountOutMinimum, expectedOut, toAddress: finalToAddress, value: amountIn };
         }
         catch (error) {
             console.error('[Trader] Failed to build BUY calldata:', error);
@@ -474,11 +524,9 @@ export class TraderAgent {
     async constructUnsignedSellTx(tokenIn, amountIn, txHash) {
         console.log(`[Trader] Constructing Universal Router SELL calldata for ${tokenIn} -> WETH...`);
         const WETH_ADDRESS = process.env.WETH_ADDRESS;
-        const QUOTER_ADDRESS = process.env.QUOTER_ADDRESS;
-        const ROUTER_ADDRESS = process.env.ROUTER_ADDRESS;
         const USER_WALLET = process.env.USER_WALLET_ADDRESS;
-        if (!WETH_ADDRESS || !QUOTER_ADDRESS || !ROUTER_ADDRESS || !USER_WALLET) {
-            throw new Error('❌ CRITICAL: Missing env variables for SELL tx construction.');
+        if (!WETH_ADDRESS || !USER_WALLET) {
+            throw new Error('❌ CRITICAL: WETH_ADDRESS or USER_WALLET_ADDRESS missing in .env');
         }
         const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 5);
         if (txHash) {
@@ -555,10 +603,14 @@ export class TraderAgent {
                 }
                 catch (e) { }
             }
+            let POOL_TYPE = 'V4';
+            let POOL_ROUTER = undefined;
             try {
                 const best = await detectBestFee(tokenIn, WETH_ADDRESS, amountIn, targetRouter);
                 POOL_FEE = best.fee;
                 expectedOut = best.expectedOut;
+                POOL_TYPE = best.type || 'V4';
+                POOL_ROUTER = best.routerAddress;
             }
             catch (e) {
                 console.warn(`[Trader] Quoter failed for WETH. Trying Native... or falling back to default fee 10000.`);
@@ -569,53 +621,82 @@ export class TraderAgent {
             // 2. Slippage Protection (1%)
             const amountOutMinimum = expectedOut > 1n ? (expectedOut * 99n) / 100n : 0n;
             console.log(`[Trader] 🛡️ SELL amountOutMinimum: ${amountOutMinimum}`);
-            // 3. Encode Universal Router execute() payload for Uniswap V4
-            // Command 0x10 = V4_SWAP
-            const commands = '0x10';
+            let calldata = '';
+            const v3Config = await getDexConfig('V3');
+            let finalToAddress = v3Config.routerAddress;
             const TARGET_OUT = useNative ? '0x0000000000000000000000000000000000000000' : WETH_ADDRESS;
             const isZeroForOne = BigInt(tokenIn) < BigInt(TARGET_OUT);
             const currency0 = isZeroForOne ? tokenIn : TARGET_OUT;
             const currency1 = isZeroForOne ? TARGET_OUT : tokenIn;
-            let tickSpacing = 60;
-            if (POOL_FEE === 500)
-                tickSpacing = 10;
-            else if (POOL_FEE === 10000)
-                tickSpacing = 200;
-            const exactInputSingleParamsAbi = [{
-                    type: 'tuple',
-                    components: [
-                        { name: 'poolKey', type: 'tuple', components: [{ name: 'currency0', type: 'address' }, { name: 'currency1', type: 'address' }, { name: 'fee', type: 'uint24' }, { name: 'tickSpacing', type: 'int24' }, { name: 'hooks', type: 'address' }] },
-                        { name: 'zeroForOne', type: 'bool' },
-                        { name: 'amountIn', type: 'uint128' },
-                        { name: 'amountOutMinimum', type: 'uint128' },
-                        { name: 'hookData', type: 'bytes' }
-                    ]
-                }];
-            const swapInput = encodeAbiParameters(exactInputSingleParamsAbi, [
-                {
-                    poolKey: {
-                        currency0: currency0,
-                        currency1: currency1,
-                        fee: POOL_FEE,
-                        tickSpacing,
-                        hooks: '0x0000000000000000000000000000000000000000'
-                    },
-                    zeroForOne: isZeroForOne,
-                    amountIn,
-                    amountOutMinimum,
-                    hookData: '0x'
-                }
-            ]);
-            const universalRouterAbi = parseAbi([
-                'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
-            ]);
-            const calldata = encodeFunctionData({
-                abi: universalRouterAbi,
-                functionName: 'execute',
-                args: [commands, [swapInput], deadline]
-            });
-            console.log(`[Trader] ✅ SELL Calldata (Universal Router): ${calldata.substring(0, 66)}...`);
-            return { calldata, amountOutMinimum, expectedOut, toAddress: ROUTER_ADDRESS };
+            if (POOL_TYPE === 'V2' && POOL_ROUTER) {
+                const v2RouterAbi = parseAbi([
+                    'function swapExactTokensForTokens(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) external returns (uint[] memory amounts)'
+                ]);
+                calldata = encodeFunctionData({
+                    abi: v2RouterAbi,
+                    functionName: 'swapExactTokensForTokens',
+                    args: [amountIn, amountOutMinimum, [tokenIn, TARGET_OUT], account.address, deadline]
+                });
+                finalToAddress = POOL_ROUTER;
+            }
+            else if (POOL_TYPE === 'V3') {
+                const commands = '0x00';
+                const feeHex = POOL_FEE.toString(16).padStart(6, '0');
+                const path = (tokenIn.replace('0x', '') + feeHex + TARGET_OUT.replace('0x', ''));
+                const swapInput = encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }, { type: 'uint256' }, { type: 'bytes' }, { type: 'bool' }], [account.address, amountIn, amountOutMinimum, path, true]);
+                const universalRouterAbi = parseAbi([
+                    'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
+                ]);
+                calldata = encodeFunctionData({
+                    abi: universalRouterAbi,
+                    functionName: 'execute',
+                    args: [commands, [swapInput], deadline]
+                });
+            }
+            else {
+                // V4_SWAP
+                const commands = '0x10';
+                let tickSpacing = 60;
+                if (POOL_FEE === 500)
+                    tickSpacing = 10;
+                else if (POOL_FEE === 10000)
+                    tickSpacing = 200;
+                const exactInputSingleParamsAbi = [{
+                        type: 'tuple',
+                        components: [
+                            { name: 'poolKey', type: 'tuple', components: [{ name: 'currency0', type: 'address' }, { name: 'currency1', type: 'address' }, { name: 'fee', type: 'uint24' }, { name: 'tickSpacing', type: 'int24' }, { name: 'hooks', type: 'address' }] },
+                            { name: 'zeroForOne', type: 'bool' },
+                            { name: 'amountIn', type: 'uint128' },
+                            { name: 'amountOutMinimum', type: 'uint128' },
+                            { name: 'hookData', type: 'bytes' }
+                        ]
+                    }];
+                const swapInput = encodeAbiParameters(exactInputSingleParamsAbi, [
+                    {
+                        poolKey: {
+                            currency0: currency0,
+                            currency1: currency1,
+                            fee: POOL_FEE,
+                            tickSpacing,
+                            hooks: '0x0000000000000000000000000000000000000000'
+                        },
+                        zeroForOne: isZeroForOne,
+                        amountIn,
+                        amountOutMinimum,
+                        hookData: '0x'
+                    }
+                ]);
+                const universalRouterAbi = parseAbi([
+                    'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
+                ]);
+                calldata = encodeFunctionData({
+                    abi: universalRouterAbi,
+                    functionName: 'execute',
+                    args: [commands, [swapInput], deadline]
+                });
+            }
+            console.log(`[Trader] ✅ SELL Calldata (Pool ${POOL_TYPE}): ${calldata.substring(0, 66)}...`);
+            return { calldata, amountOutMinimum, expectedOut, toAddress: finalToAddress };
         }
         catch (error) {
             console.error('[Trader] Failed to build SELL calldata:', error);
