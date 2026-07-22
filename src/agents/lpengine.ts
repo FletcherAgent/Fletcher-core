@@ -110,12 +110,13 @@ interface LPConfig {
   nightRange:   number;
   dayCloseTime: string;
   ilHourThreshold: number;
+  minGrokScore: number;
 }
 
 async function loadLPConfig(): Promise<LPConfig> {
   const keys = [
     'lp.maxPositions', 'lp.positionCap', 'lp.startSize.live', 'lp.startSize.dryrun',
-    'lp.nightRange', 'lp.dayCloseTime', 'lp.ilHourThreshold',
+    'lp.nightRange', 'lp.dayCloseTime', 'lp.ilHourThreshold', 'lp.minGrokScore'
   ];
   const configs = await prisma.systemConfig.findMany({ where: { key: { in: keys } } });
   const map = Object.fromEntries(configs.map(c => [c.key, c.value]));
@@ -128,6 +129,7 @@ async function loadLPConfig(): Promise<LPConfig> {
     nightRange:       parseFloat(map['lp.nightRange']    ?? '0.25'),
     dayCloseTime:     map['lp.dayCloseTime'] ?? '23:00',
     ilHourThreshold:  parseInt(map['lp.ilHourThreshold'] ?? '4'),
+    minGrokScore:     parseInt(map['lp.minGrokScore'] ?? '60'),
   };
 }
 
@@ -330,6 +332,7 @@ export class LPEngineAgent {
     console.log('[LPEngine] ☀️ DAY mode started...');
     if (this.onNotification) await this.onNotification('☀️ *LP DAY mode started* — screening pairs...');
 
+    const config = await loadLPConfig();
     const canOpen = await this.canOpenNewPosition();
     if (!canOpen.ok) {
       console.warn(`[LPEngine] ⛔ DAY mode blocked: ${canOpen.reason}`);
@@ -354,8 +357,8 @@ export class LPEngineAgent {
       const sentiment = await IntelligenceLayer.analyzeSentiment(candidate.token.symbol, candidate.token.address);
       console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
       
-      if (sentiment.label === 'BEARISH' || sentiment.score < 75) {
-        console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < 75`);
+      if (sentiment.label === 'BEARISH' || sentiment.score < config.minGrokScore) {
+        console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < ${config.minGrokScore}`);
         continue;
       }
       
@@ -413,8 +416,8 @@ export class LPEngineAgent {
       const sentiment = await IntelligenceLayer.analyzeSentiment(candidate.token.symbol, candidate.token.address);
       console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
       
-      if (sentiment.label === 'BEARISH' || sentiment.score < 75) {
-        console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < 75`);
+      if (sentiment.label === 'BEARISH' || sentiment.score < config.minGrokScore) {
+        console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < ${config.minGrokScore}`);
         continue;
       }
       
