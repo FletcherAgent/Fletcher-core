@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "dev": "tsx src/bot/index.ts",
-    "build": "prisma generate && tsc && npx playwright install chromium",
+    "build": "prisma generate && tsc && npx playwright install --with-deps chromium",
     "start": "node dist/bot/index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
