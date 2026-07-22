@@ -70,23 +70,26 @@ export class SessionManager {
   }
 
   private static async performCloudflareBypass(): Promise<GMGNSession> {
-    const browser = await chromium.launch({ 
-      headless: true, // Try headless true first
+    const extensionPath = process.cwd() + '/capsolver-ext/extension';
+    const userAgentStr = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+    
+    // Extensions in Playwright require a persistent context and the new headless mode
+    const context = await chromium.launchPersistentContext('', { 
+      headless: true,
       args: [
+        '--headless=new',
+        `--disable-extensions-except=${extensionPath}`,
+        `--load-extension=${extensionPath}`,
         '--no-sandbox', 
         '--disable-setuid-sandbox',
         '--disable-blink-features=AutomationControlled'
-      ]
-    });
-    
-    // Create context with specific user-agent (matching got-scraping defaults)
-    const userAgentStr = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-    const context = await browser.newContext({
+      ],
       viewport: { width: 1280, height: 720 },
       userAgent: userAgentStr
     });
     
-    const page = await context.newPage();
+    // Persistent context comes with a default page
+    const page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
 
     try {
       await page.goto('https://gmgn.ai/', { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -95,12 +98,12 @@ export class SessionManager {
       // or wait for the cf_clearance cookie to appear.
       console.log('[SessionManager] Waiting for Cloudflare challenge to pass...');
       
-      // Wait up to 20 seconds for the cookie to be set
+      // Wait up to 30 seconds for the cookie to be set by Capsolver extension
       let cookies = await context.cookies();
       let cfCookie = cookies.find(c => c.name === 'cf_clearance');
       let retries = 0;
       
-      while (!cfCookie && retries < 20) {
+      while (!cfCookie && retries < 30) {
         await new Promise(r => setTimeout(r, 1000));
         cookies = await context.cookies();
         cfCookie = cookies.find(c => c.name === 'cf_clearance');
@@ -108,7 +111,7 @@ export class SessionManager {
       }
 
       if (!cfCookie) {
-        throw new Error('Failed to acquire cf_clearance cookie after 20 seconds');
+        throw new Error('Failed to acquire cf_clearance cookie after 30 seconds');
       }
 
       // TTL: Set session to expire in 1 hour
@@ -120,7 +123,7 @@ export class SessionManager {
         expiresAt
       };
     } finally {
-      await browser.close();
+      await context.close();
     }
   }
 }
