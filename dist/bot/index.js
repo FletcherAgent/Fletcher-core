@@ -265,7 +265,7 @@ bot.command("grok", async (ctx) => {
     ctx.reply(`🧠 Asking Grok about $${token}...`);
     try {
         const { IntelligenceLayer } = await import('../services/intelligence.js');
-        const result = await IntelligenceLayer.analyzeSentiment(token, '0x...'); // Dummy address for now
+        const result = await IntelligenceLayer.analyzeSentiment(token, token); // Pass symbol as placeholder if address unknown
         const emoji = result.label === 'BULLISH' ? '🟢' : result.label === 'BEARISH' ? '🔴' : '🟡';
         const msg = `
 ${emoji} **Grok Sentiment Analysis for $${token}**

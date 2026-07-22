@@ -43,14 +43,7 @@ export class RiskWardenAgent {
 
     let currentBalance = 0n;
     try {
-      const config = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
-      const mode = config ? config.value : 'LIVE';
-
-      if (mode === 'DRY_RUN') {
-        currentBalance = 1000000000000000000n; // Mock 1 ETH for simulation
-      } else {
-        currentBalance = await publicClient.getBalance({ address: walletAddress as `0x${string}` });
-      }
+      currentBalance = await publicClient.getBalance({ address: walletAddress as `0x${string}` });
     } catch (e) {
       console.error(`[Risk Warden] Failed to fetch balance for ${walletAddress}`, e);
       dbLogger.error(`Risk: RPC error fetching wallet balance`, { wallet: walletAddress, error: String(e) });

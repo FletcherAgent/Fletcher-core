@@ -118,8 +118,9 @@ export class GuardianAgent {
                         const feeTierPerc = pos.feeTier / 1_000_000;
                         const hourlyFee = (volume / 24) * feeTierPerc * ourShare;
                         const hoursOpen = Math.max(0.1, (Date.now() - pos.createdAt.getTime()) / 3600000);
-                        feesUsd = hourlyFee * hoursOpen;
-                        feesUsd *= (pos.nightMode ? 5 : 1);
+                        let cumulativeFees = hourlyFee * hoursOpen;
+                        cumulativeFees *= (pos.nightMode ? 5 : 1);
+                        feesUsd = Math.max(0, cumulativeFees - pos.harvestedFees);
                     }
                 }
                 catch (e) {

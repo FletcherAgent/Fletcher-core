@@ -24,7 +24,7 @@ import { logEvent } from '../utils/logger.js';
 import { getDexConfig, getAllDexConfigs } from '../core/dexConfig.js';
 import { IntelligenceLayer } from '../services/intelligence.js';
 import { screenPairs, } from '../services/gmgn.js';
-import { fullRangeTicks, calcNightTickRange, getPoolSlot0, } from '../services/lpMath.js';
+import { fullRangeTicks, calcNightTickRange, getPoolSlot0, getLiquidityForAmounts, tickToSqrtPriceX96 } from '../services/lpMath.js';
 // ─── ABI ─────────────────────────────────────────────────────────────────────
 const NPM_ABI = parseAbi([
     // mint
@@ -394,7 +394,7 @@ export class LPEngineAgent {
         // Tick range
         let tickLower;
         let tickUpper;
-        const { currentTick: entryTick } = await getPoolSlot0(poolAddress);
+        const { currentTick: entryTick, sqrtPriceX96 } = await getPoolSlot0(poolAddress);
         if (options.dayMode) {
             const ticks = fullRangeTicks(feeTier);
             tickLower = ticks.tickLower;
@@ -402,16 +402,29 @@ export class LPEngineAgent {
         }
         else {
             // NIGHT mode: get current tick from pool
-            const ticks = calcNightTickRange(entryTick, options.nightRange ?? 0.25, feeTier);
+            const ticks = calcNightTickRange(entryTick, options.nightRange ?? 2.0, feeTier);
             tickLower = ticks.tickLower;
             tickUpper = ticks.tickUpper;
         }
         // Amount calculation: split startSize 50/50 between token0 and token1
         const halfUsd = config.startSize / 2;
-        const token0Price = isToken0 ? token.priceUsd : 1; // WETH assumed ~$3500, use 1 for ETH-pair
-        const token1Price = isToken0 ? 1 : token.priceUsd;
+        const poolPriceRaw = Number((BigInt(sqrtPriceX96) * 10000000n) / (2n ** 96n)) / 10000000;
+        const poolPrice = poolPriceRaw ** 2;
+        const decimalAdjustedPoolPrice = poolPrice * (10 ** (t0Dec - t1Dec));
+        let token0Price, token1Price;
+        if (isToken0) {
+            token0Price = token.priceUsd;
+            token1Price = token0Price / decimalAdjustedPoolPrice;
+        }
+        else {
+            token1Price = token.priceUsd;
+            token0Price = token1Price * decimalAdjustedPoolPrice;
+        }
         const amount0Desired = this.usdToTokenAmount(halfUsd, token0Price, t0Dec);
         const amount1Desired = this.usdToTokenAmount(halfUsd, token1Price, t1Dec);
+        const sqrtRatioAX96 = tickToSqrtPriceX96(tickLower);
+        const sqrtRatioBX96 = tickToSqrtPriceX96(tickUpper);
+        const simulatedLiquidity = getLiquidityForAmounts(sqrtPriceX96, sqrtRatioAX96, sqrtRatioBX96, amount0Desired, amount1Desired);
         const recipient = ((process.env.LP_WALLET_ADDRESS || process.env.USER_WALLET_ADDRESS) ?? '');
         const tier = await getUserTier(recipient);
         const limits = getTierLimits(tier);
@@ -445,7 +458,7 @@ export class LPEngineAgent {
         const modeLabel = options.dayMode ? 'DAY' : 'NIGHT';
         const rangeLabel = options.dayMode
             ? 'Full Range'
-            : `±${((options.nightRange ?? 0.25) * 100).toFixed(0)}% concentrated`;
+            : `±${(options.nightRange ?? 2.0).toFixed(1)}x tick concentrated`;
         const description = `💧 *LP OPEN Proposal — ${modeLabel} MODE*\n` +
             `Pool: \`${poolAddress.slice(0, 10)}...\`\n` +
             `Pair: ${t0Symbol}/${t1Symbol} (fee: ${feeTier / 10000}%)\n` +
@@ -476,6 +489,7 @@ export class LPEngineAgent {
                 nightMode: options.nightMode,
                 source: options.source ?? 'SYSTEM',
                 tradingMode: (modeCfg?.value || 'LIVE'),
+                simulatedLiquidity: isDryRun ? simulatedLiquidity.toString() : null,
             },
         });
         console.log(`[LPEngine] 📝 LPPosition created in DB: ${dbRecord.id} (PENDING)`);
@@ -601,7 +615,7 @@ export class LPEngineAgent {
             }
         }
         else {
-            liquidity = 1000000000n; // Dummy liquidity for simulation proposal
+            liquidity = pos.simulatedLiquidity ? BigInt(pos.simulatedLiquidity) : 0n;
         }
         // Decrease 100% liquidity
         const decreaseCalldata = this.buildDecreaseLiquidityCalldata(tokenId, liquidity, deadline);
@@ -726,6 +740,10 @@ export class LPEngineAgent {
             if (pos.mode === 'SEMI' || pos.mode === 'FULL') {
                 if (pos.tradingMode === 'DRY_RUN') {
                     proposal.description = `✅ *Auto-Harvested LP (Simulated)*\n` + proposal.description;
+                    await prisma.lPPosition.update({
+                        where: { id: pos.id },
+                        data: { harvestedFees: { increment: pos.feesCollected } }
+                    });
                     if (this.onProposal)
                         await this.onProposal(proposal);
                     continue;
@@ -738,6 +756,10 @@ export class LPEngineAgent {
                     ];
                     const txHash = await buildAndSendLPUserOperation(client, calls);
                     await logEvent('INFO', `[LP] Position Auto-Harvested via Session Key`, { positionId: pos.id, txHash });
+                    await prisma.lPPosition.update({
+                        where: { id: pos.id },
+                        data: { harvestedFees: { increment: pos.feesCollected } }
+                    });
                     proposal.description = `✅ *Auto-Harvested LP*\n` + proposal.description + `\nTx: \`${txHash.slice(0, 10)}...\``;
                     if (this.onProposal)
                         await this.onProposal(proposal);

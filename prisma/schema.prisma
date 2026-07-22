@@ -111,7 +111,9 @@ model LPPosition {
   tickUpper       Int
   entryValue      Float
   entryTick       Int      @default(0)
+  simulatedLiquidity String? // For DRY_RUN simulated positions
   feesCollected   Float    @default(0)
+  harvestedFees   Float    @default(0)
   ilRunning       Float    @default(0)
   feeAboveILHours Int      @default(0)
   ilAboveFeeHours Int      @default(0)
