@@ -10,7 +10,7 @@
 [![Runtime](https://img.shields.io/badge/runtime-Node.js%20·%20TypeScript-E9E4D6?style=flat-square&labelColor=0A0F0C)](#tech-stack)
 [![Custody](https://img.shields.io/badge/custody-ZERO-38C172?style=flat-square&labelColor=0A0F0C)](#the-zero-custody-boundary)
 [![MCP](https://img.shields.io/badge/MCP-server-E0A82E?style=flat-square&labelColor=0A0F0C)](#mcp-server)
-[![X (Twitter)](https://img.shields.io/badge/X-%23000000.svg?style=flat-square&logo=X&logoColor=white)](https://x.com/fletcheragent21?s=11)
+[![X (Twitter)](https://img.shields.io/badge/X-%23000000.svg?style=flat-square&logo=X&logoColor=white)](https://x.com/fletcheragt)
 
 </div>
 
