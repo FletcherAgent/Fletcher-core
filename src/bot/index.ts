@@ -612,6 +612,7 @@ bot.command('lpmeta', async (ctx) => {
     'lp.nightWindow', 'lp.dayCloseTime', 'lp.nightRange',
     'lp.maxPositions', 'lp.positionCap', 'lp.startSize.live', 'lp.startSize.dryrun',
     'lp.ilHourThreshold', 'lp.defaultMode', 'lp.minGrokScore',
+    'lp.outOfRangeGraceMinutes', 'lp.dynamicRange',
   ];
 
   // /lpmeta <key> <value>  → update

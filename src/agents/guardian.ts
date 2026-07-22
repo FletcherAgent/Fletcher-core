@@ -124,11 +124,14 @@ export class GuardianAgent {
         tickLower: pos.tickLower, tickUpper: pos.tickUpper
       });
 
-      // 3. Calc Fees
+      // 3. Calc Fees (Simulated for DRY_RUN positions)
       let feesUsd = 0;
       if (pos.tokenId.startsWith('SIM-') || pos.tradingMode === 'DRY_RUN') {
         try {
-          const tokenAddress = pos.token0 === (process.env.WETH_ADDRESS ?? '0') ? pos.token1 : pos.token0;
+          // Use case-insensitive comparison to avoid mismatch (e.g. 0xABC vs 0xabc)
+          const wethAddr = (process.env.WETH_ADDRESS ?? '').toLowerCase();
+          const tokenAddress = pos.token0.toLowerCase() === wethAddr ? pos.token1 : pos.token0;
+
           const tokenInfo = await getTokenInfo(tokenAddress);
           if (tokenInfo) {
              const poolLiquidityUsd = tokenInfo.liquidity || 500000;
@@ -141,6 +144,11 @@ export class GuardianAgent {
              let cumulativeFees = hourlyFee * hoursOpen;
              cumulativeFees *= (pos.nightMode ? 5 : 1);
              feesUsd = Math.max(0, cumulativeFees - pos.harvestedFees);
+
+             // Debug log to diagnose zero-fee issues
+             console.log(`[Guardian] 🔍 SIM fee debug | token=${tokenAddress.slice(0,10)} vol24h=$${volume.toFixed(0)} liq=$${poolLiquidityUsd.toFixed(0)} share=${(ourShare*100).toFixed(4)}% hrFee=$${hourlyFee.toFixed(4)} hrs=${hoursOpen.toFixed(1)} → fees=$${feesUsd.toFixed(4)}`);
+          } else {
+             console.warn(`[Guardian] ⚠️ getTokenInfo returned null for ${tokenAddress} — fee estimation skipped`);
           }
         } catch(e) {
           console.warn(`[Guardian] Failed to estimate fees for SIM position ${pos.id}`);
@@ -191,11 +199,31 @@ export class GuardianAgent {
         }
       });
 
-      // 5. Check Range
+      // 5. Check Range — Solution 3: Grace period before triggering REBALANCE/CLOSE.
+      // For highly volatile meme coins, price may return within range within minutes.
+      // Wait for graceMinutes before actually closing the position.
+      const graceConfig = await prisma.systemConfig.findUnique({ where: { key: 'lp.outOfRangeGraceMinutes' } });
+      const graceMinutes = parseInt(graceConfig?.value ?? '15');
+
       if (!rangeStatus.inRange) {
-        console.log(`[Guardian] ⚠️ LP ${pos.id} OUT OF RANGE. Triggering REBALANCE/CLOSE.`);
-        await logEvent('WARN', `[LP] Guardian triggered REBALANCE: Out of range`, { positionId: pos.id });
-        if (this.onLPRebalanceSignal) this.onLPRebalanceSignal(pos, "Out of range");
+        const newOutOfRangeMinutes = (pos.outOfRangeMinutes ?? 0) + 1;
+        await prisma.lPPosition.update({ where: { id: pos.id }, data: { outOfRangeMinutes: newOutOfRangeMinutes } });
+
+        if (newOutOfRangeMinutes < graceMinutes) {
+          // Still within grace period — log warning only, do not close/rebalance yet
+          console.log(`[Guardian] ⏳ LP ${pos.id.slice(0,8)} out of range (${newOutOfRangeMinutes}/${graceMinutes} min grace). Waiting...`);
+        } else {
+          // Grace period expired — trigger rebalance/close
+          console.log(`[Guardian] ⚠️ LP ${pos.id.slice(0,8)} OUT OF RANGE > ${graceMinutes}min. Triggering REBALANCE/CLOSE.`);
+          await logEvent('WARN', `[LP] Guardian triggered REBALANCE: Out of range >${graceMinutes}min`, { positionId: pos.id });
+          if (this.onLPRebalanceSignal) this.onLPRebalanceSignal(pos, `Out of range for ${newOutOfRangeMinutes} minutes`);
+        }
+      } else {
+        // Back in range — reset counter
+        if ((pos.outOfRangeMinutes ?? 0) > 0) {
+          console.log(`[Guardian] ✅ LP ${pos.id.slice(0,8)} back IN RANGE. Resetting out-of-range counter.`);
+          await prisma.lPPosition.update({ where: { id: pos.id }, data: { outOfRangeMinutes: 0 } });
+        }
       }
 
       // 6. DAY Mode fallback close

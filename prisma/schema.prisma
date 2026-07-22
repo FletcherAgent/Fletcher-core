@@ -117,6 +117,8 @@ model LPPosition {
   ilRunning       Float    @default(0)
   feeAboveILHours Int      @default(0)
   ilAboveFeeHours Int      @default(0)
+  /// Tracks consecutive minutes position has been out of range (for grace period)
+  outOfRangeMinutes Int    @default(0)
   mode            String   @default("MANUAL")
   status          String   @default("PENDING")
   dayMode         Boolean  @default(false)

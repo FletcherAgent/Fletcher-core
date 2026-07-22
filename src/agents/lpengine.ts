@@ -111,25 +111,44 @@ interface LPConfig {
   dayCloseTime: string;
   ilHourThreshold: number;
   minGrokScore: number;
+  /** Minutes to wait before triggering rebalance/close when out of range (grace period) */
+  outOfRangeGraceMinutes: number;
+  /** If true, use MCap-based dynamic range multiplier instead of fixed nightRange */
+  dynamicRange: boolean;
+}
+
+/**
+ * Returns a dynamic night range multiplier based on token market cap.
+ * Smaller MCap = wider range needed (more volatile).
+ */
+function calcDynamicNightRange(marketCapUsd: number): number {
+  if (marketCapUsd < 50_000)       return 20;  // < $50K  → ±40% range (ultra meme)
+  if (marketCapUsd < 200_000)      return 15;  // < $200K → ±30% range
+  if (marketCapUsd < 1_000_000)    return 10;  // < $1M   → ±20% range
+  if (marketCapUsd < 5_000_000)    return 7;   // < $5M   → ±14% range
+  return 5;                                    // > $5M   → ±10% range (more stable)
 }
 
 async function loadLPConfig(): Promise<LPConfig> {
   const keys = [
     'lp.maxPositions', 'lp.positionCap', 'lp.startSize.live', 'lp.startSize.dryrun',
-    'lp.nightRange', 'lp.dayCloseTime', 'lp.ilHourThreshold', 'lp.minGrokScore'
+    'lp.nightRange', 'lp.dayCloseTime', 'lp.ilHourThreshold', 'lp.minGrokScore',
+    'lp.outOfRangeGraceMinutes', 'lp.dynamicRange'
   ];
   const configs = await prisma.systemConfig.findMany({ where: { key: { in: keys } } });
   const map = Object.fromEntries(configs.map(c => [c.key, c.value]));
 
   return {
-    maxPositions:     parseInt(map['lp.maxPositions']    ?? '3'),
-    positionCap:      parseFloat(map['lp.positionCap']   ?? '2000'),
-    startSizeLive:    parseFloat(map['lp.startSize.live'] ?? '10'),
-    startSizeDryRun:  parseFloat(map['lp.startSize.dryrun'] ?? '500'),
-    nightRange:       parseFloat(map['lp.nightRange']    ?? '0.25'),
-    dayCloseTime:     map['lp.dayCloseTime'] ?? '23:00',
-    ilHourThreshold:  parseInt(map['lp.ilHourThreshold'] ?? '4'),
-    minGrokScore:     parseInt(map['lp.minGrokScore'] ?? '60'),
+    maxPositions:           parseInt(map['lp.maxPositions']    ?? '3'),
+    positionCap:            parseFloat(map['lp.positionCap']   ?? '2000'),
+    startSizeLive:          parseFloat(map['lp.startSize.live'] ?? '10'),
+    startSizeDryRun:        parseFloat(map['lp.startSize.dryrun'] ?? '500'),
+    nightRange:             parseFloat(map['lp.nightRange']    ?? '15'),
+    dayCloseTime:           map['lp.dayCloseTime'] ?? '23:00',
+    ilHourThreshold:        parseInt(map['lp.ilHourThreshold'] ?? '4'),
+    minGrokScore:           parseInt(map['lp.minGrokScore'] ?? '60'),
+    outOfRangeGraceMinutes: parseInt(map['lp.outOfRangeGraceMinutes'] ?? '15'),
+    dynamicRange:           (map['lp.dynamicRange'] ?? 'true') === 'true',
   };
 }
 
@@ -432,10 +451,18 @@ export class LPEngineAgent {
     }
 
     for (const candidate of toOpen) {
+      // Solution 2: Dynamic range based on token market cap.
+      // Smaller MCap = more volatile = needs a wider tick range.
+      const nightRangeMultiplier = config.dynamicRange
+        ? calcDynamicNightRange(candidate.token.marketCap)
+        : config.nightRange;
+
+      console.log(`[LPEngine] 📐 Night range for ${candidate.token.symbol}: ${nightRangeMultiplier}x (MCap: $${(candidate.token.marketCap/1000).toFixed(0)}K, dynamicRange: ${config.dynamicRange})`);
+
       await this.proposeOpenPosition(candidate, {
         dayMode: false,
         nightMode: true,
-        nightRange: config.nightRange,
+        nightRange: nightRangeMultiplier,
       });
     }
   }
