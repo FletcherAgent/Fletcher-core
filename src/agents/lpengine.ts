@@ -177,14 +177,21 @@ export class LPEngineAgent {
 
   // ─── Position Cap Check ─────────────────────────────────────────────────────
 
-  /** Check if new position can be opened (max positions from metaConfig) */
+  /** Check if new position can be opened (max positions from metaConfig) for the current mode */
   private async canOpenNewPosition(): Promise<{ ok: boolean; reason?: string }> {
     const config = await loadLPConfig();
+    const tModeConfig = await prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } });
+    const isDryRun = (tModeConfig?.value ?? 'LIVE') === 'DRY_RUN';
+    const currentMode = isDryRun ? 'DRY_RUN' : 'LIVE';
+
     const openCount = await prisma.lPPosition.count({
-      where: { status: { in: ['OPEN', 'PENDING'] } },
+      where: { 
+        status: { in: ['OPEN', 'PENDING'] },
+        tradingMode: currentMode 
+      },
     });
     if (openCount >= config.maxPositions) {
-      return { ok: false, reason: `Already at max ${config.maxPositions} positions (${openCount} open)` };
+      return { ok: false, reason: `Already at max ${config.maxPositions} positions for ${currentMode} (${openCount} open)` };
     }
     return { ok: true };
   }
@@ -418,9 +425,15 @@ export class LPEngineAgent {
       return;
     }
 
-    // Hitung berapa slot tersisa
+    // Calculate remaining slots for current mode (DRY_RUN and LIVE are counted separately)
+    const tModeConfig = await prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } });
+    const currentMode = (tModeConfig?.value ?? 'LIVE') === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE';
+
     const openCount = await prisma.lPPosition.count({
-      where: { status: { in: ['OPEN', 'PENDING'] } },
+      where: { 
+        status: { in: ['OPEN', 'PENDING'] },
+        tradingMode: currentMode 
+      },
     });
     const slotsLeft = config.maxPositions - openCount;
     if (slotsLeft <= 0) return;

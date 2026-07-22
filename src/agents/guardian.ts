@@ -131,7 +131,6 @@ export class GuardianAgent {
           // Use case-insensitive comparison to avoid mismatch (e.g. 0xABC vs 0xabc)
           const wethAddr = (process.env.WETH_ADDRESS ?? '').toLowerCase();
           const tokenAddress = pos.token0.toLowerCase() === wethAddr ? pos.token1 : pos.token0;
-
           const tokenInfo = await getTokenInfo(tokenAddress);
           if (tokenInfo) {
              const poolLiquidityUsd = tokenInfo.liquidity || 500000;
