@@ -677,7 +677,7 @@ export class LPEngineAgent {
         
         await prisma.lPPosition.update({
           where: { id: dbRecord.id },
-          data: { status: 'OPEN', tokenId: realTokenId }
+          data: { status: 'OPEN', tokenId: realTokenId, txHash }
         });
 
         proposal.description = `✅ *Auto-Opened LP*\n` + proposal.description + `\nTx: \`${txHash.slice(0, 10)}...\``;
@@ -913,12 +913,12 @@ export class LPEngineAgent {
    * Called by bot after user approve + tx confirmed.
    * Parse tokenId from receipt event and update DB.
    */
-  async onOpenConfirmed(positionId: string, realTokenId: string): Promise<void> {
+  async onOpenConfirmed(positionId: string, realTokenId: string, txHash?: string): Promise<void> {
     await prisma.lPPosition.update({
       where: { id: positionId },
-      data: { status: 'OPEN', tokenId: realTokenId } as any,
+      data: { status: 'OPEN', tokenId: realTokenId, txHash } as any,
     });
-    await logEvent('INFO', `[LP] Position Opened (Confirmed) - TokenID: ${realTokenId}`, { positionId });
+    await logEvent('INFO', `[LP] Position Opened (Confirmed) - TokenID: ${realTokenId}`, { positionId, txHash });
     console.log(`[LPEngine] ✅ Position ${positionId} confirmed — tokenId: ${realTokenId}`);
   }
 
