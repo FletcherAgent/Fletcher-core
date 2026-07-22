@@ -144,7 +144,6 @@ export class GuardianAgent {
              let cumulativeFees = hourlyFee * hoursOpen;
              cumulativeFees *= (pos.nightMode ? 5 : 1);
              feesUsd = Math.max(0, cumulativeFees - pos.harvestedFees);
-
              // Debug log to diagnose zero-fee issues
              console.log(`[Guardian] 🔍 SIM fee debug | token=${tokenAddress.slice(0,10)} vol24h=$${volume.toFixed(0)} liq=$${poolLiquidityUsd.toFixed(0)} share=${(ourShare*100).toFixed(4)}% hrFee=$${hourlyFee.toFixed(4)} hrs=${hoursOpen.toFixed(1)} → fees=$${feesUsd.toFixed(4)}`);
           } else {
