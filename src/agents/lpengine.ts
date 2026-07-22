@@ -563,10 +563,12 @@ export class LPEngineAgent {
     const tier = await getUserTier(recipient);
     const limits = getTierLimits(tier);
 
-    // Enforce Active Positions Limit
+    // Enforce Active Positions Limit per mode
+    const modeStr = isDryRun ? 'DRY_RUN' : 'LIVE';
     const activePositionsCount = await prisma.lPPosition.count({
       where: {
-        status: { in: ['OPEN', 'PENDING'] }
+        status: { in: ['OPEN', 'PENDING'] },
+        tradingMode: modeStr
       }
     });
 
