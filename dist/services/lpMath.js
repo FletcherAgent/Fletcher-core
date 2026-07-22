@@ -14,6 +14,53 @@ export const MIN_TICK = -887272;
 export const MAX_TICK = 887272;
 /** 2^96 — used in sqrtPriceX96 math */
 const Q96 = 2n ** 96n;
+export function getLiquidityForAmount0(sqrtRatioAX96, sqrtRatioBX96, amount0) {
+    let lower = sqrtRatioAX96;
+    let upper = sqrtRatioBX96;
+    if (lower > upper) {
+        lower = sqrtRatioBX96;
+        upper = sqrtRatioAX96;
+    }
+    const intermediate = (lower * upper) / Q96;
+    return (amount0 * intermediate) / (upper - lower);
+}
+export function getLiquidityForAmount1(sqrtRatioAX96, sqrtRatioBX96, amount1) {
+    let lower = sqrtRatioAX96;
+    let upper = sqrtRatioBX96;
+    if (lower > upper) {
+        lower = sqrtRatioBX96;
+        upper = sqrtRatioAX96;
+    }
+    return (amount1 * Q96) / (upper - lower);
+}
+export function getLiquidityForAmounts(sqrtRatioX96, sqrtRatioAX96, sqrtRatioBX96, amount0, amount1) {
+    let lower = sqrtRatioAX96;
+    let upper = sqrtRatioBX96;
+    if (lower > upper) {
+        lower = sqrtRatioBX96;
+        upper = sqrtRatioAX96;
+    }
+    if (sqrtRatioX96 <= lower) {
+        return getLiquidityForAmount0(lower, upper, amount0);
+    }
+    else if (sqrtRatioX96 < upper) {
+        const liquidity0 = getLiquidityForAmount0(sqrtRatioX96, upper, amount0);
+        const liquidity1 = getLiquidityForAmount1(lower, sqrtRatioX96, amount1);
+        return liquidity0 < liquidity1 ? liquidity0 : liquidity1;
+    }
+    else {
+        return getLiquidityForAmount1(lower, upper, amount1);
+    }
+}
+export function tickToSqrtPriceX96(tick) {
+    const price = 1.0001 ** tick;
+    const sqrtPrice = Math.sqrt(price);
+    // multiply by 2^96
+    // we do this using BigInt to maintain precision as best as we can in JS
+    const fraction = BigInt(Math.floor(sqrtPrice * (2 ** 50))); // multiply by 2^50 as float
+    const shifted = fraction * (2n ** 46n); // shift remaining 46 bits
+    return shifted;
+}
 // ─── ABI fragments ────────────────────────────────────────────────────────────
 const POOL_ABI = parseAbi([
     'function slot0() external view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)',
@@ -58,14 +105,12 @@ export function feeToTickSpacing(feeTier) {
  * range = currentPrice ± rangePercent.
  * Returns [tickLower, tickUpper] rounded to tickSpacing.
  */
-export function calcNightTickRange(currentTick, rangePercent, // e.g. 0.25 = ±25%
+export function calcNightTickRange(currentTick, tickMultiplier, // e.g. 2.0 = ±2.0x tick spacing
 feeTier) {
     const spacing = feeToTickSpacing(feeTier);
-    const currentPrice = tickToPrice(currentTick);
-    const lowerPrice = currentPrice * (1 - rangePercent);
-    const upperPrice = currentPrice * (1 + rangePercent);
-    const rawLower = Math.floor(Math.log(lowerPrice) / Math.log(1.0001));
-    const rawUpper = Math.floor(Math.log(upperPrice) / Math.log(1.0001));
+    const halfRange = Math.round(spacing * tickMultiplier);
+    const rawLower = currentTick - halfRange;
+    const rawUpper = currentTick + halfRange;
     const tickLower = Math.max(MIN_TICK, Math.floor(rawLower / spacing) * spacing);
     const tickUpper = Math.min(MAX_TICK, Math.ceil(rawUpper / spacing) * spacing);
     return { tickLower, tickUpper };

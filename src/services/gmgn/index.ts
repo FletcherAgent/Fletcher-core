@@ -1,5 +1,12 @@
 import { getTrendingPairs, getTokenInfo, fetchTopTraders } from './endpoints.js';
 import type { GMGNToken, GMGNPool } from './endpoints.js';
+import { publicClient } from '../viem.js';
+import { getDexConfig } from '../../core/dexConfig.js';
+import { parseAbi } from 'viem';
+
+const FACTORY_ABI = parseAbi([
+  'function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address pool)'
+]);
 export interface PoolCandidate {
   pool:       GMGNPool;
   token:      GMGNToken;
@@ -38,6 +45,13 @@ export async function screenPairs(criteria?: LPScreeningCriteria): Promise<PoolC
   // 1. Get initial broad list from GMGN Trending
   const gtTokens = await getTrendingPairs(150);
   
+  // Get factory address
+  const dexConfigObj = await getDexConfig('V3');
+  const factoryAddress = dexConfigObj.factoryAddress;
+  if (!factoryAddress) {
+    console.warn('[MarketData] ⚠️ No V3 factory address found in config');
+  }
+
   const passed: PoolCandidate[] = [];
   
   for (const t of gtTokens) {
@@ -63,18 +77,55 @@ export async function screenPairs(criteria?: LPScreeningCriteria): Promise<PoolC
       continue;
     }
     
-    // Original Scoring Math Restored
-    const volMcapRatio = token.volume24h / (token.marketCap || 1);
-    const safetyBonus  = token.isVerified ? 10 : 0;
-    const score = Math.min(100, Math.round(volMcapRatio * 50 + safetyBonus + 40));
+    // Fetch real pool address and fee tier from Factory
+    const quoteTokenAddress = token.quoteToken || process.env.WETH_ADDRESS || '';
+    let realPoolAddress = '';
+    let bestFeeTier = 3000;
+
+    if (factoryAddress) {
+      // Try standard fee tiers
+      const tiers = [10000, 3000, 500, 100];
+      for (const tier of tiers) {
+        try {
+          const pAddr = await publicClient.readContract({
+            address: factoryAddress as `0x${string}`,
+            abi: FACTORY_ABI,
+            functionName: 'getPool',
+            args: [token.address as `0x${string}`, quoteTokenAddress as `0x${string}`, tier],
+          }) as string;
+          
+          if (pAddr && pAddr.toLowerCase() !== '0x0000000000000000000000000000000000000000') {
+            realPoolAddress = pAddr;
+            bestFeeTier = tier;
+            // Stop at first valid pool (or we could fetch liquidity for all and pick highest, but this is simpler)
+            break; 
+          }
+        } catch (err) {
+          // Ignore call errors
+        }
+      }
+    }
+
+    if (!realPoolAddress) {
+      console.log(`[MarketData] ❌ ${token.symbol} REJECTED: No on-chain pool found`);
+      continue;
+    }
+
+    const feeTierPct = bestFeeTier / 1000000; // e.g. 3000 = 0.003
+    const activeLiquidity = token.liquidity || 1;
+    const estimatedFeeAPR = ((token.volume24h * feeTierPct) / activeLiquidity) * 365;
     
-    console.log(`[MarketData] ✅ ${token.symbol} PASSED — score: ${score}, mcap: $${(token.marketCap/1000).toFixed(0)}K, vol: $${(token.volume24h/1000).toFixed(0)}K`);
+    // Safety score constraint (max 100 on safety, but we now rank by APR)
+    // We will use estimatedFeeAPR as the primary score.
+    const score = Math.round(estimatedFeeAPR * 100) / 100; // Store as raw APR percentage
+    
+    console.log(`[MarketData] ✅ ${token.symbol} PASSED — estAPR: ${score}%, mcap: $${(token.marketCap/1000).toFixed(0)}K, vol: $${(token.volume24h/1000).toFixed(0)}K`);
     
     const pool: GMGNPool = {
-      address: '',
+      address: realPoolAddress,
       token0: token.address,
-      token1: token.quoteToken || process.env.WETH_ADDRESS || '',
-      feeTier: 3000,
+      token1: quoteTokenAddress,
+      feeTier: bestFeeTier,
       tvlUsd: token.liquidity,
       volume24h: token.volume24h,
       volTvlRatio: token.liquidity > 0 ? token.volume24h / token.liquidity : 0,
@@ -86,7 +137,24 @@ export async function screenPairs(criteria?: LPScreeningCriteria): Promise<PoolC
     await new Promise(r => setTimeout(r, 250));
   }
   
-  passed.sort((a, b) => b.score - a.score);
+  // Quote Asset Priority
+  const getQuotePriority = (address?: string) => {
+    if (!address) return 0;
+    const addr = address.toLowerCase();
+    if (addr === process.env.USDG_ADDRESS?.toLowerCase()) return 3;
+    if (addr === process.env.WETH_ADDRESS?.toLowerCase()) return 2;
+    if (addr === process.env.USDC_ADDRESS?.toLowerCase()) return 1;
+    return 0; // Other quote assets
+  };
+
+  passed.sort((a, b) => {
+    const priorityA = getQuotePriority(a.token.quoteToken);
+    const priorityB = getQuotePriority(b.token.quoteToken);
+    if (priorityA !== priorityB) {
+      return priorityB - priorityA; // Higher priority first
+    }
+    return b.score - a.score; // Then by estimatedFeeAPR
+  });
   console.log(`[MarketData] 📊 Screening done: ${passed.length}/${gtTokens.length} pairs passed`);
   return passed;
 }
