@@ -535,7 +535,7 @@ export class LPEngineAgent {
     const amount0Desired = this.usdToTokenAmount(halfUsd, token0Price, t0Dec);
     const amount1Desired = this.usdToTokenAmount(halfUsd, token1Price, t1Dec);
 
-    const recipient = (process.env.USER_WALLET_ADDRESS ?? '') as Address;
+    const recipient = ((process.env.LP_WALLET_ADDRESS || process.env.USER_WALLET_ADDRESS) ?? '') as Address;
     const tier = await getUserTier(recipient);
     const limits = getTierLimits(tier);
 
@@ -719,7 +719,7 @@ export class LPEngineAgent {
     const isSim = pos.tokenId.startsWith('SIM-') || pos.tradingMode === 'DRY_RUN';
     const tokenId = isSim ? 0n : BigInt(pos.tokenId);
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 10);
-    const recipient = (process.env.USER_WALLET_ADDRESS ?? '') as Address;
+    const recipient = ((process.env.LP_WALLET_ADDRESS || process.env.USER_WALLET_ADDRESS) ?? '') as Address;
 
     // Read current liquidity from NPM (skip if simulated)
     let liquidity = 0n;
@@ -835,7 +835,7 @@ export class LPEngineAgent {
       : { status: 'OPEN' };
 
     const positions = await prisma.lPPosition.findMany({ where });
-    const recipient = (process.env.USER_WALLET_ADDRESS ?? '') as Address;
+    const recipient = ((process.env.LP_WALLET_ADDRESS || process.env.USER_WALLET_ADDRESS) ?? '') as Address;
     const tier = await getUserTier(recipient);
     const { npmAddress: defaultNpm } = await this.getAddresses();
 
@@ -844,7 +844,7 @@ export class LPEngineAgent {
       const isSim = pos.tokenId.startsWith('SIM-') || pos.tradingMode === 'DRY_RUN';
 
       const tokenId = isSim ? 0n : BigInt(pos.tokenId);
-      const recipient = (process.env.USER_WALLET_ADDRESS ?? '') as Address;
+      const recipient = ((process.env.LP_WALLET_ADDRESS || process.env.USER_WALLET_ADDRESS) ?? '') as Address;
       const npmAddress = (pos.managerAddress as `0x${string}`) || (await this.getAddresses()).npmAddress;
 
       const calldata = isSim ? '0x' : this.buildCollectCalldata(tokenId, recipient);

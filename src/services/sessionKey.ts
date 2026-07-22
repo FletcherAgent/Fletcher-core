@@ -162,7 +162,7 @@ export async function getSessionKeyClient(modeRequired: 'SEMI' | 'FULL', tier: n
   }
 
   // Simulated: We use the master PRIVATE_KEY to act on behalf of the smart account
-  const pk = process.env.PRIVATE_KEY as Hex;
+  const pk = (process.env.LP_PRIVATE_KEY || process.env.PRIVATE_KEY) as Hex;
   if (!pk) throw new Error('PRIVATE_KEY not found in .env');
   
   return await createSmartAccount(pk, tier);
