@@ -1,5 +1,10 @@
-import { chromium } from 'playwright';
+import { chromium as originalChromium } from 'playwright';
+import { chromium } from 'playwright-extra';
+import stealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { prisma } from '../../core/db.js';
+
+// Inject stealth plugin
+chromium.use(stealthPlugin());
 
 export interface GMGNSession {
   userAgent: string;
@@ -66,7 +71,7 @@ export class SessionManager {
 
   private static async performCloudflareBypass(): Promise<GMGNSession> {
     const browser = await chromium.launch({ 
-      headless: true, // Use headless in Railway
+      headless: true, // Try headless true first
       args: [
         '--no-sandbox', 
         '--disable-setuid-sandbox',
@@ -74,9 +79,11 @@ export class SessionManager {
       ]
     });
     
+    // Create context with specific user-agent (matching got-scraping defaults)
+    const userAgentStr = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
     const context = await browser.newContext({
       viewport: { width: 1280, height: 720 },
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      userAgent: userAgentStr
     });
     
     const page = await context.newPage();
@@ -104,11 +111,11 @@ export class SessionManager {
         throw new Error('Failed to acquire cf_clearance cookie after 20 seconds');
       }
 
-      // TTL: Set session to expire in 1 hour or when cookie expires, whichever is sooner
+      // TTL: Set session to expire in 1 hour
       const expiresAt = Date.now() + (60 * 60 * 1000); 
 
       return {
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        userAgent: userAgentStr,
         cookies: cookies,
         expiresAt
       };

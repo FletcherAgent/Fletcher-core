@@ -1,4 +1,5 @@
-import { getTrendingPairs, getTokenInfo, fetchTopTraders, GMGNToken, GMGNPool } from './endpoints.js';
+import { getTrendingPairs, getTokenInfo, fetchTopTraders } from './endpoints.js';
+import type { GMGNToken, GMGNPool } from './endpoints.js';
 export interface PoolCandidate {
   pool:       GMGNPool;
   token:      GMGNToken;
@@ -27,7 +28,8 @@ export async function loadScreeningCriteria(): Promise<LPScreeningCriteria> {
 }
 
 // Export them so other modules can use them
-export { getTrendingPairs, getTokenInfo, fetchTopTraders, GMGNToken, GMGNPool };
+export type { GMGNToken, GMGNPool };
+export { getTrendingPairs, getTokenInfo, fetchTopTraders };
 
 export async function screenPairs(criteria?: LPScreeningCriteria): Promise<PoolCandidate[]> {
   const config = criteria ?? (await loadScreeningCriteria());

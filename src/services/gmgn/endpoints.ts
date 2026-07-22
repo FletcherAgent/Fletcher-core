@@ -159,10 +159,10 @@ export async function getTrendingPairs(limit = 20): Promise<GMGNToken[]> {
   } catch (e: any) {
     if (e.message.includes('DEGRADATION MODE')) {
       console.warn('[GMGN Endpoints] 📉 Degradation Mode is active, switching to GeckoTerminal');
-      return getTrendingPairsFallback(limit);
+    } else {
+      console.warn('[GMGN Endpoints] ⚠️ GMGN Fetch failed, falling back to GeckoTerminal:', e.message);
     }
-    console.error('[GMGN Endpoints] ❌ GMGN Fetch failed:', e.message);
-    return [];
+    return getTrendingPairsFallback(limit);
   }
 }
 
