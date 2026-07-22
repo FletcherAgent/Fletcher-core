@@ -15,14 +15,17 @@ export class RiskWardenAgent {
   public async evaluateSignal(tokenAddress: string): Promise<{ approved: boolean; recommendedSize: bigint; reason: string }> {
     console.log(`[Risk Warden] Evaluating signal for ${tokenAddress}`);
 
-    // 1. Check Portfolio Heat (Circuit Breaker)
+    const config = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
+    const currentMode = config ? config.value : 'LIVE';
+
+    // 1. Check Portfolio Heat (Circuit Breaker) per mode
     const activePositionsCount = await prisma.position.count({
-      where: { status: { in: ['OPEN', 'PENDING', 'EXITING'] } }
+      where: { status: { in: ['OPEN', 'PENDING', 'EXITING'] }, tradingMode: currentMode }
     });
     
-    // Include LP Engine positions in global heat
+    // Include LP Engine positions in global heat per mode
     const activeLPCount = await prisma.lPPosition.count({
-      where: { status: { in: ['OPEN', 'PENDING'] } }
+      where: { status: { in: ['OPEN', 'PENDING'] }, tradingMode: currentMode }
     });
 
     const totalHeat = activePositionsCount + activeLPCount;
