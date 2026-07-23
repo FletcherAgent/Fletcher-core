@@ -516,10 +516,13 @@ export class LPEngineAgent {
     console.log(`[LPEngine] 📋 Proposing position: ${token.symbol} | dayMode=${options.dayMode} | dryRun=${isDryRun}`);
     await logEvent('INFO', `[LP] Proposing position: ${token.symbol} | dayMode=${options.dayMode} | dryRun=${isDryRun}`);
 
-    // Enforce No Duplicate Token
+    const currentTradingMode = isDryRun ? 'DRY_RUN' : 'LIVE';
+
+    // Enforce No Duplicate Token (per trading mode)
     const existingTokenPosition = await prisma.lPPosition.findFirst({
       where: {
         status: { in: ['OPEN', 'PENDING'] },
+        tradingMode: currentTradingMode,
         OR: [
           { token0: { equals: token.address, mode: 'insensitive' } },
           { token1: { equals: token.address, mode: 'insensitive' } }
@@ -528,9 +531,9 @@ export class LPEngineAgent {
     });
 
     if (existingTokenPosition) {
-      const msg = `⚠️ Skipped duplicate LP position for $${token.symbol} (already open/pending).`;
+      const msg = `⚠️ Skipped duplicate LP position for $${token.symbol} (already open/pending in ${currentTradingMode}).`;
       console.warn(`[LPEngine] ${msg}`);
-      await logEvent('WARN', `[LP] Skipped duplicate position for ${token.symbol}`);
+      await logEvent('WARN', `[LP] Skipped duplicate position for ${token.symbol} in ${currentTradingMode}`);
       if (this.onNotification) await this.onNotification(msg);
       return;
     }
