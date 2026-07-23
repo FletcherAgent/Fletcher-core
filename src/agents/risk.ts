@@ -45,12 +45,18 @@ export class RiskWardenAgent {
     }
 
     let currentBalance = 0n;
-    try {
-      currentBalance = await publicClient.getBalance({ address: walletAddress as `0x${string}` });
-    } catch (e) {
-      console.error(`[Risk Warden] Failed to fetch balance for ${walletAddress}`, e);
-      dbLogger.error(`Risk: RPC error fetching wallet balance`, { wallet: walletAddress, error: String(e) });
-      return { approved: false, recommendedSize: 0n, reason: 'RPC_ERROR_FETCHING_BALANCE' };
+    if (currentMode !== 'LIVE') {
+      // DRY_RUN or PAPER_TRADE uses a mock balance to allow simulation without real funds
+      currentBalance = 1000000000000000000n; // 1.0 ETH mock balance
+      console.log(`[Risk Warden] ${currentMode} Mode: Using mock balance of 1.0 ETH`);
+    } else {
+      try {
+        currentBalance = await publicClient.getBalance({ address: walletAddress as `0x${string}` });
+      } catch (e) {
+        console.error(`[Risk Warden] Failed to fetch balance for ${walletAddress}`, e);
+        dbLogger.error(`Risk: RPC error fetching wallet balance`, { wallet: walletAddress, error: String(e) });
+        return { approved: false, recommendedSize: 0n, reason: 'RPC_ERROR_FETCHING_BALANCE' };
+      }
     }
 
     if (currentBalance === 0n) {
@@ -128,7 +134,15 @@ export class RiskWardenAgent {
       recommendedSize = maxAffordable;
     }
 
-    console.log(`[Risk Warden] ✅ APPROVED: Risk gates passed. Assigned size: ${recommendedSize} wei (from total balance ${currentBalance})`);
+    console.log(`[Risk Warden] Checked affordability. Assigned size: ${recommendedSize} wei (from total balance ${currentBalance})`);
+
+    if (recommendedSize === 0n) {
+      const msg = `Signal rejected: Insufficient funds (after gas buffer) to meet minimum trade size.`;
+      console.warn(`[Risk Warden] 🚨 ` + msg);
+      return { approved: false, recommendedSize: 0n, reason: 'INSUFFICIENT_FUNDS_AFTER_BUFFER' };
+    }
+
+    console.log(`[Risk Warden] ✅ APPROVED: Risk gates passed.`);
 
     return {
       approved: true,
