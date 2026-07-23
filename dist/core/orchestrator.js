@@ -7,6 +7,7 @@ import { LPEngineAgent } from '../agents/lpengine.js';
 import { RiskWardenAgent } from '../agents/risk.js';
 import { GuardianAgent } from '../agents/guardian.js';
 import { TrackerAgent } from '../agents/tracker.js';
+import { WatchlistAgent } from '../agents/watchlist.js';
 import { prisma } from './db.js';
 export class Orchestrator {
     scout;
@@ -375,10 +376,16 @@ export class Orchestrator {
                 console.log(`[Orchestrator] 🚀 LP Engine hourly scan triggered (Hour: ${h})`);
                 this.lpEngine.runNightMode().catch(console.error);
             }
+            // Strategy Engine: Watchlist Loop every 5 minutes (0, 5, 10, ...)
+            if (m % 5 === 0) {
+                console.log(`[Orchestrator] 📊 Strategy Engine: Running Watchlist check`);
+                const watchlistAgent = new WatchlistAgent(this.lpEngine);
+                watchlistAgent.runWatchlistLoop().catch(console.error);
+            }
         };
         // Poll every minute
         setInterval(runCron, 60_000);
-        console.log('[Orchestrator] LP cron scheduled (Hourly scan at minute :00)');
+        console.log('[Orchestrator] LP cron scheduled (Hourly scan, Watchlist every 5m)');
     }
     async processAlphaSpotSignal(tokenAddress, score) {
         const lowerToken = tokenAddress.toLowerCase();

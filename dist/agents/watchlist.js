@@ -1,0 +1,110 @@
+import { prisma } from '../core/db.js';
+import { fetchOHLCV, calculateIndicators } from '../services/ohlcv.js';
+import { getTokenInfo } from '../services/gmgn/index.js';
+export class WatchlistAgent {
+    lpEngine;
+    constructor(lpEngine) {
+        this.lpEngine = lpEngine;
+    }
+    async runWatchlistLoop() {
+        console.log('[Watchlist] 🔍 Checking Watchlist candidates for Entry Signals...');
+        const items = await prisma.watchlist.findMany({
+            where: {
+                tradingMode: (await prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } }))?.value === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE'
+            }
+        });
+        if (items.length === 0) {
+            console.log('[Watchlist] Watchlist is empty.');
+            return;
+        }
+        const tModeConfig = await prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } });
+        const currentMode = (tModeConfig?.value ?? 'LIVE') === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE';
+        const config = await prisma.systemConfig.findMany({
+            where: { key: { in: ['lp.maxPositions'] } }
+        });
+        const map = Object.fromEntries(config.map(c => [c.key, c.value]));
+        const maxPositions = parseInt(map['lp.maxPositions'] ?? '3');
+        const openCount = await prisma.lPPosition.count({
+            where: {
+                status: { in: ['OPEN', 'PENDING'] },
+                tradingMode: currentMode
+            },
+        });
+        if (openCount >= maxPositions) {
+            console.log('[Watchlist] ⛔ Max positions reached, skipping entry checks.');
+            return;
+        }
+        for (const item of items) {
+            if (!item.poolAddress) {
+                console.log(`[Watchlist] 🔍 Resolving pool address for ${item.symbol}...`);
+                const { wethAddress } = await this.lpEngine.getAddresses();
+                const resolved = await this.lpEngine.resolvePool(item.tokenAddress, wethAddress);
+                if (resolved) {
+                    item.poolAddress = resolved.poolAddress.toLowerCase();
+                    await prisma.watchlist.update({
+                        where: { id: item.id },
+                        data: { poolAddress: item.poolAddress }
+                    });
+                    console.log(`[Watchlist] ✅ Resolved pool for ${item.symbol}: ${item.poolAddress}`);
+                }
+                else {
+                    console.log(`[Watchlist] ⚠️ Still no pool address for ${item.symbol}, skipping.`);
+                    continue;
+                }
+            }
+            console.log(`[Watchlist] 📊 Fetching TA for ${item.symbol} (${item.poolAddress})`);
+            const candles = await fetchOHLCV(item.poolAddress);
+            const c1 = candles[candles.length - 1];
+            const isForming = (Date.now() - c1.timestamp < 15 * 60 * 1000);
+            const closedCandles = isForming ? candles.slice(0, -1) : candles;
+            const ta = calculateIndicators(closedCandles);
+            if (!ta) {
+                console.log(`[Watchlist] Not enough closed candle data for ${item.symbol}`);
+                continue;
+            }
+            // Check Blacklist (Re-entry Rule)
+            const blacklisted = await prisma.tokenBlacklist.findUnique({
+                where: { tokenAddress: item.tokenAddress }
+            });
+            if (blacklisted) {
+                if (blacklisted.athPriceAtExit && ta.highestClose > blacklisted.athPriceAtExit) {
+                    console.log(`[Watchlist] 🔓 ${item.symbol} broke ATH since exit! Removing from blacklist.`);
+                    await prisma.tokenBlacklist.delete({ where: { tokenAddress: item.tokenAddress } });
+                    // Proceed to entry checks
+                }
+                else {
+                    console.log(`[Watchlist] ⛔ ${item.symbol} is blacklisted until it breaks ATH > ${blacklisted.athPriceAtExit}. Skipping.`);
+                    continue;
+                }
+            }
+            // Check Entry Condition: Supertrend Breakout OR New ATH
+            const isSupertrendBullish = ta.supertrend.isGreen;
+            const isNewAth = ta.currentClose >= ta.highestClose * 0.99; // Within 1% of ATH
+            if (isSupertrendBullish || isNewAth) {
+                console.log(`[Watchlist] 🚀 ENTRY SIGNAL for ${item.symbol}! (Supertrend: ${isSupertrendBullish}, ATH: ${isNewAth})`);
+                // Fetch full token info
+                const token = await getTokenInfo(item.tokenAddress);
+                if (!token) {
+                    console.warn(`[Watchlist] Failed to fetch GMGN data for ${item.symbol}, skipping.`);
+                    continue;
+                }
+                // Remove from Watchlist
+                await prisma.watchlist.delete({ where: { id: item.id } });
+                // Trigger LP Engine Strategy Entry
+                await this.lpEngine.proposeOpenPosition({ token, score: 100 }, // Dummy score
+                {
+                    dayMode: false,
+                    nightMode: false,
+                    strategyMode: true,
+                    lowerPct: 0.91,
+                    upperPct: 1.05,
+                    source: 'WATCHLIST'
+                });
+                break; // Only open 1 position per loop to avoid hitting max positions
+            }
+            else {
+                console.log(`[Watchlist] 💤 No signal for ${item.symbol} yet. (Supertrend: ${isSupertrendBullish}, ATH: ${isNewAth})`);
+            }
+        }
+    }
+}

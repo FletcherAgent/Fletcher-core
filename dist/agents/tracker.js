@@ -1,4 +1,5 @@
 import { createServer } from 'http';
+import * as crypto from 'crypto';
 import { parseAbiItem, decodeEventLog } from 'viem';
 import { prisma } from '../core/db.js';
 import { dbLogger } from '../services/logger.js';
@@ -22,13 +23,27 @@ export class TrackerAgent {
             res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
             res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
             if (req.method === 'OPTIONS') {
-                res.writeHead(200);
+                res.writeHead(200, {
+                    'Access-Control-Allow-Origin': '*',
+                    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+                    'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-alchemy-signature'
+                });
                 res.end();
                 return;
             }
+            // Check API Key for dashboard and settings endpoints
+            if (req.url?.startsWith('/api/')) {
+                const authHeader = req.headers.authorization;
+                const secretKey = process.env.API_SECRET_KEY;
+                if (secretKey && authHeader !== `Bearer ${secretKey}`) {
+                    res.writeHead(401, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Unauthorized' }));
+                    return;
+                }
+            }
             if (req.method === 'GET' && req.url === '/api/dashboard') {
                 try {
-                    const [wallets, signals, positions, lpPositions, logs, totalSignals, openPositionsCount, tradingModeConfig, maxPosConfig] = await Promise.all([
+                    const [wallets, signals, positions, lpPositions, logs, totalSignals, openPositionsCount, tradingModeConfig, maxPosConfig, autonomyConfig] = await Promise.all([
                         prisma.trackedWallet.findMany({ orderBy: { createdAt: 'desc' } }),
                         prisma.signal.findMany({ orderBy: { createdAt: 'desc' }, take: 20 }),
                         prisma.position.findMany({ orderBy: { createdAt: 'desc' }, take: 20 }),
@@ -37,7 +52,8 @@ export class TrackerAgent {
                         prisma.signal.count(),
                         prisma.position.count({ where: { status: 'OPEN' } }),
                         prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } }),
-                        prisma.systemConfig.findUnique({ where: { key: 'MAX_POSITION_SIZE' } })
+                        prisma.systemConfig.findUnique({ where: { key: 'MAX_POSITION_SIZE' } }),
+                        prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } })
                     ]);
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({
@@ -49,7 +65,8 @@ export class TrackerAgent {
                         metrics: {
                             totalSignals,
                             openPositionsCount,
-                            tradingMode: tradingModeConfig?.value || 'SEMI',
+                            tradingMode: tradingModeConfig?.value || 'LIVE',
+                            autonomyMode: autonomyConfig?.value || 'SEMI',
                             maxPositionSize: maxPosConfig?.value ? parseInt(maxPosConfig.value, 10) : 2000
                         }
                     }));
@@ -67,6 +84,20 @@ export class TrackerAgent {
                 });
                 req.on('end', async () => {
                     try {
+                        // Verify Alchemy Signature
+                        const signature = req.headers['x-alchemy-signature'];
+                        const signingKey = process.env.ALCHEMY_WEBHOOK_SIGNING_KEY;
+                        if (signingKey && signature) {
+                            const hmac = crypto.createHmac('sha256', signingKey);
+                            hmac.update(body, 'utf8');
+                            const digest = hmac.digest('hex');
+                            if (signature !== digest) {
+                                console.warn('[Tracker] Invalid Alchemy Webhook Signature');
+                                res.writeHead(403, { 'Content-Type': 'application/json' });
+                                res.end(JSON.stringify({ error: 'Forbidden' }));
+                                return;
+                            }
+                        }
                         const payload = JSON.parse(body);
                         if (payload.event && payload.event.activity) {
                             for (const activity of payload.event.activity) {

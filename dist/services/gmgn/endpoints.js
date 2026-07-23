@@ -5,20 +5,31 @@ const CHAIN = 'robinhood';
  * Normalizes API response to GMGNToken interface
  */
 function normalizeToken(d) {
+    // Fix for Robinhood chain missing root fields
+    let mcap = parseFloat(d?.market_cap ?? d?.marketcap ?? '0');
+    if (mcap === 0 && d?.price?.price && d?.circulating_supply) {
+        mcap = parseFloat(d.price.price) * parseFloat(d.circulating_supply);
+    }
+    let vol = parseFloat(d?.volume_24h ?? d?.volume ?? d?.price?.volume_24h ?? '0');
+    let price = parseFloat(d?.price?.price ?? d?.price ?? d?.price_usd ?? '0');
+    let cat = d?.tag ?? d?.category ?? '';
+    if (!cat)
+        cat = 'meme'; // Default if none exists
     return {
         address: d?.address ?? d?.token_address ?? '',
         symbol: d?.symbol ?? d?.token_symbol ?? '',
         name: d?.name ?? d?.token_name ?? '',
-        marketCap: parseFloat(d?.market_cap ?? d?.marketcap ?? '0'),
-        volume24h: parseFloat(d?.volume_24h ?? d?.volume ?? '0'),
-        liquidity: parseFloat(d?.liquidity ?? d?.liquidity_usd ?? '0'),
-        priceUsd: parseFloat(d?.price ?? d?.price_usd ?? '0'),
-        category: d?.tag ?? d?.category ?? '',
+        marketCap: mcap,
+        volume24h: vol,
+        liquidity: parseFloat(d?.pool?.liquidity ?? d?.liquidity ?? d?.liquidity_usd ?? '0'),
+        priceUsd: price,
+        category: cat,
         launchPad: d?.launch_pad ?? d?.launchpad ?? '',
         isHoneypot: Boolean(d?.is_honeypot ?? d?.honeypot),
         buyTax: parseFloat(d?.buy_tax ?? '0') * 100, // normalize to percentage if decimal
         sellTax: parseFloat(d?.sell_tax ?? '0') * 100,
         isVerified: Boolean(d?.is_open_source ?? d?.verified ?? true),
+        pairCreatedAt: d?.pool?.created_at ? parseInt(d.pool.created_at) * 1000 : undefined,
     };
 }
 // ─── FALLBACKS (GeckoTerminal & DexScreener) ─────────────────────────────────
@@ -55,7 +66,8 @@ async function getTrendingPairsFallback(limit = 20) {
                 buyTax: 0,
                 sellTax: 0,
                 isVerified: true,
-                quoteToken: pool.relationships?.quote_token?.data?.id?.replace('robinhood_', '') || ''
+                quoteToken: pool.relationships?.quote_token?.data?.id?.replace('robinhood_', '') || '',
+                pairCreatedAt: pool.attributes?.pool_created_at ? new Date(pool.attributes.pool_created_at).getTime() : undefined
             };
         });
     }
@@ -88,7 +100,8 @@ async function getTokenInfoFallback(tokenAddress) {
             launchPad: 'None',
             isHoneypot: false,
             buyTax: 0, sellTax: 0, isVerified: true,
-            quoteToken: mainPair.quoteToken?.address || ''
+            quoteToken: mainPair.quoteToken?.address || '',
+            pairCreatedAt: mainPair.pairCreatedAt ? mainPair.pairCreatedAt : undefined
         };
         // GoPlus Security
         try {

@@ -7,12 +7,13 @@ const FACTORY_ABI = parseAbi([
 ]);
 export async function loadScreeningCriteria() {
     const { prisma } = await import('../../core/db.js');
-    const keys = ['lp.minMcap', 'lp.minVol', 'lp.categories', 'lp.blacklist'];
+    const keys = ['lp.minMcap', 'lp.minVol', 'lp.minAgeHours', 'lp.categories', 'lp.blacklist'];
     const configs = await prisma.systemConfig.findMany({ where: { key: { in: keys } } });
     const map = Object.fromEntries(configs.map(c => [c.key, c.value]));
     return {
-        minMcap: parseFloat(map['lp.minMcap'] ?? '10000'),
-        minVol24h: parseFloat(map['lp.minVol'] ?? '10000'),
+        minMcap: parseFloat(map['lp.minMcap'] ?? '400000'),
+        minVol24h: parseFloat(map['lp.minVol'] ?? '1000000'),
+        minAgeHours: parseFloat(map['lp.minAgeHours'] ?? '5'),
         categories: JSON.parse(map['lp.categories'] ?? '["tech","RWA","launchpad","ai","meme","defi"]'),
         blacklist: JSON.parse(map['lp.blacklist'] ?? '["nsfw","scam"]')
     };
@@ -40,16 +41,23 @@ export async function screenPairs(criteria) {
             reasons.push(`mcap ${token.marketCap.toFixed(0)} < ${config.minMcap}`);
         if (token.volume24h < config.minVol24h)
             reasons.push(`vol24h ${token.volume24h.toFixed(0)} < ${config.minVol24h}`);
+        if (token.pairCreatedAt) {
+            const ageHours = (Date.now() - token.pairCreatedAt) / (1000 * 60 * 60);
+            if (ageHours < config.minAgeHours)
+                reasons.push(`age ${ageHours.toFixed(1)}h < ${config.minAgeHours}h`);
+        }
         // 3. Category filter
         if (!config.categories.some(c => token.category?.toLowerCase().includes(c.toLowerCase()))) {
             reasons.push(`category "${token.category}" not in whitelist`);
         }
         if (config.blacklist.some(b => token.launchPad?.toLowerCase().includes(b.toLowerCase())))
             reasons.push(`launchpad blacklisted`);
+        // Strict Anti-Scam (GoPlus)
         if (token.isHoneypot)
             reasons.push('honeypot detected');
-        if (token.buyTax > 10 || token.sellTax > 10)
+        if (token.buyTax > 5 || token.sellTax > 5)
             reasons.push(`high tax: buy=${token.buyTax}% sell=${token.sellTax}%`);
+        // if (!token.isVerified) reasons.push('contract not verified');
         if (reasons.length > 0) {
             console.log(`[MarketData] ❌ ${token.symbol} REJECTED: ${reasons.join('; ')}`);
             continue;

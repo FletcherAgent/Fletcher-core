@@ -8,6 +8,7 @@ import { LPEngineAgent, type LPProposal } from '../agents/lpengine.js';
 import { RiskWardenAgent } from '../agents/risk.js';
 import { GuardianAgent } from '../agents/guardian.js';
 import { TrackerAgent } from '../agents/tracker.js';
+import { WatchlistAgent } from '../agents/watchlist.js';
 import { prisma } from './db.js';
 
 export class Orchestrator {
@@ -430,7 +431,6 @@ export class Orchestrator {
       // Strategy Engine: Watchlist Loop every 5 minutes (0, 5, 10, ...)
       if (m % 5 === 0) {
         console.log(`[Orchestrator] 📊 Strategy Engine: Running Watchlist check`);
-        const { WatchlistAgent } = require('../agents/watchlist.js');
         const watchlistAgent = new WatchlistAgent(this.lpEngine);
         watchlistAgent.runWatchlistLoop().catch(console.error);
       }

@@ -24,7 +24,7 @@ import { logEvent } from '../utils/logger.js';
 import { getDexConfig, getAllDexConfigs } from '../core/dexConfig.js';
 import { IntelligenceLayer } from '../services/intelligence.js';
 import { screenPairs, } from '../services/gmgn.js';
-import { fullRangeTicks, calcNightTickRange, getPoolSlot0, getLiquidityForAmounts, tickToSqrtPriceX96 } from '../services/lpMath.js';
+import { fullRangeTicks, calcNightTickRange, getPoolSlot0, feeToTickSpacing, MIN_TICK, MAX_TICK, getLiquidityForAmounts, tickToSqrtPriceX96 } from '../services/lpMath.js';
 // ─── ABI ─────────────────────────────────────────────────────────────────────
 const NPM_ABI = parseAbi([
     // mint
@@ -55,20 +55,40 @@ const FACTORY_ABI = parseAbi([
     'function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address pool)',
 ]);
 const MAX_UINT128 = 340282366920938463463374607431768211455n;
+/**
+ * Returns a dynamic night range multiplier based on token market cap.
+ * Smaller MCap = wider range needed (more volatile).
+ */
+function calcDynamicNightRange(marketCapUsd) {
+    if (marketCapUsd < 50_000)
+        return 20; // < $50K  → ±40% range (ultra meme)
+    if (marketCapUsd < 200_000)
+        return 15; // < $200K → ±30% range
+    if (marketCapUsd < 1_000_000)
+        return 10; // < $1M   → ±20% range
+    if (marketCapUsd < 5_000_000)
+        return 7; // < $5M   → ±14% range
+    return 5; // > $5M   → ±10% range (more stable)
+}
 async function loadLPConfig() {
     const keys = [
-        'lp.maxPositions', 'lp.positionCap', 'lp.startSize',
-        'lp.nightRange', 'lp.dayCloseTime', 'lp.ilHourThreshold',
+        'lp.maxPositions', 'lp.positionCap', 'lp.startSize.live', 'lp.startSize.dryrun',
+        'lp.nightRange', 'lp.dayCloseTime', 'lp.ilHourThreshold', 'lp.minGrokScore',
+        'lp.outOfRangeGraceMinutes', 'lp.dynamicRange'
     ];
     const configs = await prisma.systemConfig.findMany({ where: { key: { in: keys } } });
     const map = Object.fromEntries(configs.map(c => [c.key, c.value]));
     return {
         maxPositions: parseInt(map['lp.maxPositions'] ?? '3'),
         positionCap: parseFloat(map['lp.positionCap'] ?? '2000'),
-        startSize: parseFloat(map['lp.startSize'] ?? '500'),
-        nightRange: parseFloat(map['lp.nightRange'] ?? '0.25'),
+        startSizeLive: parseFloat(map['lp.startSize.live'] ?? '10'),
+        startSizeDryRun: parseFloat(map['lp.startSize.dryrun'] ?? '500'),
+        nightRange: parseFloat(map['lp.nightRange'] ?? '15'),
         dayCloseTime: map['lp.dayCloseTime'] ?? '23:00',
         ilHourThreshold: parseInt(map['lp.ilHourThreshold'] ?? '4'),
+        minGrokScore: parseInt(map['lp.minGrokScore'] ?? '60'),
+        outOfRangeGraceMinutes: parseInt(map['lp.outOfRangeGraceMinutes'] ?? '15'),
+        dynamicRange: (map['lp.dynamicRange'] ?? 'true') === 'true',
     };
 }
 // ─── LP Engine Agent ──────────────────────────────────────────────────────────
@@ -91,14 +111,20 @@ export class LPEngineAgent {
         return { npmAddress, factoryAddress, wethAddress };
     }
     // ─── Position Cap Check ─────────────────────────────────────────────────────
-    /** Check if new position can be opened (max positions from metaConfig) */
+    /** Check if new position can be opened (max positions from metaConfig) for the current mode */
     async canOpenNewPosition() {
         const config = await loadLPConfig();
+        const tModeConfig = await prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } });
+        const isDryRun = (tModeConfig?.value ?? 'LIVE') === 'DRY_RUN';
+        const currentMode = isDryRun ? 'DRY_RUN' : 'LIVE';
         const openCount = await prisma.lPPosition.count({
-            where: { status: { in: ['OPEN', 'PENDING'] } },
+            where: {
+                status: { in: ['OPEN', 'PENDING'] },
+                tradingMode: currentMode
+            },
         });
         if (openCount >= config.maxPositions) {
-            return { ok: false, reason: `Already at max ${config.maxPositions} positions (${openCount} open)` };
+            return { ok: false, reason: `Already at max ${config.maxPositions} positions for ${currentMode} (${openCount} open)` };
         }
         return { ok: true };
     }
@@ -233,6 +259,7 @@ export class LPEngineAgent {
         console.log('[LPEngine] ☀️ DAY mode started...');
         if (this.onNotification)
             await this.onNotification('☀️ *LP DAY mode started* — screening pairs...');
+        const config = await loadLPConfig();
         const canOpen = await this.canOpenNewPosition();
         if (!canOpen.ok) {
             console.warn(`[LPEngine] ⛔ DAY mode blocked: ${canOpen.reason}`);
@@ -253,13 +280,15 @@ export class LPEngineAgent {
             console.log(`[LPEngine] 🧠 Asking Grok to analyze sentiment for ${candidate.token.symbol}...`);
             const sentiment = await IntelligenceLayer.analyzeSentiment(candidate.token.symbol, candidate.token.address);
             console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
-            if (sentiment.label === 'BEARISH' || sentiment.score < 50) {
-                console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < 50`);
+            if (sentiment.label === 'BEARISH' || sentiment.score < config.minGrokScore) {
+                console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < ${config.minGrokScore}`);
                 continue;
             }
             console.log(`[LPEngine] ✅ Grok APPROVED ${candidate.token.symbol}`);
             if (this.onNotification)
                 await this.onNotification(`✅ *Grok APPROVED $${candidate.token.symbol}*\nScore: ${sentiment.score}\n_Wait for V3 pool..._`);
+            candidate.grokScore = sentiment.score;
+            candidate.grokLabel = sentiment.label;
             selectedCandidate = candidate;
             break; // Found the top candidate that passed Grok
         }
@@ -268,7 +297,25 @@ export class LPEngineAgent {
             await logEvent('WARN', '[LP] DAY mode: No pairs passed Grok sentiment analysis');
             return;
         }
-        await this.proposeOpenPosition(selectedCandidate, { dayMode: true, nightMode: false });
+        // Push to Watchlist instead of opening directly
+        await prisma.watchlist.upsert({
+            where: { tokenAddress: selectedCandidate.token.address.toLowerCase() },
+            update: {
+                symbol: selectedCandidate.token.symbol,
+                name: selectedCandidate.token.name,
+                poolAddress: selectedCandidate.pool.address.toLowerCase(),
+            },
+            create: {
+                tokenAddress: selectedCandidate.token.address.toLowerCase(),
+                symbol: selectedCandidate.token.symbol,
+                name: selectedCandidate.token.name,
+                poolAddress: selectedCandidate.pool.address.toLowerCase(),
+                tradingMode: (await prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } }))?.value === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE',
+            }
+        });
+        console.log(`[LPEngine] 📋 Added $${selectedCandidate.token.symbol} to Watchlist (Awaiting TA Signal)`);
+        if (this.onNotification)
+            await this.onNotification(`📋 *Added to Watchlist:* $${selectedCandidate.token.symbol}\n_Awaiting Supertrend/ATH breakout_`);
     }
     // ─── MODE NIGHT: Concentrated Spray ────────────────────────────────────────
     /**
@@ -288,9 +335,14 @@ export class LPEngineAgent {
                 await this.onNotification(`⛔ *NIGHT mode blocked:* ${canOpen.reason}`);
             return;
         }
-        // Hitung berapa slot tersisa
+        // Calculate remaining slots for current mode (DRY_RUN and LIVE are counted separately)
+        const tModeConfig = await prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } });
+        const currentMode = (tModeConfig?.value ?? 'LIVE') === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE';
         const openCount = await prisma.lPPosition.count({
-            where: { status: { in: ['OPEN', 'PENDING'] } },
+            where: {
+                status: { in: ['OPEN', 'PENDING'] },
+                tradingMode: currentMode
+            },
         });
         const slotsLeft = config.maxPositions - openCount;
         if (slotsLeft <= 0)
@@ -304,21 +356,36 @@ export class LPEngineAgent {
             console.log(`[LPEngine] 🧠 Asking Grok to analyze sentiment for ${candidate.token.symbol}...`);
             const sentiment = await IntelligenceLayer.analyzeSentiment(candidate.token.symbol, candidate.token.address);
             console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
-            if (sentiment.label === 'BEARISH' || sentiment.score < 50) {
-                console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < 50`);
+            if (sentiment.label === 'BEARISH' || sentiment.score < config.minGrokScore) {
+                console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < ${config.minGrokScore}`);
                 continue;
             }
             console.log(`[LPEngine] ✅ Grok APPROVED ${candidate.token.symbol}`);
             if (this.onNotification)
                 await this.onNotification(`✅ *Grok APPROVED $${candidate.token.symbol}*\nScore: ${sentiment.score}\n_Wait for V3 pool..._`);
+            candidate.grokScore = sentiment.score;
+            candidate.grokLabel = sentiment.label;
             toOpen.push(candidate);
         }
         for (const candidate of toOpen) {
-            await this.proposeOpenPosition(candidate, {
-                dayMode: false,
-                nightMode: true,
-                nightRange: config.nightRange,
+            await prisma.watchlist.upsert({
+                where: { tokenAddress: candidate.token.address.toLowerCase() },
+                update: {
+                    symbol: candidate.token.symbol,
+                    name: candidate.token.name,
+                    poolAddress: candidate.pool.address.toLowerCase(),
+                },
+                create: {
+                    tokenAddress: candidate.token.address.toLowerCase(),
+                    symbol: candidate.token.symbol,
+                    name: candidate.token.name,
+                    poolAddress: candidate.pool.address.toLowerCase(),
+                    tradingMode: currentMode,
+                }
             });
+            console.log(`[LPEngine] 📋 Added $${candidate.token.symbol} to Watchlist (NIGHT)`);
+            if (this.onNotification)
+                await this.onNotification(`📋 *Added to Watchlist:* $${candidate.token.symbol}\n_Awaiting Supertrend/ATH breakout_`);
         }
     }
     // ─── Direct Alpha Signal Processing ──────────────────────────────────────────
@@ -333,12 +400,25 @@ export class LPEngineAgent {
                 await this.onNotification(`⛔ *Alpha Signal blocked:* ${canOpen.reason}`);
             return;
         }
-        // Pass token and score directly without mocking PoolCandidate
-        await this.proposeOpenPosition({ token, score: sentimentScore }, {
-            dayMode: true,
-            nightMode: false,
-            source: 'ALPHA'
+        const tModeConfig = await prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } });
+        const currentMode = (tModeConfig?.value ?? 'LIVE') === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE';
+        await prisma.watchlist.upsert({
+            where: { tokenAddress: token.address.toLowerCase() },
+            update: {
+                symbol: token.symbol,
+                name: token.name,
+            },
+            create: {
+                tokenAddress: token.address.toLowerCase(),
+                symbol: token.symbol,
+                name: token.name,
+                poolAddress: '', // Pool will be discovered later if missing
+                tradingMode: currentMode,
+            }
         });
+        console.log(`[LPEngine] 📋 Added $${token.symbol} from Alpha Signal to Watchlist`);
+        if (this.onNotification)
+            await this.onNotification(`📋 *Alpha Signal Added to Watchlist:* $${token.symbol}\n_Awaiting Supertrend/ATH breakout_`);
     }
     // ─── Core: Propose Open Position ────────────────────────────────────────────
     async proposeOpenPosition(candidate, options) {
@@ -349,10 +429,12 @@ export class LPEngineAgent {
         const { wethAddress } = await this.getAddresses();
         console.log(`[LPEngine] 📋 Proposing position: ${token.symbol} | dayMode=${options.dayMode} | dryRun=${isDryRun}`);
         await logEvent('INFO', `[LP] Proposing position: ${token.symbol} | dayMode=${options.dayMode} | dryRun=${isDryRun}`);
-        // Enforce No Duplicate Token
+        const currentTradingMode = isDryRun ? 'DRY_RUN' : 'LIVE';
+        // Enforce No Duplicate Token (per trading mode)
         const existingTokenPosition = await prisma.lPPosition.findFirst({
             where: {
                 status: { in: ['OPEN', 'PENDING'] },
+                tradingMode: currentTradingMode,
                 OR: [
                     { token0: { equals: token.address, mode: 'insensitive' } },
                     { token1: { equals: token.address, mode: 'insensitive' } }
@@ -360,9 +442,9 @@ export class LPEngineAgent {
             }
         });
         if (existingTokenPosition) {
-            const msg = `⚠️ Skipped duplicate LP position for $${token.symbol} (already open/pending).`;
+            const msg = `⚠️ Skipped duplicate LP position for $${token.symbol} (already open/pending in ${currentTradingMode}).`;
             console.warn(`[LPEngine] ${msg}`);
-            await logEvent('WARN', `[LP] Skipped duplicate position for ${token.symbol}`);
+            await logEvent('WARN', `[LP] Skipped duplicate position for ${token.symbol} in ${currentTradingMode}`);
             if (this.onNotification)
                 await this.onNotification(msg);
             return;
@@ -400,6 +482,28 @@ export class LPEngineAgent {
             tickLower = ticks.tickLower;
             tickUpper = ticks.tickUpper;
         }
+        else if (options.strategyMode) {
+            // 91% - 105% of MEME price
+            const lowerPct = options.lowerPct ?? 0.91;
+            const upperPct = options.upperPct ?? 1.05;
+            const tickSpacing = feeToTickSpacing(feeTier);
+            const lowerOffset = Math.round(Math.log(lowerPct) / Math.log(1.0001)); // e.g. -943
+            const upperOffset = Math.round(Math.log(upperPct) / Math.log(1.0001)); // e.g. +487
+            let rawLower, rawUpper;
+            if (isToken0) {
+                // Meme is Token0. Price = 1.0001^tick.
+                rawLower = entryTick + lowerOffset; // lower tick
+                rawUpper = entryTick + upperOffset; // upper tick
+            }
+            else {
+                // Meme is Token1. Price = 1 / 1.0001^tick.
+                // Price drops -> Tick goes UP
+                rawLower = entryTick - upperOffset; // upper price (1.05x) means lower tick
+                rawUpper = entryTick - lowerOffset; // lower price (0.91x) means higher tick
+            }
+            tickLower = Math.max(MIN_TICK, Math.floor(rawLower / tickSpacing) * tickSpacing);
+            tickUpper = Math.min(MAX_TICK, Math.ceil(rawUpper / tickSpacing) * tickSpacing);
+        }
         else {
             // NIGHT mode: get current tick from pool
             const ticks = calcNightTickRange(entryTick, options.nightRange ?? 2.0, feeTier);
@@ -407,7 +511,8 @@ export class LPEngineAgent {
             tickUpper = ticks.tickUpper;
         }
         // Amount calculation: split startSize 50/50 between token0 and token1
-        const halfUsd = config.startSize / 2;
+        const currentStartSize = isDryRun ? config.startSizeDryRun : config.startSizeLive;
+        const halfUsd = currentStartSize / 2;
         const poolPriceRaw = Number((BigInt(sqrtPriceX96) * 10000000n) / (2n ** 96n)) / 10000000;
         const poolPrice = poolPriceRaw ** 2;
         const decimalAdjustedPoolPrice = poolPrice * (10 ** (t0Dec - t1Dec));
@@ -428,10 +533,12 @@ export class LPEngineAgent {
         const recipient = ((process.env.LP_WALLET_ADDRESS || process.env.USER_WALLET_ADDRESS) ?? '');
         const tier = await getUserTier(recipient);
         const limits = getTierLimits(tier);
-        // Enforce Active Positions Limit
+        // Enforce Active Positions Limit per mode
+        const modeStr = isDryRun ? 'DRY_RUN' : 'LIVE';
         const activePositionsCount = await prisma.lPPosition.count({
             where: {
-                status: { in: ['OPEN', 'PENDING'] }
+                status: { in: ['OPEN', 'PENDING'] },
+                tradingMode: modeStr
             }
         });
         if (activePositionsCount >= limits.maxPositions) {
@@ -463,8 +570,9 @@ export class LPEngineAgent {
             `Pool: \`${poolAddress.slice(0, 10)}...\`\n` +
             `Pair: ${t0Symbol}/${t1Symbol} (fee: ${feeTier / 10000}%)\n` +
             `Range: ${rangeLabel}\n` +
-            `Size: $${config.startSize}\n` +
-            `Score: ${candidate.score}/100\n` +
+            `Size: $${isDryRun ? config.startSizeDryRun : config.startSizeLive}\n` +
+            `Grok Score: ${candidate.grokScore ?? 'N/A'}/100 (${candidate.grokLabel ?? 'N/A'})\n` +
+            `Est APR: ${(candidate.score).toFixed(2)}%\n` +
             `MCap: $${(token.marketCap / 1000).toFixed(0)}K | Vol24h: $${(token.volume24h / 1000).toFixed(0)}K`;
         const defaultModeRecord = await prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } });
         const currentMode = defaultModeRecord?.value || 'MANUAL';
@@ -481,14 +589,14 @@ export class LPEngineAgent {
                 feeTier,
                 tickLower,
                 tickUpper,
-                entryValue: config.startSize,
+                entryValue: isDryRun ? config.startSizeDryRun : config.startSizeLive,
                 entryTick,
                 mode: currentMode,
                 status: isDryRun ? 'OPEN' : 'PENDING',
                 dayMode: options.dayMode,
                 nightMode: options.nightMode,
                 source: options.source ?? 'SYSTEM',
-                tradingMode: (modeCfg?.value || 'LIVE'),
+                tradingMode: isDryRun ? 'DRY_RUN' : 'LIVE',
                 simulatedLiquidity: isDryRun ? simulatedLiquidity.toString() : null,
             },
         });
@@ -505,7 +613,7 @@ export class LPEngineAgent {
             feeTier,
             tickLower,
             tickUpper,
-            entryValueUsd: config.startSize,
+            entryValueUsd: isDryRun ? config.startSizeDryRun : config.startSizeLive,
             calldata,
             to: npmAddress,
             dayMode: options.dayMode,

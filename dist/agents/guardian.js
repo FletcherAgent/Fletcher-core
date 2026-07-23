@@ -2,7 +2,8 @@ import { parseAbi, parseEther } from 'viem';
 import { prisma } from '../core/db.js';
 import { detectBestFee } from '../services/poolFeeDetector.js';
 import { calcAnnualizedFeeRate, calcIL, getNPMPosition, checkPositionRange, isPastDayCloseTime, tickToPrice } from '../services/lpMath.js';
-import { getTokenInfo } from '../services/gmgn.js';
+import { getTokenInfo } from '../services/gmgn/index.js';
+import { fetchOHLCV, calculateIndicators } from '../services/ohlcv.js';
 import { logEvent } from '../utils/logger.js';
 export class GuardianAgent {
     onExitSignal;
@@ -77,9 +78,27 @@ export class GuardianAgent {
             catch (err) {
                 if (pos.tradingMode === 'DRY_RUN') {
                     // Fallback gracefully for simulated V2/unsupported pools
+                    let mockTick = pos.entryTick ?? 0;
+                    try {
+                        const wethAddr = (process.env.WETH_ADDRESS ?? '').toLowerCase();
+                        const tokenAddress = pos.token0.toLowerCase() === wethAddr ? pos.token1 : pos.token0;
+                        const tokenInfo = await getTokenInfo(tokenAddress);
+                        if (tokenInfo && tokenInfo.priceUsd) {
+                            const isToken0 = BigInt(pos.token0) < BigInt(process.env.WETH_ADDRESS ?? '0');
+                            const wethPrice = 3500;
+                            const priceRatio = isToken0
+                                ? tokenInfo.priceUsd / wethPrice
+                                : wethPrice / tokenInfo.priceUsd;
+                            mockTick = Math.floor(Math.log(priceRatio) / Math.log(1.0001));
+                        }
+                    }
+                    catch (e) {
+                        console.warn(`[Guardian] ⚠️ Failed to fetch live price for SIM IL calc:`, e.message);
+                        // mockTick remains entryTick
+                    }
                     rangeStatus = {
-                        inRange: true,
-                        currentTick: pos.entryTick || 0,
+                        inRange: mockTick >= pos.tickLower && mockTick <= pos.tickUpper,
+                        currentTick: mockTick,
                         tickLower: pos.tickLower,
                         tickUpper: pos.tickUpper,
                         distanceToBoundaryPct: 50
@@ -94,7 +113,7 @@ export class GuardianAgent {
             // Simplification: WETH base price = 3500
             const isToken0 = BigInt(pos.token0) < BigInt(process.env.WETH_ADDRESS ?? '0');
             const wethPrice = 3500;
-            const entryPriceBase = tickToPrice(pos.entryTick || rangeStatus.currentTick);
+            const entryPriceBase = tickToPrice(pos.entryTick ?? rangeStatus.currentTick);
             const entryP0 = isToken0 ? wethPrice * entryPriceBase : wethPrice;
             const entryP1 = isToken0 ? wethPrice : wethPrice / entryPriceBase;
             const curP0 = isToken0 ? wethPrice * currentPrice : wethPrice;
@@ -105,11 +124,13 @@ export class GuardianAgent {
                 entryValue: pos.entryValue,
                 tickLower: pos.tickLower, tickUpper: pos.tickUpper
             });
-            // 3. Calc Fees
+            // 3. Calc Fees (Simulated for DRY_RUN positions)
             let feesUsd = 0;
             if (pos.tokenId.startsWith('SIM-') || pos.tradingMode === 'DRY_RUN') {
                 try {
-                    const tokenAddress = pos.token0 === (process.env.WETH_ADDRESS ?? '0') ? pos.token1 : pos.token0;
+                    // Use case-insensitive comparison to avoid mismatch (e.g. 0xABC vs 0xabc)
+                    const wethAddr = (process.env.WETH_ADDRESS ?? '').toLowerCase();
+                    const tokenAddress = pos.token0.toLowerCase() === wethAddr ? pos.token1 : pos.token0;
                     const tokenInfo = await getTokenInfo(tokenAddress);
                     if (tokenInfo) {
                         const poolLiquidityUsd = tokenInfo.liquidity || 500000;
@@ -121,6 +142,11 @@ export class GuardianAgent {
                         let cumulativeFees = hourlyFee * hoursOpen;
                         cumulativeFees *= (pos.nightMode ? 5 : 1);
                         feesUsd = Math.max(0, cumulativeFees - pos.harvestedFees);
+                        // Debug log to diagnose zero-fee issues
+                        console.log(`[Guardian] 🔍 SIM fee debug | token=${tokenAddress.slice(0, 10)} vol24h=$${volume.toFixed(0)} liq=$${poolLiquidityUsd.toFixed(0)} share=${(ourShare * 100).toFixed(4)}% hrFee=$${hourlyFee.toFixed(4)} hrs=${hoursOpen.toFixed(1)} → fees=$${feesUsd.toFixed(4)}`);
+                    }
+                    else {
+                        console.warn(`[Guardian] ⚠️ getTokenInfo returned null for ${tokenAddress} — fee estimation skipped`);
                     }
                 }
                 catch (e) {
@@ -134,28 +160,71 @@ export class GuardianAgent {
             const feeRate = calcAnnualizedFeeRate(feesUsd, pos.entryValue, hoursOpen);
             const ilRate = calcAnnualizedFeeRate(Math.abs(ilData.ilUsd), pos.entryValue, hoursOpen);
             console.log(`[Guardian] LP ${pos.id.slice(0, 8)} ${pos.tokenId.startsWith('SIM-') ? '(SIM)' : ''} | FeeRate: ${(feeRate * 100).toFixed(1)}% | ILRate: ${(ilRate * 100).toFixed(1)}%`);
-            // 4. Rule §3.4 Logic (1 interval = 1 minute)
-            let ilHours = pos.ilAboveFeeHours;
-            let feeHours = pos.feeAboveILHours;
-            const maxIlIntervals = maxIlHours * 60; // scale hours to minutes since polling is every 1 min
-            if (ilData.ilUsd < 0 && Math.abs(ilData.ilUsd) > feesUsd) {
-                ilHours += 1;
-                feeHours = 0;
-                if (ilHours >= maxIlIntervals) {
-                    console.log(`[Guardian] 🚨 LP ${pos.id} IL > Fee for ${maxIlHours}h. Triggering CLOSE.`);
-                    await logEvent('WARN', `[LP] Guardian triggered CLOSE: IL > Fee for ${maxIlHours}h`, { positionId: pos.id });
-                    if (this.onLPCloseSignal)
-                        this.onLPCloseSignal(pos, `IL > Fee for ${maxIlHours} consecutive hours`);
-                }
+            // 4. Strategy Engine Exit Rules (K1, K2, K3, E1, E2)
+            let exitReason = null;
+            let exitRule = null;
+            const candles = await fetchOHLCV(pos.pool, 100);
+            const ta = calculateIndicators(candles);
+            // K2: Range Breach (spot price exits LOWER bound of the LP range)
+            // If Token0 is altcoin, price is quote/alt, tick goes DOWN when price drops.
+            // So lower bound is `tickLower`. Breach happens if `currentTick < tickLower`.
+            // If Token1 is altcoin, price is alt/quote, tick goes UP when price drops.
+            // So lower bound is `tickUpper`. Breach happens if `currentTick > tickUpper`.
+            const wethAddr = (process.env.WETH_ADDRESS ?? '').toLowerCase();
+            const isAltcoinToken0 = pos.token0.toLowerCase() !== wethAddr;
+            if (isAltcoinToken0 && rangeStatus.currentTick < pos.tickLower) {
+                exitRule = 'K2';
+                exitReason = `K2 (Range Breach): Price exited lower bound (Tick ${rangeStatus.currentTick} < ${pos.tickLower})`;
             }
-            else {
-                feeHours += 1;
-                ilHours = 0;
-                // Compound check
-                if (pos.entryValue + feesUsd < positionCap && feesUsd > 10) {
-                    await logEvent('INFO', `[LP] Guardian triggered COMPOUND`, { positionId: pos.id, feesUsd });
-                    if (this.onLPCompoundSignal)
-                        this.onLPCompoundSignal(pos);
+            else if (!isAltcoinToken0 && rangeStatus.currentTick > pos.tickUpper) {
+                exitRule = 'K2';
+                exitReason = `K2 (Range Breach): Price exited lower bound (Tick ${rangeStatus.currentTick} > ${pos.tickUpper})`;
+            }
+            if (!exitReason && ta && candles.length >= 4) {
+                // E1: Profit Taking 1
+                if (ta.rsi > 90 && ta.currentClose >= ta.bb.upper) {
+                    exitRule = 'E1';
+                    exitReason = `E1 (Profit-Taking): RSI > 90 and Close touched Upper BB`;
+                }
+                // E2: Profit Taking 2
+                if (!exitReason && ta.rsi > 90 && ta.macd.histogram > 0 && ta.macd.previousHistogram <= 0) {
+                    exitRule = 'E2';
+                    exitReason = `E2 (Profit-Taking): RSI > 90 and MACD flipped green`;
+                }
+                // K1: Trend Death (evaluate on CLOSED candles only to avoid intra-candle flicker)
+                if (!exitReason) {
+                    const c1 = candles[candles.length - 1];
+                    const isForming = (Date.now() - c1.timestamp < 15 * 60 * 1000);
+                    const closedCandles = isForming ? candles.slice(0, -1) : candles;
+                    const taClosed = calculateIndicators(closedCandles);
+                    if (taClosed && !taClosed.supertrend.isGreen) {
+                        exitRule = 'K1';
+                        exitReason = `K1 (Trend Death): Price dropped below Supertrend on candle close`;
+                    }
+                }
+                // K3: Volume Drought (4 consecutive 15m candles with volume < 25% of entry volume)
+                if (!exitReason) {
+                    // Find entry candle (closest to pos.createdAt)
+                    const entryTime = pos.createdAt.getTime();
+                    let entryCandle = candles[0]; // fallback to oldest
+                    for (const c of candles) {
+                        if (c.timestamp >= entryTime) {
+                            entryCandle = c;
+                            break;
+                        }
+                    }
+                    const minVolume = entryCandle.volume * 0.25;
+                    const c1 = candles[candles.length - 1]; // current
+                    const isForming = (Date.now() - c1.timestamp < 15 * 60 * 1000);
+                    const closedCandles = isForming ? candles.slice(0, -1) : candles;
+                    if (closedCandles.length >= 4) {
+                        const last4 = closedCandles.slice(-4);
+                        const isDrought = last4.every(c => c.volume < minVolume);
+                        if (isDrought) {
+                            exitRule = 'K3';
+                            exitReason = `K3 (Volume Drought): 4 closed candles with volume < 25% of entry (${minVolume.toFixed(2)})`;
+                        }
+                    }
                 }
             }
             // Update DB counters
@@ -163,18 +232,26 @@ export class GuardianAgent {
             await prisma.lPPosition.update({
                 where: { id: pos.id },
                 data: {
-                    ilAboveFeeHours: ilHours,
-                    feeAboveILHours: feeHours,
                     ilRunning: ilData.ilUsd,
                     feesCollected: newFees
                 }
             });
-            // 5. Check Range
-            if (!rangeStatus.inRange) {
-                console.log(`[Guardian] ⚠️ LP ${pos.id} OUT OF RANGE. Triggering REBALANCE/CLOSE.`);
-                await logEvent('WARN', `[LP] Guardian triggered REBALANCE: Out of range`, { positionId: pos.id });
-                if (this.onLPRebalanceSignal)
-                    this.onLPRebalanceSignal(pos, "Out of range");
+            if (exitReason) {
+                console.log(`[Guardian] 🚨 LP ${pos.id.slice(0, 8)} EXIT TRIGGERED: ${exitReason}`);
+                await logEvent('WARN', `[LP] Guardian triggered EXIT: ${exitReason}`, { positionId: pos.id });
+                // Add to TokenBlacklist
+                if (ta && ta.highestClose) {
+                    const wethAddr = (process.env.WETH_ADDRESS ?? '').toLowerCase();
+                    const tAddress = pos.token0.toLowerCase() === wethAddr ? pos.token1 : pos.token0;
+                    await prisma.tokenBlacklist.upsert({
+                        where: { tokenAddress: tAddress },
+                        update: { athPriceAtExit: ta.highestClose, reason: exitRule || 'MANUAL' },
+                        create: { tokenAddress: tAddress, athPriceAtExit: ta.highestClose, reason: exitRule || 'MANUAL' }
+                    });
+                    console.log(`[Guardian] 🚫 Added ${tAddress} to Blacklist (ATH: ${ta.highestClose})`);
+                }
+                if (this.onLPCloseSignal)
+                    this.onLPCloseSignal(pos, exitReason);
             }
             // 6. DAY Mode fallback close
             if (pos.dayMode) {
