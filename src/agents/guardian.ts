@@ -251,17 +251,33 @@ export class GuardianAgent {
         }
       }
 
-      // DEAD_POOL: Liveness Gate Re-check
+      // DEAD_POOL: Fee Floor & Liveness Gate Re-check
       if (!exitReason) {
         const wethAddr = (process.env.WETH_ADDRESS ?? '').toLowerCase();
         const tAddress = pos.token0.toLowerCase() === wethAddr ? pos.token1 : pos.token0;
         const tokenInfo = await getTokenInfo(tAddress);
         if (tokenInfo) {
-          const { checkLiveness } = await import('./liveness.js');
-          const liveness = await checkLiveness(tAddress, tokenInfo, pos.pool);
-          if (!liveness.alive) {
-             exitRule = 'DEAD_POOL';
-             exitReason = `DEAD_POOL (Liveness Gate): ${liveness.failedCheck} - ${liveness.failReason}`;
+          // Rule from Patch Brief Section 4: Absolute floor
+          if (hoursOpen >= 4) {
+            const configFee = await prisma.systemConfig.findUnique({ where: { key: 'deadPoolExit.feeFloorUsd4h' } });
+            const configSwaps = await prisma.systemConfig.findUnique({ where: { key: 'deadPoolExit.minPoolSwaps4h' } });
+            const feeFloor = parseFloat(configFee?.value || '5');
+            const swapsFloor = parseInt(configSwaps?.value || '20', 10);
+            
+            const estimatedSwaps4h = tokenInfo.swaps1h * 4;
+            if (feesUsd < feeFloor && estimatedSwaps4h < swapsFloor) {
+              exitRule = 'DEAD_POOL';
+              exitReason = `DEAD_POOL (Fee Floor): Fees < $${feeFloor} ($${feesUsd.toFixed(2)}) and est 4h swaps < ${swapsFloor} (${estimatedSwaps4h}) after 4+ hours`;
+            }
+          }
+          
+          if (!exitReason) {
+            const { checkLiveness } = await import('./liveness.js');
+            const liveness = await checkLiveness(tAddress, tokenInfo, pos.pool);
+            if (!liveness.alive) {
+               exitRule = 'DEAD_POOL';
+               exitReason = `DEAD_POOL (Liveness Gate): ${liveness.failedCheck} - ${liveness.failReason}`;
+            }
           }
         }
       }

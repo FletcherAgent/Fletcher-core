@@ -9,7 +9,11 @@ async function main() {
     { key: 'liveness.minVolumeDecayRatio', value: '0.30' },
     { key: 'liveness.maxAthDrawdownPct', value: '70' },
     { key: 'liveness.verdictCacheMin', value: '5' },
-    { key: 'liveness.deadBlacklistHours', value: '6' }
+    { key: 'liveness.deadBlacklistHours', value: '6' },
+    { key: 'deadPoolExit.feeFloorUsd4h', value: '5' },
+    { key: 'deadPoolExit.minPoolSwaps4h', value: '20' },
+    { key: 'factoryAutoDelist.minDeploys7d', value: '5' },
+    { key: 'factoryAutoDelist.consecutiveLivenessFails', value: '10' }
   ];
 
   for (const config of defaults) {

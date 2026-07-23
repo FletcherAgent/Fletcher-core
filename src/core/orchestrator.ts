@@ -448,9 +448,12 @@ export class Orchestrator {
   private async runFactoryAutoDelist() {
     console.log(`[Orchestrator] 🧹 Running Factory Auto-Delist check...`);
     try {
+      const configObj = await prisma.systemConfig.findUnique({ where: { key: 'factoryAutoDelist.consecutiveLivenessFails' } });
+      const failLimit = parseInt(configObj?.value || '10', 10);
+      
       const factories = await prisma.factoryRegistry.findMany({ where: { status: 'active' } });
       for (const f of factories) {
-        if (f.consecutiveLivenessFails >= 3) {
+        if (f.consecutiveLivenessFails >= failLimit) {
           console.log(`[Orchestrator] 💀 Factory ${f.name} has ${f.consecutiveLivenessFails} consecutive liveness fails. Marking as DEAD.`);
           await prisma.factoryRegistry.update({ where: { id: f.id }, data: { status: 'dead' } });
         }
