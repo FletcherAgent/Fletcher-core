@@ -182,8 +182,8 @@ export class LPEngineAgent {
   /** Check if new position can be opened (max positions from metaConfig) for the current mode */
   private async canOpenNewPosition(): Promise<{ ok: boolean; reason?: string }> {
     const config = await loadLPConfig();
-    const tModeConfig = await prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } });
-    const isDryRun = (tModeConfig?.value ?? 'LIVE') === 'DRY_RUN';
+    const modeCfg = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
+    const isDryRun  = (modeCfg?.value || 'LIVE') === 'DRY_RUN';
     const currentMode = isDryRun ? 'DRY_RUN' : 'LIVE';
 
     const openCount = await prisma.lPPosition.count({
@@ -418,7 +418,7 @@ export class LPEngineAgent {
         symbol: selectedCandidate.token.symbol,
         name: selectedCandidate.token.name,
         poolAddress: selectedCandidate.pool.address.toLowerCase(),
-        tradingMode: (await prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } }))?.value === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE',
+        tradingMode: (await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } }))?.value === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE',
       }
     });
 
@@ -446,7 +446,7 @@ export class LPEngineAgent {
     }
 
     // Calculate remaining slots for current mode (DRY_RUN and LIVE are counted separately)
-    const tModeConfig = await prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } });
+    const tModeConfig = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
     const currentMode = (tModeConfig?.value ?? 'LIVE') === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE';
 
     const openCount = await prisma.lPPosition.count({
@@ -517,8 +517,9 @@ export class LPEngineAgent {
       return;
     }
 
-    const tModeConfig = await prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } });
-    const currentMode = (tModeConfig?.value ?? 'LIVE') === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE';
+    const tModeConfig = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
+    const isDryRun = (tModeConfig?.value ?? 'LIVE') === 'DRY_RUN';
+    const currentMode = isDryRun ? 'DRY_RUN' : 'LIVE';
 
     await prisma.watchlist.upsert({
       where: { tokenAddress: token.address.toLowerCase() },
