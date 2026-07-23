@@ -162,7 +162,7 @@ export class LPEngineAgent {
 
   constructor() {}
 
-  private async getAddresses() {
+  public async getAddresses() {
     const dexConfig = await getDexConfig('V3');
     const npmAddress = (dexConfig.positionManager || '') as Address;
     const factoryAddress = (dexConfig.factoryAddress || '') as Address;
@@ -202,7 +202,7 @@ export class LPEngineAgent {
    * Resolve pool address from Uniswap V3 Factory.
    * Try fee tiers: 500 -> 3000 -> 10000, use the first available.
    */
-  private async resolvePool(
+  public async resolvePool(
     token0: string,
     token1: string,
     preferredFee = 3000
@@ -403,7 +403,25 @@ export class LPEngineAgent {
       return;
     }
 
-    await this.proposeOpenPosition(selectedCandidate, { dayMode: true, nightMode: false });
+    // Push to Watchlist instead of opening directly
+    await prisma.watchlist.upsert({
+      where: { tokenAddress: selectedCandidate.token.address.toLowerCase() },
+      update: {
+        symbol: selectedCandidate.token.symbol,
+        name: selectedCandidate.token.name,
+        poolAddress: selectedCandidate.pool.address.toLowerCase(),
+      },
+      create: {
+        tokenAddress: selectedCandidate.token.address.toLowerCase(),
+        symbol: selectedCandidate.token.symbol,
+        name: selectedCandidate.token.name,
+        poolAddress: selectedCandidate.pool.address.toLowerCase(),
+        tradingMode: (await prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } }))?.value === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE',
+      }
+    });
+
+    console.log(`[LPEngine] 📋 Added $${selectedCandidate.token.symbol} to Watchlist (Awaiting TA Signal)`);
+    if (this.onNotification) await this.onNotification(`📋 *Added to Watchlist:* $${selectedCandidate.token.symbol}\n_Awaiting Supertrend/ATH breakout_`);
   }
 
   // ─── MODE NIGHT: Concentrated Spray ────────────────────────────────────────
@@ -464,19 +482,23 @@ export class LPEngineAgent {
     }
 
     for (const candidate of toOpen) {
-      // Solution 2: Dynamic range based on token market cap.
-      // Smaller MCap = more volatile = needs a wider tick range.
-      const nightRangeMultiplier = config.dynamicRange
-        ? calcDynamicNightRange(candidate.token.marketCap)
-        : config.nightRange;
-
-      console.log(`[LPEngine] 📐 Night range for ${candidate.token.symbol}: ${nightRangeMultiplier}x (MCap: $${(candidate.token.marketCap/1000).toFixed(0)}K, dynamicRange: ${config.dynamicRange})`);
-
-      await this.proposeOpenPosition(candidate, {
-        dayMode: false,
-        nightMode: true,
-        nightRange: nightRangeMultiplier,
+      await prisma.watchlist.upsert({
+        where: { tokenAddress: candidate.token.address.toLowerCase() },
+        update: {
+          symbol: candidate.token.symbol,
+          name: candidate.token.name,
+          poolAddress: candidate.pool.address.toLowerCase(),
+        },
+        create: {
+          tokenAddress: candidate.token.address.toLowerCase(),
+          symbol: candidate.token.symbol,
+          name: candidate.token.name,
+          poolAddress: candidate.pool.address.toLowerCase(),
+          tradingMode: currentMode,
+        }
       });
+      console.log(`[LPEngine] 📋 Added $${candidate.token.symbol} to Watchlist (NIGHT)`);
+      if (this.onNotification) await this.onNotification(`📋 *Added to Watchlist:* $${candidate.token.symbol}\n_Awaiting Supertrend/ATH breakout_`);
     }
   }
 
@@ -493,19 +515,33 @@ export class LPEngineAgent {
       return;
     }
 
-    // Pass token and score directly without mocking PoolCandidate
-    await this.proposeOpenPosition({ token, score: sentimentScore }, {
-      dayMode: true,
-      nightMode: false,
-      source: 'ALPHA'
+    const tModeConfig = await prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } });
+    const currentMode = (tModeConfig?.value ?? 'LIVE') === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE';
+
+    await prisma.watchlist.upsert({
+      where: { tokenAddress: token.address.toLowerCase() },
+      update: {
+        symbol: token.symbol,
+        name: token.name,
+      },
+      create: {
+        tokenAddress: token.address.toLowerCase(),
+        symbol: token.symbol,
+        name: token.name,
+        poolAddress: '', // Pool will be discovered later if missing
+        tradingMode: currentMode,
+      }
     });
+
+    console.log(`[LPEngine] 📋 Added $${token.symbol} from Alpha Signal to Watchlist`);
+    if (this.onNotification) await this.onNotification(`📋 *Alpha Signal Added to Watchlist:* $${token.symbol}\n_Awaiting Supertrend/ATH breakout_`);
   }
 
   // ─── Core: Propose Open Position ────────────────────────────────────────────
 
-  private async proposeOpenPosition(
+  public async proposeOpenPosition(
     candidate: { token: GMGNToken; score: number; grokScore?: number; grokLabel?: string },
-    options: { dayMode: boolean; nightMode: boolean; nightRange?: number; source?: string }
+    options: { dayMode: boolean; nightMode: boolean; nightRange?: number; strategyMode?: boolean; lowerPct?: number; upperPct?: number; source?: string }
   ): Promise<void> {
     const config    = await loadLPConfig();
     const token     = candidate.token;
@@ -573,6 +609,29 @@ export class LPEngineAgent {
       const ticks = fullRangeTicks(feeTier);
       tickLower = ticks.tickLower;
       tickUpper = ticks.tickUpper;
+    } else if (options.strategyMode) {
+      // 91% - 105% of MEME price
+      const lowerPct = options.lowerPct ?? 0.91;
+      const upperPct = options.upperPct ?? 1.05;
+      
+      const tickSpacing = feeToTickSpacing(feeTier);
+      const lowerOffset = Math.round(Math.log(lowerPct) / Math.log(1.0001)); // e.g. -943
+      const upperOffset = Math.round(Math.log(upperPct) / Math.log(1.0001)); // e.g. +487
+
+      let rawLower, rawUpper;
+      if (isToken0) {
+        // Meme is Token0. Price = 1.0001^tick.
+        rawLower = entryTick + lowerOffset; // lower tick
+        rawUpper = entryTick + upperOffset; // upper tick
+      } else {
+        // Meme is Token1. Price = 1 / 1.0001^tick.
+        // Price drops -> Tick goes UP
+        rawLower = entryTick - upperOffset; // upper price (1.05x) means lower tick
+        rawUpper = entryTick - lowerOffset; // lower price (0.91x) means higher tick
+      }
+      
+      tickLower = Math.max(MIN_TICK, Math.floor(rawLower / tickSpacing) * tickSpacing);
+      tickUpper = Math.min(MAX_TICK, Math.ceil(rawUpper / tickSpacing) * tickSpacing);
     } else {
       // NIGHT mode: get current tick from pool
       const ticks = calcNightTickRange(

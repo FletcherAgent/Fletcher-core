@@ -16,6 +16,7 @@ export interface GMGNToken {
   sellTax:      number;
   isVerified:   boolean;
   quoteToken?:  string;
+  pairCreatedAt?: number;
 }
 
 export interface GMGNPool {
@@ -59,6 +60,7 @@ function normalizeToken(d: any): GMGNToken {
     buyTax:     parseFloat(d?.buy_tax ?? '0') * 100, // normalize to percentage if decimal
     sellTax:    parseFloat(d?.sell_tax ?? '0') * 100,
     isVerified: Boolean(d?.is_open_source ?? d?.verified ?? true),
+    pairCreatedAt: d?.pool?.created_at ? parseInt(d.pool.created_at) * 1000 : undefined,
   };
 }
 
@@ -96,7 +98,8 @@ async function getTrendingPairsFallback(limit = 20): Promise<GMGNToken[]> {
         buyTax: 0,
         sellTax: 0,
         isVerified: true,
-        quoteToken: pool.relationships?.quote_token?.data?.id?.replace('robinhood_', '') || ''
+        quoteToken: pool.relationships?.quote_token?.data?.id?.replace('robinhood_', '') || '',
+        pairCreatedAt: pool.attributes?.pool_created_at ? new Date(pool.attributes.pool_created_at).getTime() : undefined
       };
     });
   } catch (err) {
@@ -128,7 +131,8 @@ async function getTokenInfoFallback(tokenAddress: string): Promise<GMGNToken | n
       launchPad: 'None',
       isHoneypot: false,
       buyTax: 0, sellTax: 0, isVerified: true,
-      quoteToken: mainPair.quoteToken?.address || ''
+      quoteToken: mainPair.quoteToken?.address || '',
+      pairCreatedAt: mainPair.pairCreatedAt ? mainPair.pairCreatedAt : undefined
     };
     
     // GoPlus Security

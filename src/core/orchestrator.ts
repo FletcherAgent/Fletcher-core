@@ -427,10 +427,17 @@ export class Orchestrator {
         console.log(`[Orchestrator] 🚀 LP Engine hourly scan triggered (Hour: ${h})`);
         this.lpEngine.runNightMode().catch(console.error);
       }
+      // Strategy Engine: Watchlist Loop every 5 minutes (0, 5, 10, ...)
+      if (m % 5 === 0) {
+        console.log(`[Orchestrator] 📊 Strategy Engine: Running Watchlist check`);
+        const { WatchlistAgent } = require('../agents/watchlist.js');
+        const watchlistAgent = new WatchlistAgent(this.lpEngine);
+        watchlistAgent.runWatchlistLoop().catch(console.error);
+      }
     };
     // Poll every minute
     setInterval(runCron, 60_000);
-    console.log('[Orchestrator] LP cron scheduled (Hourly scan at minute :00)');
+    console.log('[Orchestrator] LP cron scheduled (Hourly scan, Watchlist every 5m)');
   }
 
   public async processAlphaSpotSignal(tokenAddress: string, score: number) {

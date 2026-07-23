@@ -141,3 +141,23 @@ model SessionKey {
   sdkProvider String   @default("alchemy")
   createdAt   DateTime @default(now())
 }
+
+model Watchlist {
+  id              String   @id @default(uuid())
+  tokenAddress    String   @unique
+  symbol          String?
+  name            String?
+  poolAddress     String?
+  addedAt         DateTime @default(now())
+  lastCheckedAt   DateTime?
+  tradingMode     String   @default("LIVE")
+  status          String   @default("WATCHING") // WATCHING, EXECUTED, DROPPED
+}
+
+model TokenBlacklist {
+  id              String   @id @default(uuid())
+  tokenAddress    String   @unique
+  athPriceAtExit  Float?
+  reason          String?
+  blacklistedAt   DateTime @default(now())
+}
