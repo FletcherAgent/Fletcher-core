@@ -35,7 +35,9 @@ import {
   fullRangeTicks,
   tickToPrice,
   calcNightTickRange,
+  getNPMPosition,
   getPoolSlot0,
+  getFeeGrowthGlobal,
   feeToTickSpacing,
   MIN_TICK,
   MAX_TICK,
@@ -726,6 +728,14 @@ export class LPEngineAgent {
     const defaultModeRecord = await prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } });
     const currentMode = (defaultModeRecord?.value as 'MANUAL' | 'SEMI' | 'FULL') || 'MANUAL';
 
+    let lastFeeGrowth0 = null;
+    let lastFeeGrowth1 = null;
+    if (isDryRun) {
+      const { feeGrowthGlobal0, feeGrowthGlobal1 } = await getFeeGrowthGlobal(poolAddress);
+      lastFeeGrowth0 = feeGrowthGlobal0.toString();
+      lastFeeGrowth1 = feeGrowthGlobal1.toString();
+    }
+
     // Save PENDING record to DB (or OPEN if DRY RUN simulation)
     const dbRecord = await prisma.lPPosition.create({
       data: {
@@ -748,6 +758,8 @@ export class LPEngineAgent {
         source:      options.source ?? 'SYSTEM',
         tradingMode: isDryRun ? 'DRY_RUN' : 'LIVE',
         simulatedLiquidity: isDryRun ? simulatedLiquidity.toString() : null,
+        lastFeeGrowth0,
+        lastFeeGrowth1,
       },
     });
 

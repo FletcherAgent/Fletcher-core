@@ -3,7 +3,7 @@ import { parseAbi, parseEther, type Address } from 'viem';
 import { prisma } from '../core/db.js';
 import type { Position, LPPosition } from '@prisma/client';
 import { detectBestFee } from '../services/poolFeeDetector.js';
-import { calcAnnualizedFeeRate, calcIL, getNPMPosition, checkPositionRange, isPastDayCloseTime, tickToPrice } from '../services/lpMath.js';
+import { calcAnnualizedFeeRate, calcIL, getNPMPosition, checkPositionRange, isPastDayCloseTime, tickToPrice, getFeeGrowthGlobal } from '../services/lpMath.js';
 import { getTokenInfo } from '../services/gmgn/index.js';
 import { fetchOHLCV, calculateIndicators } from '../services/ohlcv.js';
 import { logEvent } from '../utils/logger.js';
@@ -88,6 +88,16 @@ export class GuardianAgent {
       const capConfig = await prisma.systemConfig.findUnique({ where: { key: 'lp.positionCap' } });
       const positionCap = parseFloat(capConfig?.value ?? '2000');
 
+      // Fetch dynamic WETH price
+      const globalWethAddr = (process.env.WETH_ADDRESS ?? '').toLowerCase();
+      let wethPrice = 3500;
+      try {
+        const wethInfo = await getTokenInfo(globalWethAddr);
+        if (wethInfo?.priceUsd) wethPrice = wethInfo.priceUsd;
+      } catch (e) {
+        console.warn(`[Guardian] ⚠️ Failed to fetch WETH price, falling back to $3500`);
+      }
+
       // (Simulate token price from Uniswap V3 current tick)
       let rangeStatus: any;
       try {
@@ -97,12 +107,10 @@ export class GuardianAgent {
           // Fallback gracefully for simulated V2/unsupported pools
           let mockTick = pos.entryTick ?? 0;
           try {
-            const wethAddr = (process.env.WETH_ADDRESS ?? '').toLowerCase();
-            const tokenAddress = pos.token0.toLowerCase() === wethAddr ? pos.token1 : pos.token0;
+            const tokenAddress = pos.token0.toLowerCase() === globalWethAddr ? pos.token1 : pos.token0;
             const tokenInfo = await getTokenInfo(tokenAddress);
             if (tokenInfo && tokenInfo.priceUsd) {
               const isToken0 = BigInt(pos.token0) < BigInt(process.env.WETH_ADDRESS ?? '0');
-              const wethPrice = 3500;
               const priceRatio = isToken0 
                   ? tokenInfo.priceUsd / wethPrice 
                   : wethPrice / tokenInfo.priceUsd;
@@ -113,12 +121,17 @@ export class GuardianAgent {
             // mockTick remains entryTick
           }
           
+          const distanceLower = Math.abs(mockTick - pos.tickLower);
+          const distanceUpper = Math.abs(pos.tickUpper - mockTick);
+          const rangeWidth = pos.tickUpper - pos.tickLower;
+          const distanceToBoundaryPct = rangeWidth > 0 ? (Math.min(distanceLower, distanceUpper) / rangeWidth) * 100 : 0;
+          
           rangeStatus = { 
             inRange: mockTick >= pos.tickLower && mockTick <= pos.tickUpper, 
             currentTick: mockTick, 
             tickLower: pos.tickLower, 
             tickUpper: pos.tickUpper, 
-            distanceToBoundaryPct: 50 
+            distanceToBoundaryPct 
           };
         } else {
           throw err;
@@ -127,9 +140,7 @@ export class GuardianAgent {
       const currentPrice = tickToPrice(rangeStatus.currentTick);
 
       // 2. Calc IL
-      // Simplification: WETH base price = 3500
       const isToken0 = BigInt(pos.token0) < BigInt(process.env.WETH_ADDRESS ?? '0');
-      const wethPrice = 3500;
       const entryPriceBase = tickToPrice(pos.entryTick ?? rangeStatus.currentTick);
       const entryP0 = isToken0 ? wethPrice * entryPriceBase : wethPrice; 
       const entryP1 = isToken0 ? wethPrice : wethPrice / entryPriceBase;
@@ -147,28 +158,65 @@ export class GuardianAgent {
       let feesUsd = 0;
       if (pos.tokenId.startsWith('SIM-') || pos.tradingMode === 'DRY_RUN') {
         try {
-          // Use case-insensitive comparison to avoid mismatch (e.g. 0xABC vs 0xabc)
-          const wethAddr = (process.env.WETH_ADDRESS ?? '').toLowerCase();
-          const tokenAddress = pos.token0.toLowerCase() === wethAddr ? pos.token1 : pos.token0;
-          const tokenInfo = await getTokenInfo(tokenAddress);
-          if (tokenInfo) {
-             const poolLiquidityUsd = tokenInfo.liquidity || 500000;
-             const ourShare = pos.entryValue / poolLiquidityUsd;
-             const volume = tokenInfo.volume24h;
-             const feeTierPerc = pos.feeTier / 1_000_000;
-             const hourlyFee = (volume / 24) * feeTierPerc * ourShare;
-             
-             const hoursOpen = Math.max(0.1, (Date.now() - pos.createdAt.getTime()) / 3600000);
-             let cumulativeFees = hourlyFee * hoursOpen;
-             cumulativeFees *= (pos.nightMode ? 5 : 1);
-             feesUsd = Math.max(0, cumulativeFees - pos.harvestedFees);
-             // Debug log to diagnose zero-fee issues
-             console.log(`[Guardian] 🔍 SIM fee debug | token=${tokenAddress.slice(0,10)} vol24h=$${volume.toFixed(0)} liq=$${poolLiquidityUsd.toFixed(0)} share=${(ourShare*100).toFixed(4)}% hrFee=$${hourlyFee.toFixed(4)} hrs=${hoursOpen.toFixed(1)} → fees=$${feesUsd.toFixed(4)}`);
+          if (pos.lastFeeGrowth0 && pos.lastFeeGrowth1 && pos.simulatedLiquidity) {
+            // Fetch real current feeGrowthGlobal from on-chain pool
+            const { feeGrowthGlobal0, feeGrowthGlobal1 } = await getFeeGrowthGlobal(pos.pool);
+            const delta0 = feeGrowthGlobal0 - BigInt(pos.lastFeeGrowth0);
+            const delta1 = feeGrowthGlobal1 - BigInt(pos.lastFeeGrowth1);
+            
+            const liq = BigInt(pos.simulatedLiquidity);
+            const Q128 = 2n ** 128n;
+            
+            // Approximation: assume fee is earned proportionally to global growth 
+            // (technically accurate if we were in range the whole time)
+            const fee0Str = ((delta0 * liq) / Q128).toString();
+            const fee1Str = ((delta1 * liq) / Q128).toString();
+            
+            const fee0Eth = Number(fee0Str) / 1e18;
+            const fee1Eth = Number(fee1Str) / 1e18;
+            
+            // Convert to USD using WETH price
+            const tokenAddress = pos.token0.toLowerCase() === globalWethAddr ? pos.token1 : pos.token0;
+            const tokenInfo = await getTokenInfo(tokenAddress);
+            const tokenPrice = tokenInfo?.priceUsd || 0;
+            
+            let usd0 = 0;
+            let usd1 = 0;
+            if (isToken0) {
+              usd0 = fee0Eth * tokenPrice;
+              usd1 = fee1Eth * wethPrice;
+            } else {
+              usd0 = fee0Eth * wethPrice;
+              usd1 = fee1Eth * tokenPrice;
+            }
+            
+            feesUsd = usd0 + usd1;
+            
+            // Update lastFeeGrowth to current so we only capture delta next time, 
+            // OR just accumulate total from entry. If we just calculate from entry, 
+            // the result is the total fees earned since opening.
+            // Since feesUsd represents TOTAL fees, we don't update lastFeeGrowth here,
+            // we just keep measuring from the entry values!
+            
+            console.log(`[Guardian] 🔍 SIM fee debug | token=${tokenAddress.slice(0,10)} fee0=${fee0Eth.toFixed(6)} fee1=${fee1Eth.toFixed(6)} → fees=$${feesUsd.toFixed(4)}`);
           } else {
-             console.warn(`[Guardian] ⚠️ getTokenInfo returned null for ${tokenAddress} — fee estimation skipped`);
+             // Fallback to old math if missing DB records (legacy positions)
+             const tokenAddress = pos.token0.toLowerCase() === globalWethAddr ? pos.token1 : pos.token0;
+             const tokenInfo = await getTokenInfo(tokenAddress);
+             if (tokenInfo) {
+                const poolLiquidityUsd = tokenInfo.liquidity || 500000;
+                const ourShare = pos.entryValue / poolLiquidityUsd;
+                const volume = tokenInfo.volume24h;
+                const feeTierPerc = pos.feeTier / 1_000_000;
+                const hourlyFee = (volume / 24) * feeTierPerc * ourShare;
+                
+                const hoursOpen = Math.max(0.1, (Date.now() - pos.createdAt.getTime()) / 3600000);
+                let cumulativeFees = hourlyFee * hoursOpen;
+                feesUsd = Math.max(0, cumulativeFees - pos.harvestedFees);
+             }
           }
         } catch(e) {
-          console.warn(`[Guardian] Failed to estimate fees for SIM position ${pos.id}`);
+          console.warn(`[Guardian] Failed to estimate real fees for SIM position ${pos.id}`);
         }
       } else {
         feesUsd = (Number(npmPos.tokensOwed0) + Number(npmPos.tokensOwed1)) / 1e18 * wethPrice;

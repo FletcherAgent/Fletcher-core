@@ -239,6 +239,31 @@ export async function getNPMPosition(tokenId: bigint, managerAddress?: string | 
   };
 }
 
+/**
+ * Fetch current feeGrowthGlobal from the pool.
+ */
+export async function getFeeGrowthGlobal(poolAddress: string): Promise<{ feeGrowthGlobal0: bigint, feeGrowthGlobal1: bigint }> {
+  try {
+    const poolAddr = poolAddress as `0x${string}`;
+    const [fg0, fg1] = await Promise.all([
+      publicClient.readContract({
+        address: poolAddr,
+        abi: POOL_ABI,
+        functionName: 'feeGrowthGlobal0X128'
+      }) as Promise<bigint>,
+      publicClient.readContract({
+        address: poolAddr,
+        abi: POOL_ABI,
+        functionName: 'feeGrowthGlobal1X128'
+      }) as Promise<bigint>
+    ]);
+    return { feeGrowthGlobal0: fg0, feeGrowthGlobal1: fg1 };
+  } catch (err) {
+    console.error(`Error fetching feeGrowthGlobal for ${poolAddress}:`, err);
+    return { feeGrowthGlobal0: 0n, feeGrowthGlobal1: 0n };
+  }
+}
+
 // ─── Range Status ─────────────────────────────────────────────────────────────
 
 /**
