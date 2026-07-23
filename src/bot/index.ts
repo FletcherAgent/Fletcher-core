@@ -6,6 +6,8 @@ import { connectDb, prisma } from "../core/db.js";
 import { screenPairs } from "../services/gmgn.js";
 import { getUserTier, clearTierCache } from "../services/tierGate.js";
 import { startUserbot } from "./userbot.js";
+import { createSmartAccount, grantSessionKey } from "../services/sessionKey.js";
+import { type Hex } from "viem";
 
 dotenv.config();
 
@@ -680,6 +682,30 @@ bot.command('nightmode', async (ctx) => {
     await lpEngine.runNightMode();
   } catch (e: any) {
     ctx.reply(`❌ Night Mode failed: ${e?.message}`);
+  }
+});
+
+
+bot.command('sessionkey', async (ctx) => {
+  ctx.reply('🔑 *Generating Smart Account Session Key (ERC-6900)...*', { parse_mode: 'Markdown' });
+  try {
+    const pk = (process.env.LP_PRIVATE_KEY || process.env.PRIVATE_KEY) as Hex;
+    if (!pk) throw new Error('PRIVATE_KEY not found in .env');
+    
+    // Create Smart Account Client
+    const client = await createSmartAccount(pk, 3);
+    
+    // Grant Session Key
+    const keyData = await grantSessionKey(client, 'FULL');
+    
+    ctx.reply(`✅ *Session Key Granted!*\n\n` +
+      `Smart Account: \`${client.account.address}\`\n` +
+      `Session Key: \`${keyData.keyAddress}\`\n` +
+      `Mode: FULL\n` +
+      `Expires: ${new Date(keyData.expiry).toLocaleString()}`, 
+      { parse_mode: 'Markdown' });
+  } catch (e: any) {
+    ctx.reply(`❌ Failed to generate Session Key: ${e?.message}`);
   }
 });
 

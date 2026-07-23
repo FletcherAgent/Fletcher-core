@@ -135,6 +135,7 @@ model SessionKey {
   id          String   @id @default(uuid())
   userId      String
   keyAddress  String   @unique
+  privateKey  String?
   scope       Json
   expiry      DateTime
   status      String   @default("ACTIVE")

@@ -780,14 +780,16 @@ export class LPEngineAgent {
         if (this.onProposal) await this.onProposal(proposal);
         return;
       }
-      console.log(`[LPEngine] Mode FULL — Executing automatically via Raw WalletClient (Temporary Fallback)`);
+      console.log(`[LPEngine] Mode FULL — Executing automatically via Alchemy Session Key`);
       try {
-        if (!walletClient || !account) throw new Error("WalletClient not initialized");
-        const txHash = await walletClient.sendTransaction({
-          account,
-          to: npmAddress,
+        const tier = await getUserTier(recipient);
+        const client = await getSessionKeyClient('FULL', tier);
+        const calls: UserOpCall[] = [{
+          target: npmAddress,
           data: calldata
-        });
+        }];
+
+        const txHash = await buildAndSendLPUserOperation(client, calls);
         
         console.log(`[LPEngine] 📜 Waiting for receipt to extract TokenID...`);
         const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
@@ -926,24 +928,19 @@ export class LPEngineAgent {
         if (this.onProposal) await this.onProposal(proposal);
         return;
       }
-      console.log(`[LPEngine] Mode FULL — Auto-closing position via Raw WalletClient (Temporary Fallback)`);
+      console.log(`[LPEngine] Mode FULL — Auto-closing position via Alchemy Session Key`);
       try {
-        if (!walletClient || !account) throw new Error("WalletClient not initialized");
+        const tier = await getUserTier(recipient);
+        const client = await getSessionKeyClient('FULL', tier);
         const collectCalldata = this.buildCollectCalldata(tokenId, recipient);
         
-        // Sequential: Decrease + Collect
-        const txHash1 = await walletClient.sendTransaction({
-          account,
-          to: npmAddress,
-          data: decreaseCalldata
-        });
-        await publicClient.waitForTransactionReceipt({ hash: txHash1 });
-        
-        const txHash = await walletClient.sendTransaction({
-          account,
-          to: npmAddress,
-          data: collectCalldata
-        });
+        // Batch: Decrease + Collect
+        const calls: UserOpCall[] = [
+          { target: npmAddress, data: decreaseCalldata },
+          { target: npmAddress, data: collectCalldata }
+        ];
+
+        const txHash = await buildAndSendLPUserOperation(client, calls);
         
         await prisma.lPPosition.update({
           where: { id: positionId },

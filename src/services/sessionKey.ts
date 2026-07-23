@@ -82,6 +82,7 @@ export async function grantSessionKey(
     data: {
       userId: client.account.address,
       keyAddress: account.address,
+      privateKey: privateKey,
       expiry: expiryDate,
       scope: { mode },
       status: 'ACTIVE'
@@ -139,9 +140,7 @@ export async function buildAndSendLPUserOperation(
 }
 
 /**
- * Get a Smart Account Client authorized by a valid simulated Session Key.
- * For this simulated version, it verifies the session key exists and is valid in DB,
- * then returns a client signed by the master PRIVATE_KEY (since we aren't using the on-chain plugin yet).
+ * Get a Smart Account Client authorized by a valid Session Key.
  */
 export async function getSessionKeyClient(modeRequired: 'SEMI' | 'FULL', tier: number) {
   // Check for active session key in the database
@@ -157,13 +156,12 @@ export async function getSessionKeyClient(modeRequired: 'SEMI' | 'FULL', tier: n
     return scope && (scope.mode === modeRequired || scope.mode === 'FULL');
   });
 
-  if (!validKey) {
+  if (!validKey || !validKey.privateKey) {
     throw new Error(`No valid SessionKey found for mode ${modeRequired}`);
   }
 
-  // Simulated: We use the master PRIVATE_KEY to act on behalf of the smart account
-  const pk = (process.env.LP_PRIVATE_KEY || process.env.PRIVATE_KEY) as Hex;
-  if (!pk) throw new Error('PRIVATE_KEY not found in .env');
+  // Use the session key's private key to sign user operations
+  const pk = validKey.privateKey as Hex;
   
   return await createSmartAccount(pk, tier);
 }
