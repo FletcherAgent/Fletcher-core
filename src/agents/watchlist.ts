@@ -17,7 +17,7 @@ export class WatchlistAgent {
     
     const items = await prisma.watchlist.findMany({
       where: {
-        tradingMode: (await prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } }))?.value === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE'
+        tradingMode: (await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } }))?.value === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE'
       }
     });
 
@@ -26,7 +26,7 @@ export class WatchlistAgent {
       return;
     }
 
-    const tModeConfig = await prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } });
+    const tModeConfig = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
     const currentMode = (tModeConfig?.value ?? 'LIVE') === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE';
 
     const config = await prisma.systemConfig.findMany({
