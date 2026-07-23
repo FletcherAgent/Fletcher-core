@@ -94,9 +94,27 @@ export class GuardianAgent {
       } catch (err) {
         if (pos.tradingMode === 'DRY_RUN') {
           // Fallback gracefully for simulated V2/unsupported pools
+          let mockTick = pos.entryTick ?? 0;
+          try {
+            const wethAddr = (process.env.WETH_ADDRESS ?? '').toLowerCase();
+            const tokenAddress = pos.token0.toLowerCase() === wethAddr ? pos.token1 : pos.token0;
+            const tokenInfo = await getTokenInfo(tokenAddress);
+            if (tokenInfo && tokenInfo.priceUsd) {
+              const isToken0 = BigInt(pos.token0) < BigInt(process.env.WETH_ADDRESS ?? '0');
+              const wethPrice = 3500;
+              const priceRatio = isToken0 
+                  ? tokenInfo.priceUsd / wethPrice 
+                  : wethPrice / tokenInfo.priceUsd;
+              mockTick = Math.floor(Math.log(priceRatio) / Math.log(1.0001));
+            }
+          } catch(e: any) {
+            console.warn(`[Guardian] ⚠️ Failed to fetch live price for SIM IL calc:`, e.message);
+            // mockTick remains entryTick
+          }
+          
           rangeStatus = { 
-            inRange: true, 
-            currentTick: pos.entryTick || 0, 
+            inRange: mockTick >= pos.tickLower && mockTick <= pos.tickUpper, 
+            currentTick: mockTick, 
             tickLower: pos.tickLower, 
             tickUpper: pos.tickUpper, 
             distanceToBoundaryPct: 50 
