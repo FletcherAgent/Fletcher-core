@@ -18,7 +18,7 @@
 
 import { encodeFunctionData, parseAbi, parseUnits, decodeEventLog, type Address, type Hex } from 'viem';
 import { PrismaClient } from '@prisma/client';
-import { publicClient } from '../services/viem.js';
+import { publicClient, walletClient, account } from '../services/viem.js';
 import { getSessionKeyClient, buildAndSendLPUserOperation, type UserOpCall } from '../services/sessionKey.js';
 import { getUserTier, getTierLimits } from '../services/tierGate.js';
 import { prisma } from '../core/db.js';
@@ -780,16 +780,14 @@ export class LPEngineAgent {
         if (this.onProposal) await this.onProposal(proposal);
         return;
       }
-      console.log(`[LPEngine] Mode FULL — Executing automatically via Alchemy Session Key`);
+      console.log(`[LPEngine] Mode FULL — Executing automatically via Raw WalletClient (Temporary Fallback)`);
       try {
-        const tier = await getUserTier(recipient);
-        const client = await getSessionKeyClient('FULL', tier);
-        const calls: UserOpCall[] = [{
-          target: npmAddress,
+        if (!walletClient || !account) throw new Error("WalletClient not initialized");
+        const txHash = await walletClient.sendTransaction({
+          account,
+          to: npmAddress,
           data: calldata
-        }];
-
-        const txHash = await buildAndSendLPUserOperation(client, calls);
+        });
         
         console.log(`[LPEngine] 📜 Waiting for receipt to extract TokenID...`);
         const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
@@ -928,19 +926,24 @@ export class LPEngineAgent {
         if (this.onProposal) await this.onProposal(proposal);
         return;
       }
-      console.log(`[LPEngine] Mode FULL — Auto-closing position via Alchemy Session Key`);
+      console.log(`[LPEngine] Mode FULL — Auto-closing position via Raw WalletClient (Temporary Fallback)`);
       try {
-        const tier = await getUserTier(recipient);
-        const client = await getSessionKeyClient('FULL', tier);
+        if (!walletClient || !account) throw new Error("WalletClient not initialized");
         const collectCalldata = this.buildCollectCalldata(tokenId, recipient);
         
-        // Batch: Decrease + Collect
-        const calls: UserOpCall[] = [
-          { target: npmAddress, data: decreaseCalldata },
-          { target: npmAddress, data: collectCalldata }
-        ];
-
-        const txHash = await buildAndSendLPUserOperation(client, calls);
+        // Sequential: Decrease + Collect
+        const txHash1 = await walletClient.sendTransaction({
+          account,
+          to: npmAddress,
+          data: decreaseCalldata
+        });
+        await publicClient.waitForTransactionReceipt({ hash: txHash1 });
+        
+        const txHash = await walletClient.sendTransaction({
+          account,
+          to: npmAddress,
+          data: collectCalldata
+        });
         
         await prisma.lPPosition.update({
           where: { id: positionId },
