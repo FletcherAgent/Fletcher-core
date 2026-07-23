@@ -17,6 +17,7 @@ export class WatchlistAgent {
     
     const items = await prisma.watchlist.findMany({
       where: {
+        status: 'WATCHING',
         tradingMode: (await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } }))?.value === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE'
       }
     });
@@ -112,11 +113,12 @@ export class WatchlistAgent {
         const liveness = await checkLiveness(item.tokenAddress, token, item.poolAddress || '');
         if (!liveness.alive) {
           console.log(`[Watchlist] ❌ [Liveness] REJECT Entry for $${item.symbol} — ${liveness.failedCheck}: ${liveness.failReason}`);
+          await prisma.watchlist.update({ where: { id: item.id }, data: { status: 'DROPPED', lastCheckedAt: new Date() } });
           continue; // Skip entry, token is dead
         }
         
-        // Remove from Watchlist
-        await prisma.watchlist.delete({ where: { id: item.id } });
+        // Update to EXECUTED
+        await prisma.watchlist.update({ where: { id: item.id }, data: { status: 'EXECUTED', lastCheckedAt: new Date() } });
         
         // Trigger LP Engine Strategy Entry
         await this.lpEngine.proposeOpenPosition(
@@ -135,6 +137,9 @@ export class WatchlistAgent {
       } else {
         console.log(`[Watchlist] 💤 No signal for ${item.symbol} yet. (Supertrend: ${isSupertrendBullish}, ATH: ${isNewAth})`);
       }
+      
+      // Update lastCheckedAt for the item
+      await prisma.watchlist.update({ where: { id: item.id }, data: { lastCheckedAt: new Date() } });
     }
   }
 }
