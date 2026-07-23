@@ -2,6 +2,7 @@ import { getTrendingPairs, getTokenInfo, fetchTopTraders } from './endpoints.js'
 import type { GMGNToken, GMGNPool } from './endpoints.js';
 import { publicClient } from '../viem.js';
 import { getDexConfig } from '../../core/dexConfig.js';
+import { checkLiveness } from '../../agents/liveness.js';
 import { parseAbi } from 'viem';
 
 const FACTORY_ABI = parseAbi([
@@ -120,6 +121,13 @@ export async function screenPairs(criteria?: LPScreeningCriteria): Promise<PoolC
 
     if (!realPoolAddress) {
       console.log(`[MarketData] ❌ ${token.symbol} REJECTED: No on-chain pool found`);
+      continue;
+    }
+
+    // NEW: Liveness Gate
+    const liveness = await checkLiveness(token.address, token, realPoolAddress);
+    if (!liveness.alive) {
+      console.log(`[MarketData] ❌ [Liveness] REJECT $${token.symbol} — ${liveness.failedCheck}: ${liveness.failReason}`);
       continue;
     }
 

@@ -17,6 +17,11 @@ export interface GMGNToken {
   isVerified:   boolean;
   quoteToken?:  string;
   pairCreatedAt?: number;
+  vol1h:        number;
+  vol6h:        number;
+  swaps1h:      number;
+  swaps5m:      number;
+  athPrice?:    number;
 }
 
 export interface GMGNPool {
@@ -61,6 +66,11 @@ function normalizeToken(d: any): GMGNToken {
     sellTax:    parseFloat(d?.sell_tax ?? '0') * 100,
     isVerified: Boolean(d?.is_open_source ?? d?.verified ?? true),
     pairCreatedAt: d?.pool?.created_at ? parseInt(d.pool.created_at) * 1000 : undefined,
+    vol1h:      parseFloat(d?.price?.volume_1h || '0'),
+    vol6h:      parseFloat(d?.price?.volume_6h || '0'),
+    swaps1h:    parseInt(d?.price?.swaps_1h || '0', 10),
+    swaps5m:    parseInt(d?.price?.swaps_5m || '0', 10),
+    athPrice:   parseFloat(d?.ath_price || '0') || undefined,
   };
 }
 
@@ -99,7 +109,11 @@ async function getTrendingPairsFallback(limit = 20): Promise<GMGNToken[]> {
         sellTax: 0,
         isVerified: true,
         quoteToken: pool.relationships?.quote_token?.data?.id?.replace('robinhood_', '') || '',
-        pairCreatedAt: pool.attributes?.pool_created_at ? new Date(pool.attributes.pool_created_at).getTime() : undefined
+        pairCreatedAt: pool.attributes?.pool_created_at ? new Date(pool.attributes.pool_created_at).getTime() : undefined,
+        vol1h: 0,
+        vol6h: 0,
+        swaps1h: 0,
+        swaps5m: 0,
       };
     });
   } catch (err) {
@@ -132,7 +146,11 @@ async function getTokenInfoFallback(tokenAddress: string): Promise<GMGNToken | n
       isHoneypot: false,
       buyTax: 0, sellTax: 0, isVerified: true,
       quoteToken: mainPair.quoteToken?.address || '',
-      pairCreatedAt: mainPair.pairCreatedAt ? mainPair.pairCreatedAt : undefined
+      pairCreatedAt: mainPair.pairCreatedAt ? mainPair.pairCreatedAt : undefined,
+      vol1h: rbPairs.reduce((acc: number, p: any) => acc + parseFloat(p.volume?.h1 || '0'), 0),
+      vol6h: rbPairs.reduce((acc: number, p: any) => acc + parseFloat(p.volume?.h6 || '0'), 0),
+      swaps1h: rbPairs.reduce((acc: number, p: any) => acc + (p.txns?.h1?.buys || 0) + (p.txns?.h1?.sells || 0), 0),
+      swaps5m: rbPairs.reduce((acc: number, p: any) => acc + (p.txns?.m5?.buys || 0) + (p.txns?.m5?.sells || 0), 0),
     };
     
     // GoPlus Security

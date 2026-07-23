@@ -162,3 +162,24 @@ model TokenBlacklist {
   reason          String?
   blacklistedAt   DateTime @default(now())
 }
+
+model FactoryRegistry {
+  id            String   @id @default(uuid())
+  name          String   // "hood.fun", "NOXA", etc.
+  address       String   @unique
+  status        String   @default("active") // "active" | "dead" | "dormant"
+  deploys7d     Int      @default(0)         
+  consecutiveLivenessFails Int @default(0)
+  lastDeployAt  DateTime?
+  updatedAt     DateTime @updatedAt
+  createdAt     DateTime @default(now())
+}
+
+model LivenessCache {
+  tokenAddress  String   @id
+  verdict       String   // "ALIVE" | "DEAD"
+  failedCheck   String?  // "L1" | "L2" | etc.
+  failReason    String?  
+  expiresAt     DateTime 
+  createdAt     DateTime @default(now())
+}

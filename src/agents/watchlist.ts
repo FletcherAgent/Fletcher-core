@@ -3,6 +3,7 @@ import { fetchOHLCV, calculateIndicators } from '../services/ohlcv.js';
 import { LPEngineAgent as LPEngine } from './lpengine.js';
 import { getTokenInfo } from '../services/gmgn/index.js';
 import { logEvent } from '../utils/logger.js';
+import { checkLiveness } from './liveness.js';
 
 export class WatchlistAgent {
   private lpEngine: LPEngine;
@@ -105,6 +106,13 @@ export class WatchlistAgent {
         if (!token) {
           console.warn(`[Watchlist] Failed to fetch GMGN data for ${item.symbol}, skipping.`);
           continue;
+        }
+        
+        // NEW: Liveness Gate Re-check
+        const liveness = await checkLiveness(item.tokenAddress, token, item.poolAddress || '');
+        if (!liveness.alive) {
+          console.log(`[Watchlist] ❌ [Liveness] REJECT Entry for $${item.symbol} — ${liveness.failedCheck}: ${liveness.failReason}`);
+          continue; // Skip entry, token is dead
         }
         
         // Remove from Watchlist

@@ -251,6 +251,21 @@ export class GuardianAgent {
         }
       }
 
+      // DEAD_POOL: Liveness Gate Re-check
+      if (!exitReason) {
+        const wethAddr = (process.env.WETH_ADDRESS ?? '').toLowerCase();
+        const tAddress = pos.token0.toLowerCase() === wethAddr ? pos.token1 : pos.token0;
+        const tokenInfo = await getTokenInfo(tAddress);
+        if (tokenInfo) {
+          const { checkLiveness } = await import('./liveness.js');
+          const liveness = await checkLiveness(tAddress, tokenInfo, pos.pool);
+          if (!liveness.alive) {
+             exitRule = 'DEAD_POOL';
+             exitReason = `DEAD_POOL (Liveness Gate): ${liveness.failedCheck} - ${liveness.failReason}`;
+          }
+        }
+      }
+
       // Update DB counters
       const newFees = Math.max(pos.feesCollected || 0, feesUsd);
       await prisma.lPPosition.update({

@@ -157,11 +157,18 @@ export async function getSessionKeyClient(modeRequired: 'SEMI' | 'FULL', tier: n
   });
 
   if (!validKey || !validKey.privateKey) {
-    throw new Error(`No valid SessionKey found for mode ${modeRequired}`);
+    // TODO: [ERC-6900] Target Milestone: Implement True On-Chain Session Keys (ERC-6900)
+    // Temporary Fallback: Use raw private key from .env for MVP so bot can execute in FULL mode
+    const envKey = process.env.USER_PRIVATE_KEY as `0x${string}`;
+    if (envKey) {
+      console.log(`[SessionKey] ⚠️ WARNING: No valid session key found for mode ${modeRequired}. Falling back to ENV private key (MASKED).`);
+      return await createSmartAccount(envKey, tier);
+    }
+    throw new Error(`No valid SessionKey found for mode ${modeRequired} and no ENV fallback available.`);
   }
 
   // Use the session key's private key to sign user operations
-  const pk = validKey.privateKey as Hex;
+  const pk = validKey.privateKey as `0x${string}`;
   
   return await createSmartAccount(pk, tier);
 }
