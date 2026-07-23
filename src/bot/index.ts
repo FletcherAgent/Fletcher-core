@@ -865,6 +865,10 @@ async function startApp() {
     // Connect Database
     await connectDb();
 
+    // Auto-install Session Key for Zero-Custody architecture
+    const { installSessionKeyPluginAndDelegate } = await import('../services/sessionKey.js');
+    await installSessionKeyPluginAndDelegate(3); // default tier 3
+
     // Start Fletcher agents (Event Listener, Webhook Server, etc.)
     await orchestrator.startAll();
 

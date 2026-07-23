@@ -4,9 +4,14 @@ dotenv.config();
 
 export async function getDexConfig(version: 'V2' | 'V3' | 'V4') {
   // Try to find the default verified protocol in the DB
-  const dbConfig = await prisma.dexProtocol.findFirst({
-    where: { version, isDefault: true, verified: true }
-  });
+  let dbConfig = null;
+  try {
+    dbConfig = await prisma.dexProtocol.findFirst({
+      where: { version, isDefault: true, verified: true }
+    });
+  } catch (error) {
+    console.warn(`[DexConfig] DB findFirst failed for ${version}. Falling back to .env configuration.`);
+  }
 
   return {
     routerAddress: dbConfig?.routerAddress || process.env.UNIVERSAL_ROUTER || process.env.ROUTER_ADDRESS,
@@ -19,10 +24,15 @@ export async function getDexConfig(version: 'V2' | 'V3' | 'V4') {
 }
 
 export async function getAllDexConfigs(version: 'V2' | 'V3' | 'V4') {
-  const configs = await prisma.dexProtocol.findMany({
-    where: { version, verified: true },
-    orderBy: { isDefault: 'desc' }
-  });
+  let configs: any[] = [];
+  try {
+    configs = await prisma.dexProtocol.findMany({
+      where: { version, verified: true },
+      orderBy: { isDefault: 'desc' }
+    });
+  } catch (error) {
+    console.warn(`[DexConfig] DB connection failed for ${version}. Falling back to .env configuration.`);
+  }
 
   // If no DB configs, return one default mapped from process.env
   if (configs.length === 0) {

@@ -5,15 +5,14 @@ import { createMultiOwnerModularAccount } from "@alchemy/aa-accounts";
 import { LocalAccountSigner, createSmartAccountClient } from "@alchemy/aa-core";
 import { alchemyGasManagerMiddleware } from "@alchemy/aa-alchemy";
 import { http } from "viem";
-
-
+import { sessionKeyPluginActions, SessionKeyPermissionsBuilder, SessionKeyAccessListType } from "@alchemy/aa-accounts";
 
 /**
  * Initialize Alchemy Smart Account Client (MultiOwnerModularAccount)
  */
 import { getTierLimits } from "./tierGate.js";
 
-export async function createSmartAccount(privateKeyHex: Hex, tier: number) {
+export async function createSmartAccount(privateKeyHex: Hex, tier: number, accountAddress?: Address) {
   if (!process.env.ALCHEMY_API_KEY) throw new Error("Missing ALCHEMY_API_KEY");
   
   const rpcUrl = `https://robinhood-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}`;
@@ -31,11 +30,16 @@ export async function createSmartAccount(privateKeyHex: Hex, tier: number) {
   const signer = LocalAccountSigner.privateKeyToAccountSigner(privateKeyHex);
   const transport = http(rpcUrl);
 
-  const account = await createMultiOwnerModularAccount({
+  const accountParams: any = {
     transport: transport as any,
     chain: robinhoodChain,
     signer,
-  });
+  };
+  if (accountAddress) {
+    accountParams.accountAddress = accountAddress;
+  }
+
+  const account = await createMultiOwnerModularAccount(accountParams);
   
   const limits = getTierLimits(tier);
 
@@ -70,8 +74,8 @@ export async function grantSessionKey(
   client: any, 
   mode: "SEMI" | "FULL",
   swapScope: boolean = false
-): Promise<SessionKeyData> {
-  const expiryDate = new Date(Date.now() + 24 * 60 * 60 * 1000); // default 24 hours
+): Promise<SessionKeyData & { privateKey: string }> {
+  const expiryDate = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // default 30 days
   
   // Generate a new soft session key
   const privateKey = generatePrivateKey();
@@ -93,8 +97,69 @@ export async function grantSessionKey(
 
   return {
     keyAddress: account.address,
-    expiry: expiryDate.getTime()
+    expiry: expiryDate.getTime(),
+    privateKey
   };
+}
+
+/**
+ * Auto-install session key plugin on startup if not already installed.
+ */
+export async function installSessionKeyPluginAndDelegate(tier: number) {
+  const envKey = (process.env.USER_PRIVATE_KEY || process.env.PRIVATE_KEY) as Hex;
+  if (!envKey) {
+    console.log("[SessionKey] No Master PRIVATE_KEY found in .env, skipping auto-install.");
+    return;
+  }
+
+  // 1. Get Master Client
+  const masterClient = await createSmartAccount(envKey, tier);
+  const accountAddress = masterClient.account.address;
+
+  // 2. Check if active session key exists in DB
+  const existingKey = await prisma.sessionKey.findFirst({
+    where: {
+      userId: accountAddress,
+      status: 'ACTIVE',
+      expiry: { gt: new Date() }
+    }
+  });
+
+  if (existingKey) {
+    console.log(`[SessionKey] Found existing active Session Key for ${accountAddress}. Skipping install.`);
+    return;
+  }
+
+  console.log(`[SessionKey] Automatically installing Session Key Plugin for ${accountAddress}...`);
+
+  // 3. Grant a new soft session key in DB
+  const { keyAddress } = await grantSessionKey(masterClient, "FULL");
+
+  // 4. In a real LIVE mode, we'd broadcast the addSessionKey transaction on-chain via Alchemy
+  const config = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
+  const tradingMode = config?.value || 'LIVE';
+
+  if (tradingMode === 'LIVE') {
+    try {
+      const permissions = new SessionKeyPermissionsBuilder()
+        .setContractAccessControlType(SessionKeyAccessListType.ALLOW_ALL_ACCESS)
+        .encode();
+
+      const sessionClient = masterClient.extend(sessionKeyPluginActions);
+      const res = await sessionClient.addSessionKey({
+        key: keyAddress as Hex,
+        permissions, // Root access (Option A)
+        tag: "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex,
+      });
+      console.log(`[SessionKey] On-Chain Plugin Installation Tx: ${res.hash}`);
+      await masterClient.waitForUserOperationTransaction({ hash: res.hash });
+      console.log(`[SessionKey] Plugin installation mined successfully.`);
+    } catch (e: any) {
+      console.error(`[SessionKey] Failed to install plugin on-chain: ${e.message}`);
+    }
+  } else {
+    console.log(`[SessionKey] [DRY_RUN] Simulated on-chain plugin installation for ${keyAddress}`);
+  }
 }
 
 export type UserOpCall = {
@@ -157,18 +222,13 @@ export async function getSessionKeyClient(modeRequired: 'SEMI' | 'FULL', tier: n
   });
 
   if (!validKey || !validKey.privateKey) {
-    // TODO: [ERC-6900] Target Milestone: Implement True On-Chain Session Keys (ERC-6900)
-    // Temporary Fallback: Use raw private key from .env for MVP so bot can execute in FULL mode
-    const envKey = process.env.USER_PRIVATE_KEY as `0x${string}`;
-    if (envKey) {
-      console.log(`[SessionKey] ⚠️ WARNING: No valid session key found for mode ${modeRequired}. Falling back to ENV private key (MASKED).`);
-      return await createSmartAccount(envKey, tier);
-    }
-    throw new Error(`No valid SessionKey found for mode ${modeRequired} and no ENV fallback available.`);
+    throw new Error(`[SessionKey] ZERO-CUSTODY VIOLATION: No valid SessionKey found for mode ${modeRequired}. Ensure auto-install ran successfully.`);
   }
 
   // Use the session key's private key to sign user operations
   const pk = validKey.privateKey as `0x${string}`;
+  const accountAddress = validKey.userId as Address;
   
-  return await createSmartAccount(pk, tier);
+  // Create client using the SESSION KEY (Zero Custody)
+  return await createSmartAccount(pk, tier, accountAddress);
 }
