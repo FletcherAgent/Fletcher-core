@@ -69,6 +69,11 @@ export class WatchlistAgent {
       console.log(`[Watchlist] 📊 Fetching TA for ${item.symbol} (${item.poolAddress})`);
       const candles = await fetchOHLCV(item.poolAddress);
       
+      if (!candles || candles.length === 0) {
+        console.log(`[Watchlist] ⚠️ No candle data available for ${item.symbol}, skipping.`);
+        continue;
+      }
+
       const c1 = candles[candles.length - 1];
       const isForming = (Date.now() - c1.timestamp < 15 * 60 * 1000);
       const closedCandles = isForming ? candles.slice(0, -1) : candles;
