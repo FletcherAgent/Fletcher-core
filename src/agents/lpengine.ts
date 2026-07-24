@@ -449,6 +449,8 @@ export class LPEngineAgent {
         name: selectedCandidate.token.name,
         poolAddress: selectedCandidate.pool.address.toLowerCase(),
         sentimentStatus: selectedCandidate.grokLabel,
+        tradingMode: (await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } }))?.value === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE',
+        status: 'WATCHING',
       },
       create: {
         tokenAddress: selectedCandidate.token.address.toLowerCase(),
@@ -542,6 +544,8 @@ export class LPEngineAgent {
           name: candidate.token.name,
           poolAddress: candidate.pool.address.toLowerCase(),
           sentimentStatus: candidate.grokLabel,
+          tradingMode: currentMode,
+          status: 'WATCHING',
         },
         create: {
           tokenAddress: candidate.token.address.toLowerCase(),
@@ -579,6 +583,8 @@ export class LPEngineAgent {
       update: {
         symbol: token.symbol,
         name: token.name,
+        tradingMode: currentMode,
+        status: 'WATCHING',
       },
       create: {
         tokenAddress: token.address.toLowerCase(),

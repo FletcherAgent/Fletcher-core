@@ -32,7 +32,12 @@ async function main() {
     { key: 'lp.fudCheck.enabled', value: 'true' },
     { key: 'lp.fudCheck.onlyCategories', value: 'tech,utility' },
     { key: 'lp.fudCheck.rejectAbove', value: '60' },
-    { key: 'grok.mode', value: 'VETO' }, // VETO | ANNOTATION | ADVISOR
+    // grok.mode options:
+    // - VETO       : Hard block. If Grok returns 'BEARISH' or the score is < minGrokScore, the LP transaction is aborted. (Safest)
+    // - ANNOTATION : Shadow mode. The bot proceeds with the execution (Opens LP) but logs Grok's warning/label in Telegram/DB.
+    // - ADVISOR    : Semi-automated/interactive mode. Grok provides analysis & recommendations, but execution requires manual intervention (user/admin).
+    { key: 'grok.mode', value: 'VETO' },
+
     { key: 'lp.maxPositions', value: '5' },
     // RHC Canonical Quote Tokens (decimals fetched on-chain via getTokenMeta)
     { key: 'tokens.quote.weth', value: '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73' }, // 18 dec
