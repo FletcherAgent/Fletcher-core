@@ -905,6 +905,12 @@ export class LPEngineAgent {
 
         const txHash = await buildAndSendLPUserOperation(client, calls);
         
+        // Save txHash immediately to prevent zombie states if process restarts during wait
+        await prisma.lPPosition.update({
+          where: { id: dbRecord.id },
+          data: { txHash }
+        });
+        
         console.log(`[LPEngine] 📜 Waiting for receipt to extract TokenID...`);
         const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
         
