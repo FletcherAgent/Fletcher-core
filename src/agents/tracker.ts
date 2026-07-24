@@ -1,5 +1,6 @@
 import { createServer, IncomingMessage, ServerResponse } from 'http';
 import * as crypto from 'crypto';
+import { WebSocketServer } from 'ws';
 import { parseAbiItem, decodeEventLog, Hex } from 'viem';
 import { prisma } from '../core/db.js';
 import { dbLogger } from '../services/logger.js';
@@ -147,6 +148,34 @@ export class TrackerAgent {
             res.end();
           }
         });
+      } else if (req.method === 'GET' && req.url?.startsWith('/api/lp/')) {
+        const id = req.url.split('/')[3];
+        try {
+          const position = await prisma.lPPosition.findUnique({ where: { id } });
+          if (!position) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Not found' }));
+            return;
+          }
+          const edgeBufferConfig = await prisma.systemConfig.findUnique({ where: { key: 'lp.rebalance.edgeBufferPct' } });
+          const edgeBufferPct = edgeBufferConfig ? parseInt(edgeBufferConfig.value, 10) : 15;
+          
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            id: position.id,
+            pool: position.pool,
+            tickLower: position.tickLower,
+            tickUpper: position.tickUpper,
+            feesCollected: position.feesCollected,
+            ilRunning: position.ilRunning,
+            status: position.status,
+            edgeBufferPct
+          }));
+        } catch (e) {
+          console.error(`[Tracker] API Error:`, e);
+          res.writeHead(500);
+          res.end();
+        }
       } else {
         res.writeHead(404);
         res.end();
@@ -155,6 +184,89 @@ export class TrackerAgent {
 
     this.server.listen(listenPort, '0.0.0.0', () => {
       console.log(`[Tracker] 🟢 Webhook Server is actively listening for Alchemy events (/webhook/alchemy)`);
+    });
+
+    // --- WebSocket Server for Live Range Gauge ---
+    const wss = new WebSocketServer({ server: this.server });
+    
+    // Pool subscriptions: poolAddress -> Set of ws clients
+    const subscriptions = new Map<string, Set<any>>();
+    // Pool watch unwatchers: poolAddress -> unwatch function
+    const poolUnwatchers = new Map<string, () => void>();
+
+    wss.on('connection', (ws) => {
+      let currentPool: string | null = null;
+
+      ws.on('message', (message) => {
+        try {
+          const data = JSON.parse(message.toString());
+          if (data.action === 'subscribe' && data.pool) {
+            const pool = data.pool.toLowerCase();
+            
+            // Unsubscribe from previous pool if any
+            if (currentPool && currentPool !== pool) {
+              const subs = subscriptions.get(currentPool);
+              if (subs) {
+                subs.delete(ws);
+                if (subs.size === 0) {
+                  // Nobody is listening to this pool anymore, unwatch
+                  const unwatch = poolUnwatchers.get(currentPool);
+                  if (unwatch) { unwatch(); poolUnwatchers.delete(currentPool); }
+                }
+              }
+            }
+
+            currentPool = pool;
+            if (!subscriptions.has(pool)) {
+              subscriptions.set(pool, new Set());
+            }
+            subscriptions.get(pool)!.add(ws);
+
+            // Start watching if not already watching
+            if (!poolUnwatchers.has(pool)) {
+              const SWAP_EVENT = parseAbiItem('event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, int24 tick)');
+              const unwatch = publicClient.watchContractEvent({
+                address: pool as Hex,
+                abi: [SWAP_EVENT],
+                eventName: 'Swap',
+                onLogs: logs => {
+                  if (logs && logs.length > 0) {
+                    const tick = logs[logs.length - 1].args.tick;
+                    if (tick !== undefined) {
+                      const payload = JSON.stringify({ type: 'Swap', pool, tick: Number(tick) });
+                      // Broadcast to all subscribers of this pool
+                      const subs = subscriptions.get(pool);
+                      if (subs) {
+                        for (const client of subs) {
+                          if (client.readyState === 1 /* ws.OPEN */) {
+                            client.send(payload);
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              });
+              poolUnwatchers.set(pool, unwatch);
+            }
+          }
+        } catch (e) {
+          console.error(`[Tracker] WS Message Error:`, e);
+        }
+      });
+
+      ws.on('close', () => {
+        if (currentPool) {
+          const subs = subscriptions.get(currentPool);
+          if (subs) {
+            subs.delete(ws);
+            if (subs.size === 0) {
+              const unwatch = poolUnwatchers.get(currentPool);
+              if (unwatch) { unwatch(); poolUnwatchers.delete(currentPool); }
+            }
+          }
+        }
+      });
     });
   }
 

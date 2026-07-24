@@ -30,11 +30,13 @@
     "sinon": "^22.0.0",
     "technicalindicators": "^3.1.0",
     "telegram": "^2.26.22",
-    "viem": "^2.55.0"
+    "viem": "^2.55.0",
+    "ws": "^8.21.1"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
     "@types/pg": "^8.20.0",
+    "@types/ws": "^8.18.1",
     "prisma": "^7.8.0",
     "ts-node": "^10.9.2",
     "tsx": "^4.23.0",

@@ -29,6 +29,7 @@ async function main() {
     { key: 'lp.portfolio.crowdedSizeMult', value: '0.6' },
     { key: 'lp.portfolio.maxPositions', value: '5' },
     { key: 'lp.guardian.oorLeftCutAtPnlPct', value: '-10' },
+    { key: 'lp.rebalance.edgeBufferPct', value: '15' },
     { key: 'lp.fudCheck.enabled', value: 'true' },
     { key: 'lp.fudCheck.onlyCategories', value: 'tech,utility' },
     { key: 'lp.fudCheck.rejectAbove', value: '60' },
