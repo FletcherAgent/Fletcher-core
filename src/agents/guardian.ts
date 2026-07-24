@@ -242,10 +242,34 @@ export class GuardianAgent {
       // So lower bound is `tickUpper`. Breach happens if `currentTick > tickUpper`.
       const wethAddr = (process.env.WETH_ADDRESS ?? '').toLowerCase();
       const isAltcoinToken0 = pos.token0.toLowerCase() !== wethAddr;
-      if (isAltcoinToken0 && rangeStatus.currentTick < pos.tickLower) {
-        exitRule = 'K2'; exitReason = `K2 (Range Breach): Price exited lower bound (Tick ${rangeStatus.currentTick} < ${pos.tickLower})`;
-      } else if (!isAltcoinToken0 && rangeStatus.currentTick > pos.tickUpper) {
-        exitRule = 'K2'; exitReason = `K2 (Range Breach): Price exited lower bound (Tick ${rangeStatus.currentTick} > ${pos.tickUpper})`;
+      
+      // OOR_LEFT_CUT (Addendum §6): Exit immediately if out-of-range left and price <= entryPrice * 0.90
+      const altEntryPrice = isAltcoinToken0 ? entryP0 : entryP1;
+      const altCurrentPrice = isAltcoinToken0 ? curP0 : curP1;
+      
+      // Fetch dynamic cut threshold from config
+      const oorCutCfg = await prisma.systemConfig.findUnique({ where: { key: 'lp.guardian.oorLeftCutAtPnlPct' } });
+      const oorCutPct = parseFloat(oorCutCfg?.value || '-10');
+      
+      const priceDropPct = altEntryPrice > 0 ? ((altCurrentPrice - altEntryPrice) / altEntryPrice) * 100 : 0;
+      const isOorLeft = isAltcoinToken0 ? (rangeStatus.currentTick < pos.tickLower) : (rangeStatus.currentTick > pos.tickUpper);
+      
+      if (isOorLeft && priceDropPct <= oorCutPct) {
+        exitRule = 'OOR_LEFT_CUT';
+        exitReason = `OOR_LEFT_CUT: Price dropped ${priceDropPct.toFixed(1)}% (Threshold: ${oorCutPct}%) and went out of range left.`;
+      }
+      
+      // K2: Range Breach (spot price exits LOWER bound of the LP range)
+      // If Token0 is altcoin, price is quote/alt, tick goes DOWN when price drops.
+      // So lower bound is `tickLower`. Breach happens if `currentTick < tickLower`.
+      // If Token1 is altcoin, price is alt/quote, tick goes UP when price drops.
+      // So lower bound is `tickUpper`. Breach happens if `currentTick > tickUpper`.
+      if (!exitReason) {
+        if (isAltcoinToken0 && rangeStatus.currentTick < pos.tickLower) {
+          exitRule = 'K2'; exitReason = `K2 (Range Breach): Price exited lower bound (Tick ${rangeStatus.currentTick} < ${pos.tickLower})`;
+        } else if (!isAltcoinToken0 && rangeStatus.currentTick > pos.tickUpper) {
+          exitRule = 'K2'; exitReason = `K2 (Range Breach): Price exited lower bound (Tick ${rangeStatus.currentTick} > ${pos.tickUpper})`;
+        }
       }
 
       if (!exitReason && ta && candles.length >= 4) {

@@ -646,8 +646,49 @@ export class LPEngineAgent {
       tickUpper = ticks.tickUpper;
     }
 
+    // Addendum §3, §7: Entry Windows & Regime modifiers
+    const regimeCfg = await prisma.systemConfig.findUnique({ where: { key: 'lp.portfolio.regime' } });
+    const regime = regimeCfg?.value || 'normal';
+    const regimeMultCfg = await prisma.systemConfig.findUnique({ where: { key: 'lp.portfolio.crowdedSizeMult' } });
+    const regimeMult = parseFloat(regimeMultCfg?.value || '0.6');
+    
+    const windowMultCfg = await prisma.systemConfig.findUnique({ where: { key: 'lp.entryWindows.outsideSizeMult' } });
+    const windowMult = parseFloat(windowMultCfg?.value || '0.5');
+    
+    const now = new Date();
+    const jakartaTime = new Date(now.toLocaleString("en-US", {timeZone: "Asia/Jakarta"}));
+    const currentMins = jakartaTime.getHours() * 60 + jakartaTime.getMinutes();
+    
+    const windows = [
+      { start: 9 * 60, end: 10 * 60 + 30 },
+      { start: 18 * 60, end: 19 * 60 + 30 },
+      { start: 22 * 60, end: 23 * 60 + 30 }
+    ];
+    const isInsideWindow = windows.some(w => currentMins >= w.start && currentMins <= w.end);
+    
+    let baseStartSize = isDryRun ? config.startSizeDryRun : config.startSizeLive;
+    let finalStartSize = baseStartSize;
+    let sizingLog = [];
+    
+    if (regime === 'crowded') {
+      finalStartSize *= regimeMult;
+      sizingLog.push(`Regime=Crowded (${regimeMult}x)`);
+    }
+    
+    // Shadow logging window state
+    if (!isInsideWindow) {
+      sizingLog.push(`Out-of-Window (Would size ${windowMult}x)`);
+      // Keeping size untouched for now as per shadow mode rules, only logging.
+    } else {
+      sizingLog.push(`In-Window`);
+    }
+    
+    if (sizingLog.length > 0) {
+      console.log(`[LPEngine] ⚖️ Sizing adjustments for $${token.symbol}: ${sizingLog.join(', ')}. Base: $${baseStartSize} -> Final: $${finalStartSize}`);
+    }
+
     // Amount calculation: split startSize 50/50 between token0 and token1
-    const currentStartSize = isDryRun ? config.startSizeDryRun : config.startSizeLive;
+    const currentStartSize = finalStartSize;
     const halfUsd = currentStartSize / 2;
     const poolPriceRaw = Number((BigInt(sqrtPriceX96) * 10000000n) / (2n ** 96n)) / 10000000;
     const poolPrice = poolPriceRaw ** 2; 

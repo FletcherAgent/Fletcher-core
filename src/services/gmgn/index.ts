@@ -4,6 +4,9 @@ import { publicClient } from '../viem.js';
 import { getDexConfig } from '../../core/dexConfig.js';
 import { checkLiveness } from '../../agents/liveness.js';
 import { parseAbi } from 'viem';
+import { prisma } from '../../core/db.js';
+import { getTrailingVolume5m } from '../volume.js';
+import { IntelligenceLayer } from '../intelligence.js';
 
 const FACTORY_ABI = parseAbi([
   'function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address pool)'
@@ -70,12 +73,18 @@ export async function screenPairs(criteria?: LPScreeningCriteria): Promise<PoolC
     
     if (token.pairCreatedAt) {
       const ageHours = (Date.now() - token.pairCreatedAt) / (1000 * 60 * 60);
-      if (ageHours < config.minAgeHours) reasons.push(`age ${ageHours.toFixed(1)}h < ${config.minAgeHours}h`);
+      if (ageHours < config.minAgeHours) {
+        reasons.push(`age ${ageHours.toFixed(1)}h < ${config.minAgeHours}h`);
+      }
     }
 
     // 3. Category filter
     if (!config.categories.some(c => token.category?.toLowerCase().includes(c.toLowerCase()))) {
-      reasons.push(`category "${token.category}" not in whitelist`);
+      // Allow virtuals and agent-token categories (Addendum §4)
+      const isAgentMeta = token.category?.toLowerCase().includes('virtuals') || token.category?.toLowerCase().includes('agent-token');
+      if (!isAgentMeta) {
+        reasons.push(`category "${token.category}" not in whitelist`);
+      }
     }
 
     if (config.blacklist.some(b => token.launchPad?.toLowerCase().includes(b.toLowerCase()))) reasons.push(`launchpad blacklisted`);
@@ -85,7 +94,28 @@ export async function screenPairs(criteria?: LPScreeningCriteria): Promise<PoolC
     if (token.buyTax > 5 || token.sellTax > 5) reasons.push(`high tax: buy=${token.buyTax}% sell=${token.sellTax}%`);
     // if (!token.isVerified) reasons.push('contract not verified');
     
-    if (reasons.length > 0) {
+    // Lane A and B Shadow Mode check
+    const hardReasons = reasons.filter(r => r.includes('honeypot') || r.includes('tax') || r.includes('category') || r.includes('blacklisted'));
+    
+    let shadowLaneA = false;
+    let shadowLaneB = false;
+    
+    if (hardReasons.length === 0) {
+      if (reasons.length === 1 && reasons[0].startsWith('age')) {
+         shadowLaneA = true;
+      } else {
+         if (token.athPrice && token.priceUsd && token.priceUsd > 0 && token.athPrice > 0) {
+           const athMcap = token.marketCap * (token.athPrice / token.priceUsd);
+           const dd = (token.athPrice - token.priceUsd) / token.athPrice;
+           
+           if (athMcap >= 1000000 && athMcap <= 2000000 && dd >= 0.45 && dd <= 0.60) {
+             shadowLaneB = true;
+           }
+         }
+      }
+    }
+    
+    if (!shadowLaneA && !shadowLaneB && reasons.length > 0) {
       console.log(`[MarketData] ❌ ${token.symbol} REJECTED: ${reasons.join('; ')}`);
       continue;
     }
@@ -124,11 +154,63 @@ export async function screenPairs(criteria?: LPScreeningCriteria): Promise<PoolC
       continue;
     }
 
+    if (shadowLaneA) {
+      const regimeCfg = await prisma.systemConfig.findUnique({ where: { key: 'lp.portfolio.regime' } });
+      if (regimeCfg?.value === 'crowded') {
+         console.log(`[Shadow Mode] 👻 Lane A is DISABLED because regime is CROWDED.`);
+         // continue;
+      } else {
+        const wethPriceInfo = await getTokenInfo(process.env.WETH_ADDRESS ?? '');
+        const wethPrice = wethPriceInfo?.priceUsd || 0;
+        const vol5m = await getTrailingVolume5m(realPoolAddress, token.address, quoteTokenAddress, wethPrice);
+        
+        const minVolCfg = await prisma.systemConfig.findUnique({ where: { key: 'lp.lanes.newPair.minVol5mUsd' }});
+        const minVol = Number(minVolCfg?.value || 300000);
+        
+        if (vol5m >= minVol) {
+          console.log(`[Shadow Mode] 👻 Lane A WOULD HAVE ACCEPTED $${token.symbol} (5m Vol: $${vol5m.toFixed(0)} >= $${minVol}) despite age rejection.`);
+        } else {
+          console.log(`[MarketData] ❌ ${token.symbol} REJECTED: ${reasons.join('; ')} (Lane A failed: 5m Vol $${vol5m.toFixed(0)} < $${minVol})`);
+        }
+      }
+      continue; // Shadow mode -> always reject for now.
+    }
+
+    if (shadowLaneB) {
+      const liveness = await checkLiveness(token.address, token, realPoolAddress);
+      if (liveness.alive) {
+        console.log(`[Shadow Mode] 👻 Lane B (Dip Catcher) WOULD HAVE ACCEPTED $${token.symbol} despite rejections: ${reasons.join('; ')}.`);
+      } else {
+        console.log(`[MarketData] ❌ ${token.symbol} REJECTED: ${reasons.join('; ')} (Lane B failed Liveness: ${liveness.failReason})`);
+      }
+      continue; // Shadow mode -> always reject for now.
+    }
+
     // NEW: Liveness Gate
     const liveness = await checkLiveness(token.address, token, realPoolAddress);
     if (!liveness.alive) {
       console.log(`[MarketData] ❌ [Liveness] REJECT $${token.symbol} — ${liveness.failedCheck}: ${liveness.failReason}`);
       continue;
+    }
+
+    // FUD CHECK FOR TECH TOKENS
+    const isTechOrUtility = ['tech', 'utility', 'virtuals', 'agent-token'].some(cat => 
+      token.category?.toLowerCase().includes(cat)
+    );
+    if (isTechOrUtility) {
+      const { fudScore, skipped } = await IntelligenceLayer.analyzeFUD(token.symbol, token.address);
+      if (!skipped) {
+        const rejectAboveCfg = await prisma.systemConfig.findUnique({ where: { key: 'lp.fudCheck.rejectAbove' } });
+        const rejectAbove = parseFloat(rejectAboveCfg?.value || '60');
+        
+        if (fudScore > rejectAbove) {
+          console.log(`[Shadow Mode] 👻 FUD Check WOULD HAVE REJECTED $${token.symbol} (Score: ${fudScore} > ${rejectAbove})`);
+          // Shadow mode -> Do not actually continue/reject, just log for now!
+          // continue;
+        } else {
+          console.log(`[MarketData] ✅ FUD Check passed for $${token.symbol} (Score: ${fudScore} <= ${rejectAbove})`);
+        }
+      }
     }
 
     const feeTierPct = bestFeeTier / 1000000; // e.g. 3000 = 0.003

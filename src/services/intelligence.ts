@@ -208,4 +208,68 @@ Respond ONLY in strict JSON format:
       return { approved: false, reasoning: 'Failed to evaluate wallet metrics.' };
     }
   }
+
+  /**
+   * Checks for FUD (Fear, Uncertainty, Doubt) on X (Twitter) for tech/utility tokens.
+   */
+  static async analyzeFUD(tokenSymbol: string, tokenAddress: string): Promise<{ fudScore: number; skipped: boolean }> {
+    try {
+      const config = await prisma.systemConfig.findUnique({ where: { key: 'lp.fudCheck.enabled' } });
+      if (config && config.value === 'false') {
+        return { fudScore: 0, skipped: true };
+      }
+      
+      const prompt = `
+You are an expert crypto sentiment and security analyst.
+Review recent social sentiment and mentions for the token ${tokenSymbol} (${tokenAddress}).
+Focus ONLY on FUD (Fear, Uncertainty, Doubt), rug accusations, dev-dump claims, or honeypot reports.
+Output a single fudScore between 0 and 100. (100 means extreme FUD/scam, 0 means clean/loved).
+
+Respond ONLY in strict JSON format:
+{
+  "fudScore": <number 0-100>
+}
+`;
+      const response = await fetch(GROK_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.getApiKey()}`
+        },
+        body: JSON.stringify({
+          model: 'grok-4.3',
+          messages: [
+            { role: 'system', content: 'You are an expert on-chain risk management AI.' },
+            { role: 'user', content: prompt }
+          ],
+          temperature: 0.1
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Grok API Error: ${response.statusText}`);
+      }
+
+      let data = await response.json();
+      const content = data.choices?.[0]?.message?.content?.trim() || '';
+      
+      let result;
+      try {
+        result = JSON.parse(content);
+      } catch (e) {
+        const match = content.match(/\{[\s\S]*\}/);
+        if (match) {
+          result = JSON.parse(match[0]);
+        } else {
+          throw new Error(`Could not extract JSON: ${content}`);
+        }
+      }
+
+      return { fudScore: result.fudScore ?? 0, skipped: false };
+    } catch (error: any) {
+      console.warn(`[IntelligenceLayer] FUD check failed or skipped: ${error.message}`);
+      // Missing/failed Grok response -> skip the check and proceed
+      return { fudScore: 0, skipped: true };
+    }
+  }
 }
