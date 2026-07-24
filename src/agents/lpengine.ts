@@ -942,6 +942,12 @@ export class LPEngineAgent {
       } catch (e: any) {
         await logEvent('ERROR', `[LP] Auto-Open Failed`, { error: e.message });
         console.error(`[LPEngine] Failed to auto-open position: ${e.message}`);
+        
+        await prisma.lPPosition.update({
+          where: { id: dbRecord.id },
+          data: { status: 'FAILED' }
+        });
+
         proposal.description = `❌ *Auto-Open Failed*\n` + proposal.description + `\nError: ${e.message}`;
         if (this.onProposal) await this.onProposal(proposal);
         return;
