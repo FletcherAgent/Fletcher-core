@@ -155,8 +155,16 @@ export async function detectBestFee(tokenIn, tokenOut, amountIn, targetRouter) {
     const allPromises = [...v3Promises, ...v3_V2Promises, ...v4Promises];
     const results = await Promise.allSettled(allPromises);
     for (const result of results) {
-        if (result.status === 'fulfilled' && result.value.expectedOut > best.expectedOut) {
-            best = result.value;
+        if (result.status === 'fulfilled') {
+            if (result.value.expectedOut > best.expectedOut) {
+                best = result.value;
+            }
+        }
+        else {
+            // Log rejected promises to diagnose WHY Quoter failed (e.g. rate limit, SPL, execution reverted)
+            if (result.reason && !result.reason.message?.includes('execution reverted')) {
+                console.warn(`[PoolFeeDetector] Quoter Promise Rejected (Non-revert error):`, result.reason.message || result.reason);
+            }
         }
     }
     if (best.expectedOut > 0n) {

@@ -53,7 +53,7 @@ export class TrackerAgent {
 
       if (req.method === 'GET' && req.url === '/api/dashboard') {
         try {
-          const [wallets, signals, positions, lpPositions, logs, totalSignals, openPositionsCount, tradingModeConfig, maxPosConfig, autonomyConfig] = await Promise.all([
+          const [wallets, signals, positions, lpPositions, logs, totalSignals, openPositionsCount, tradingModeConfig, maxPosConfig, autonomyConfig, harvestedFeesAggregate] = await Promise.all([
             prisma.trackedWallet.findMany({ orderBy: { createdAt: 'desc' } }),
             prisma.signal.findMany({ orderBy: { createdAt: 'desc' }, take: 20 }),
             prisma.position.findMany({ orderBy: { createdAt: 'desc' }, take: 20 }),
@@ -63,7 +63,8 @@ export class TrackerAgent {
             prisma.position.count({ where: { status: 'OPEN' } }),
             prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } }),
             prisma.systemConfig.findUnique({ where: { key: 'MAX_POSITION_SIZE' } }),
-            prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } })
+            prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } }),
+            prisma.lPPosition.aggregate({ _sum: { harvestedFees: true } })
           ]);
           
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -78,7 +79,8 @@ export class TrackerAgent {
               openPositionsCount,
               tradingMode: tradingModeConfig?.value || 'LIVE',
               autonomyMode: autonomyConfig?.value || 'SEMI',
-              maxPositionSize: maxPosConfig?.value ? parseInt(maxPosConfig.value, 10) : 2000
+              maxPositionSize: maxPosConfig?.value ? parseInt(maxPosConfig.value, 10) : 2000,
+              allTimeHarvested: harvestedFeesAggregate?._sum?.harvestedFees || 0
             }
           }));
         } catch (e) {

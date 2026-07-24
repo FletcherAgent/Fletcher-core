@@ -1,6 +1,7 @@
 import { publicClient, wssClient } from '../services/viem.js';
 import { parseAbiItem, parseAbi } from 'viem';
 import { BlockscoutService } from '../services/blockscout.js';
+import { prisma } from '../core/db.js';
 export class ScoutAgent {
     onSignal;
     blockscout = new BlockscoutService();
@@ -15,44 +16,50 @@ export class ScoutAgent {
      * Start monitoring the blockchain for new tokens.
      */
     async startListening() {
-        console.log("🟢 Scout Agent: Starting monitoring for NOXA Factory & Uniswap V3 PoolCreated...");
+        console.log("🟢 Scout Agent: Starting monitoring for active Factories & Uniswap V3 PoolCreated...");
         const UNISWAP_V3_FACTORY = process.env.UNISWAP_V3_FACTORY_ADDRESS;
-        const NOXA_FACTORY = process.env.NOXA_FACTORY_ADDRESS;
-        if (!UNISWAP_V3_FACTORY || !NOXA_FACTORY) {
-            throw new Error("❌ CRITICAL: UNISWAP_V3_FACTORY_ADDRESS or NOXA_FACTORY_ADDRESS is missing in .env");
+        if (!UNISWAP_V3_FACTORY) {
+            throw new Error("❌ CRITICAL: UNISWAP_V3_FACTORY_ADDRESS is missing in .env");
         }
         try {
-            // Setup listener for NOXA TokenCreated events
-            if (NOXA_FACTORY !== '0x0000000000000000000000000000000000000000') {
+            const activeFactories = await prisma.factoryRegistry.findMany({
+                where: { status: 'active' }
+            });
+            console.log(`[Scout] Found ${activeFactories.length} active factories in registry.`);
+            for (const factory of activeFactories) {
+                if (!factory.address || factory.address === '0x0000000000000000000000000000000000000000')
+                    continue;
+                const address = factory.address;
+                // Setup listener for TokenCreated events
                 wssClient.watchEvent({
-                    address: NOXA_FACTORY,
+                    address,
                     event: parseAbiItem('event TokenCreated(address indexed token)'),
                     onLogs: (logs) => {
                         for (const log of logs) {
-                            this.lastSignalName = `🆕 NOXA TokenCreated (${log.args.token})`;
+                            this.lastSignalName = `🆕 ${factory.name} TokenCreated (${log.args.token})`;
                             console.log(`[Scout] ${this.lastSignalName}`);
                             if (log.args.token)
                                 this.scoreLaunch(log.args.token, false);
                         }
                     },
                     onError: (error) => {
-                        console.error("[Scout] ❌ NOXA TokenCreated watchEvent Error:", error.message);
+                        console.error(`[Scout] ❌ ${factory.name} TokenCreated watchEvent Error:`, error.message);
                     }
                 });
-                // Setup listener for NOXA TokenGraduated events
+                // Setup listener for TokenGraduated events
                 wssClient.watchEvent({
-                    address: NOXA_FACTORY,
+                    address,
                     event: parseAbiItem('event TokenGraduated(address indexed token)'),
                     onLogs: (logs) => {
                         for (const log of logs) {
-                            this.lastSignalName = `🎓 NOXA Graduated (${log.args.token})`;
+                            this.lastSignalName = `🎓 ${factory.name} Graduated (${log.args.token})`;
                             console.log(`[Scout] ${this.lastSignalName}`);
                             if (log.args.token)
                                 this.scoreLaunch(log.args.token, true);
                         }
                     },
                     onError: (error) => {
-                        console.error("[Scout] ❌ NOXA TokenGraduated watchEvent Error:", error.message);
+                        console.error(`[Scout] ❌ ${factory.name} TokenGraduated watchEvent Error:`, error.message);
                     }
                 });
             }
@@ -77,7 +84,7 @@ export class ScoutAgent {
             wssClient.watchBlockNumber({
                 onBlockNumber: (blockNumber) => {
                     // Bypass global console.log hijacker by writing directly to stdout
-                    process.stdout.write(`[Scout ⚡ WSS] Block ${blockNumber} scanned -> NOXA/UNI: Clear.\n`);
+                    process.stdout.write(`[Scout ⚡ WSS] Block ${blockNumber} scanned -> Clear.\n`);
                 },
                 onError: (error) => {
                     console.error(`[Scout] Block scanner error: ${error.message}`);
@@ -96,7 +103,7 @@ export class ScoutAgent {
                         this.pollCounter++;
                         try {
                             const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
-                            await this.bot.api.editMessageText(chatId, this.statusMessageId, `📡 *Scout Agent WSS Dashboard*\n\nStatus: 🟢 Active\nConnection: Real-time (WSS)\nUptime: \`${this.pollCounter * 10}s\`\nLast Check: \`${now} UTC\`\nLatest Signal: \`${this.lastSignalName}\`\n\n_Watching NOXA Factory & Uniswap V3..._`, { parse_mode: 'Markdown' });
+                            await this.bot.api.editMessageText(chatId, this.statusMessageId, `📡 *Scout Agent WSS Dashboard*\n\nStatus: 🟢 Active\nConnection: Real-time (WSS)\nUptime: \`${this.pollCounter * 10}s\`\nLast Check: \`${now} UTC\`\nLatest Signal: \`${this.lastSignalName}\`\n\n_Watching Dynamic Factories & Uniswap V3..._`, { parse_mode: 'Markdown' });
                         }
                         catch (e) {
                             // Ignore rate limits

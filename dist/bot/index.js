@@ -5,6 +5,7 @@ import { connectDb, prisma } from "../core/db.js";
 import { screenPairs } from "../services/gmgn.js";
 import { getUserTier, clearTierCache } from "../services/tierGate.js";
 import { startUserbot } from "./userbot.js";
+import { createSmartAccount, grantSessionKey } from "../services/sessionKey.js";
 dotenv.config();
 const botToken = process.env.TELEGRAM_BOT_TOKEN;
 if (!botToken) {
@@ -575,8 +576,41 @@ bot.command('lpmeta', async (ctx) => {
         const spaceIdx = args.indexOf(' ');
         const key = args.slice(0, spaceIdx).trim();
         const value = args.slice(spaceIdx + 1).trim();
-        if (!key.startsWith('lp.')) {
-            return ctx.reply('❌ Key must start with `lp.`', { parse_mode: 'Markdown' });
+        if (key === 'factory') {
+            const parts = value.split(' ');
+            if (parts.length < 2)
+                return ctx.reply('❌ Format: `/lpmeta factory <name> <address>`', { parse_mode: 'Markdown' });
+            const fName = parts[0];
+            const fAddr = parts[1];
+            try {
+                await prisma.factoryRegistry.upsert({
+                    where: { address: fAddr },
+                    update: { name: fName, status: 'active' },
+                    create: { name: fName, address: fAddr, status: 'active' }
+                });
+                return ctx.reply(`✅ Factory Registered: \`${fName}\` @ \`${fAddr}\``, { parse_mode: 'Markdown' });
+            }
+            catch (e) {
+                return ctx.reply('❌ Failed to register factory.');
+            }
+        }
+        if (key === 'factory_status') {
+            const parts = value.split(' ');
+            if (parts.length < 2)
+                return ctx.reply('❌ Format: `/lpmeta factory_status <name> <active|dead|dormant>`', { parse_mode: 'Markdown' });
+            try {
+                const factory = await prisma.factoryRegistry.findFirst({ where: { name: { equals: parts[0], mode: 'insensitive' } } });
+                if (!factory)
+                    return ctx.reply('❌ Factory not found');
+                await prisma.factoryRegistry.update({ where: { id: factory.id }, data: { status: parts[1] } });
+                return ctx.reply(`✅ Factory \`${factory.name}\` status updated to \`${parts[1]}\``, { parse_mode: 'Markdown' });
+            }
+            catch (e) {
+                return ctx.reply('❌ Failed to update factory status.');
+            }
+        }
+        if (!key.startsWith('lp.') && !key.startsWith('liveness.')) {
+            return ctx.reply('❌ Key must start with `lp.` or `liveness.`', { parse_mode: 'Markdown' });
         }
         try {
             await prisma.systemConfig.upsert({
@@ -593,17 +627,34 @@ bot.command('lpmeta', async (ctx) => {
     }
     // /lpmeta  → show all
     try {
-        const configs = await prisma.systemConfig.findMany({ where: { key: { in: lpKeys } } });
+        const configs = await prisma.systemConfig.findMany({
+            where: { OR: [{ key: { in: lpKeys } }, { key: { startsWith: 'liveness.' } }] }
+        });
         const map = Object.fromEntries(configs.map(c => [c.key, c.value]));
         let msg = '⚙️ *LP Engine MetaConfig*\n\n';
+        // Core LP Keys
         for (const k of lpKeys) {
             msg += `\`${k}\` = \`${map[k] ?? '(not set)'}\`\n`;
         }
-        msg += '\n_Edit: `/lpmeta <key> <value>`_';
+        // Liveness Keys
+        msg += '\n🛡️ *Liveness Gate*\n';
+        const livenessKeys = Object.keys(map).filter(k => k.startsWith('liveness.'));
+        for (const k of livenessKeys) {
+            msg += `\`${k}\` = \`${map[k]}\`\n`;
+        }
+        // Factories
+        const factories = await prisma.factoryRegistry.findMany();
+        if (factories.length > 0) {
+            msg += '\n🏭 *Factories*\n';
+            for (const f of factories) {
+                msg += `\`${f.name}\` (${f.status}) - fails: ${f.consecutiveLivenessFails}\n`;
+            }
+        }
+        msg += '\n_Edit: `/lpmeta <key> <value>`_\n_Factory: `/lpmeta factory <name> <address>`_';
         ctx.reply(msg, { parse_mode: 'Markdown' });
     }
     catch (e) {
-        ctx.reply('❌ Failed to fetch LP config.');
+        ctx.reply('❌ Failed to fetch meta config.');
     }
 });
 /** /harvest — collect fees from all open LP positions */
@@ -635,6 +686,26 @@ bot.command('nightmode', async (ctx) => {
     }
     catch (e) {
         ctx.reply(`❌ Night Mode failed: ${e?.message}`);
+    }
+});
+bot.command('sessionkey', async (ctx) => {
+    ctx.reply('🔑 *Generating Smart Account Session Key (ERC-6900)...*', { parse_mode: 'Markdown' });
+    try {
+        const pk = (process.env.LP_PRIVATE_KEY || process.env.PRIVATE_KEY);
+        if (!pk)
+            throw new Error('PRIVATE_KEY not found in .env');
+        // Create Smart Account Client
+        const client = await createSmartAccount(pk, 3);
+        // Grant Session Key
+        const keyData = await grantSessionKey(client, 'FULL');
+        ctx.reply(`✅ *Session Key Granted!*\n\n` +
+            `Smart Account: \`${client.account.address}\`\n` +
+            `Session Key: \`${keyData.keyAddress}\`\n` +
+            `Mode: FULL\n` +
+            `Expires: ${new Date(keyData.expiry).toLocaleString()}`, { parse_mode: 'Markdown' });
+    }
+    catch (e) {
+        ctx.reply(`❌ Failed to generate Session Key: ${e?.message}`);
     }
 });
 // ─── LP INLINE KEYBOARD CALLBACKS ───────────────────────────────────────────
@@ -729,6 +800,9 @@ async function startApp() {
     try {
         // Connect Database
         await connectDb();
+        // Auto-install Session Key for Zero-Custody architecture
+        const { installSessionKeyPluginAndDelegate } = await import('../services/sessionKey.js');
+        await installSessionKeyPluginAndDelegate(3); // default tier 3
         // Start Fletcher agents (Event Listener, Webhook Server, etc.)
         await orchestrator.startAll();
         // Start Telegram Bot with retry logic for zero-downtime deploys

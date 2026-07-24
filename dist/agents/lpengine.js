@@ -24,7 +24,7 @@ import { logEvent } from '../utils/logger.js';
 import { getDexConfig, getAllDexConfigs } from '../core/dexConfig.js';
 import { IntelligenceLayer } from '../services/intelligence.js';
 import { screenPairs, } from '../services/gmgn.js';
-import { fullRangeTicks, calcNightTickRange, getPoolSlot0, feeToTickSpacing, MIN_TICK, MAX_TICK, getLiquidityForAmounts, tickToSqrtPriceX96 } from '../services/lpMath.js';
+import { fullRangeTicks, calcNightTickRange, getPoolSlot0, getFeeGrowthGlobal, feeToTickSpacing, MIN_TICK, MAX_TICK, getLiquidityForAmounts, tickToSqrtPriceX96 } from '../services/lpMath.js';
 // ─── ABI ─────────────────────────────────────────────────────────────────────
 const NPM_ABI = parseAbi([
     // mint
@@ -101,21 +101,25 @@ export class LPEngineAgent {
         const dexConfig = await getDexConfig('V3');
         const npmAddress = (dexConfig.positionManager || '');
         const factoryAddress = (dexConfig.factoryAddress || '');
-        const wethAddress = (process.env.WETH_ADDRESS || '');
+        const quoteConfig = await prisma.systemConfig.findMany({
+            where: { key: { in: ['tokens.quote.weth'] } }
+        });
+        const quoteMap = Object.fromEntries(quoteConfig.map(c => [c.key, c.value]));
+        const wethAddress = (quoteMap['tokens.quote.weth'] || process.env.WETH_ADDRESS || '');
         if (!npmAddress)
             console.warn('[LPEngine] ⚠️ POSITION_MANAGER not set');
         if (!factoryAddress)
             console.warn('[LPEngine] ⚠️ UNISWAP_V3_FACTORY_ADDRESS not set');
         if (!wethAddress)
-            console.warn('[LPEngine] ⚠️ WETH_ADDRESS not set');
+            console.warn('[LPEngine] ⚠️ WETH_ADDRESS not set (DB nor env)');
         return { npmAddress, factoryAddress, wethAddress };
     }
     // ─── Position Cap Check ─────────────────────────────────────────────────────
     /** Check if new position can be opened (max positions from metaConfig) for the current mode */
     async canOpenNewPosition() {
         const config = await loadLPConfig();
-        const tModeConfig = await prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } });
-        const isDryRun = (tModeConfig?.value ?? 'LIVE') === 'DRY_RUN';
+        const modeCfg = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
+        const isDryRun = (modeCfg?.value || 'LIVE') === 'DRY_RUN';
         const currentMode = isDryRun ? 'DRY_RUN' : 'LIVE';
         const openCount = await prisma.lPPosition.count({
             where: {
@@ -136,29 +140,45 @@ export class LPEngineAgent {
     async resolvePool(token0, token1, preferredFee = 3000) {
         const v3Configs = await getAllDexConfigs('V3');
         const feesToTry = [preferredFee, 500, 3000, 10000].filter((v, i, arr) => arr.indexOf(v) === i);
+        // RHC canonical quote assets: USDG (6 dec, Paxos stablecoin) and WETH (18 dec).
+        // USDC does NOT exist on Robinhood Chain — bridged USDC becomes USDG.
+        const quoteConfig = await prisma.systemConfig.findMany({
+            where: { key: { in: ['tokens.quote.weth', 'tokens.quote.usdg'] } }
+        });
+        const quoteMap = Object.fromEntries(quoteConfig.map(c => [c.key, c.value]));
+        const wethAddress = quoteMap['tokens.quote.weth'] || process.env.WETH_ADDRESS || '';
+        const usdgAddress = quoteMap['tokens.quote.usdg'] || process.env.USDG_ADDRESS || '';
+        // usdcAddress intentionally omitted — not canonical on RHC
+        const quotesToTry = token1 ? [token1] : [
+            usdgAddress,
+            wethAddress,
+        ].filter(Boolean);
+        const uniqueQuotes = Array.from(new Set(quotesToTry.map(a => a.toLowerCase())));
         for (const config of v3Configs) {
             if (!config.factoryAddress || !config.positionManager)
                 continue;
-            for (const fee of feesToTry) {
-                try {
-                    const poolAddr = await publicClient.readContract({
-                        address: config.factoryAddress,
-                        abi: FACTORY_ABI,
-                        functionName: 'getPool',
-                        args: [token0, token1, fee],
-                    });
-                    if (poolAddr && poolAddr !== '0x0000000000000000000000000000000000000000') {
-                        console.log(`[LPEngine] ✅ Pool found: ${poolAddr} on factory ${config.factoryAddress} (fee: ${fee})`);
-                        return {
-                            poolAddress: poolAddr,
-                            feeTier: fee,
-                            factoryAddress: config.factoryAddress,
-                            managerAddress: config.positionManager
-                        };
+            for (const qt of uniqueQuotes) {
+                for (const fee of feesToTry) {
+                    try {
+                        const poolAddr = await publicClient.readContract({
+                            address: config.factoryAddress,
+                            abi: FACTORY_ABI,
+                            functionName: 'getPool',
+                            args: [token0, qt, fee],
+                        });
+                        if (poolAddr && poolAddr !== '0x0000000000000000000000000000000000000000') {
+                            console.log(`[LPEngine] ✅ Pool found: ${poolAddr} on factory ${config.factoryAddress} (quote: ${qt}, fee: ${fee})`);
+                            return {
+                                poolAddress: poolAddr,
+                                feeTier: fee,
+                                factoryAddress: config.factoryAddress,
+                                managerAddress: config.positionManager
+                            };
+                        }
                     }
-                }
-                catch (error) {
-                    console.warn(`[LPEngine] ⚠️ getPool failed on factory ${config.factoryAddress} (fee: ${fee}):`, error);
+                    catch (error) {
+                        console.warn(`[LPEngine] ⚠️ getPool failed on factory ${config.factoryAddress} (fee: ${fee}):`, error);
+                    }
                 }
             }
         }
@@ -275,20 +295,37 @@ export class LPEngineAgent {
             return;
         }
         let selectedCandidate = null;
+        const grokModeConfig = await prisma.systemConfig.findUnique({ where: { key: 'grok.mode' } });
+        const grokMode = grokModeConfig?.value || 'VETO';
         // Evaluate candidates with Grok
         for (const candidate of candidates) {
             console.log(`[LPEngine] 🧠 Asking Grok to analyze sentiment for ${candidate.token.symbol}...`);
             const sentiment = await IntelligenceLayer.analyzeSentiment(candidate.token.symbol, candidate.token.address);
-            console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
-            if (sentiment.label === 'BEARISH' || sentiment.score < config.minGrokScore) {
-                console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < ${config.minGrokScore}`);
-                continue;
+            if (sentiment.label === 'SKIPPED') {
+                console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: SKIPPED - ${sentiment.reasoning}`);
+                candidate.grokScore = undefined;
+                candidate.grokLabel = 'SKIPPED';
             }
-            console.log(`[LPEngine] ✅ Grok APPROVED ${candidate.token.symbol}`);
-            if (this.onNotification)
-                await this.onNotification(`✅ *Grok APPROVED $${candidate.token.symbol}*\nScore: ${sentiment.score}\n_Wait for V3 pool..._`);
-            candidate.grokScore = sentiment.score;
-            candidate.grokLabel = sentiment.label;
+            else if (sentiment.label === 'BEARISH' || (sentiment.score !== null && sentiment.score < config.minGrokScore)) {
+                console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
+                if (grokMode === 'ANNOTATION') {
+                    console.log(`[LPEngine] 📝 Grok flagged ${candidate.token.symbol} as BEARISH, but grok.mode is ANNOTATION. Proceeding.`);
+                    candidate.grokScore = sentiment.score ?? undefined;
+                    candidate.grokLabel = sentiment.label;
+                }
+                else {
+                    console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < ${config.minGrokScore}`);
+                    continue;
+                }
+            }
+            else {
+                console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
+                console.log(`[LPEngine] ✅ Grok APPROVED ${candidate.token.symbol}`);
+                if (this.onNotification)
+                    await this.onNotification(`✅ *Grok APPROVED $${candidate.token.symbol}*\nScore: ${sentiment.score}\n_Wait for V3 pool..._`);
+                candidate.grokScore = sentiment.score ?? undefined;
+                candidate.grokLabel = sentiment.label;
+            }
             selectedCandidate = candidate;
             break; // Found the top candidate that passed Grok
         }
@@ -304,13 +341,17 @@ export class LPEngineAgent {
                 symbol: selectedCandidate.token.symbol,
                 name: selectedCandidate.token.name,
                 poolAddress: selectedCandidate.pool.address.toLowerCase(),
+                sentimentStatus: selectedCandidate.grokLabel,
+                tradingMode: (await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } }))?.value === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE',
+                status: 'WATCHING',
             },
             create: {
                 tokenAddress: selectedCandidate.token.address.toLowerCase(),
                 symbol: selectedCandidate.token.symbol,
                 name: selectedCandidate.token.name,
                 poolAddress: selectedCandidate.pool.address.toLowerCase(),
-                tradingMode: (await prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } }))?.value === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE',
+                sentimentStatus: selectedCandidate.grokLabel,
+                tradingMode: (await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } }))?.value === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE',
             }
         });
         console.log(`[LPEngine] 📋 Added $${selectedCandidate.token.symbol} to Watchlist (Awaiting TA Signal)`);
@@ -336,7 +377,7 @@ export class LPEngineAgent {
             return;
         }
         // Calculate remaining slots for current mode (DRY_RUN and LIVE are counted separately)
-        const tModeConfig = await prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } });
+        const tModeConfig = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
         const currentMode = (tModeConfig?.value ?? 'LIVE') === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE';
         const openCount = await prisma.lPPosition.count({
             where: {
@@ -349,22 +390,39 @@ export class LPEngineAgent {
             return;
         const candidates = await screenPairs();
         const toOpen = [];
+        const grokModeConfig = await prisma.systemConfig.findUnique({ where: { key: 'grok.mode' } });
+        const grokMode = grokModeConfig?.value || 'VETO';
         // Evaluate candidates with Grok until we fill the slots
         for (const candidate of candidates) {
             if (toOpen.length >= Math.min(slotsLeft, 3))
                 break;
             console.log(`[LPEngine] 🧠 Asking Grok to analyze sentiment for ${candidate.token.symbol}...`);
             const sentiment = await IntelligenceLayer.analyzeSentiment(candidate.token.symbol, candidate.token.address);
-            console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
-            if (sentiment.label === 'BEARISH' || sentiment.score < config.minGrokScore) {
-                console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < ${config.minGrokScore}`);
-                continue;
+            if (sentiment.label === 'SKIPPED') {
+                console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: SKIPPED - ${sentiment.reasoning}`);
+                candidate.grokScore = undefined;
+                candidate.grokLabel = 'SKIPPED';
             }
-            console.log(`[LPEngine] ✅ Grok APPROVED ${candidate.token.symbol}`);
-            if (this.onNotification)
-                await this.onNotification(`✅ *Grok APPROVED $${candidate.token.symbol}*\nScore: ${sentiment.score}\n_Wait for V3 pool..._`);
-            candidate.grokScore = sentiment.score;
-            candidate.grokLabel = sentiment.label;
+            else if (sentiment.label === 'BEARISH' || (sentiment.score !== null && sentiment.score < config.minGrokScore)) {
+                console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
+                if (grokMode === 'ANNOTATION') {
+                    console.log(`[LPEngine] 📝 Grok flagged ${candidate.token.symbol} as BEARISH, but grok.mode is ANNOTATION. Proceeding.`);
+                    candidate.grokScore = sentiment.score ?? undefined;
+                    candidate.grokLabel = sentiment.label;
+                }
+                else {
+                    console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < ${config.minGrokScore}`);
+                    continue;
+                }
+            }
+            else {
+                console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
+                console.log(`[LPEngine] ✅ Grok APPROVED ${candidate.token.symbol}`);
+                if (this.onNotification)
+                    await this.onNotification(`✅ *Grok APPROVED $${candidate.token.symbol}*\nScore: ${sentiment.score}\n_Wait for V3 pool..._`);
+                candidate.grokScore = sentiment.score ?? undefined;
+                candidate.grokLabel = sentiment.label;
+            }
             toOpen.push(candidate);
         }
         for (const candidate of toOpen) {
@@ -374,12 +432,16 @@ export class LPEngineAgent {
                     symbol: candidate.token.symbol,
                     name: candidate.token.name,
                     poolAddress: candidate.pool.address.toLowerCase(),
+                    sentimentStatus: candidate.grokLabel,
+                    tradingMode: currentMode,
+                    status: 'WATCHING',
                 },
                 create: {
                     tokenAddress: candidate.token.address.toLowerCase(),
                     symbol: candidate.token.symbol,
                     name: candidate.token.name,
                     poolAddress: candidate.pool.address.toLowerCase(),
+                    sentimentStatus: candidate.grokLabel,
                     tradingMode: currentMode,
                 }
             });
@@ -400,13 +462,16 @@ export class LPEngineAgent {
                 await this.onNotification(`⛔ *Alpha Signal blocked:* ${canOpen.reason}`);
             return;
         }
-        const tModeConfig = await prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } });
-        const currentMode = (tModeConfig?.value ?? 'LIVE') === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE';
+        const tModeConfig = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
+        const isDryRun = (tModeConfig?.value ?? 'LIVE') === 'DRY_RUN';
+        const currentMode = isDryRun ? 'DRY_RUN' : 'LIVE';
         await prisma.watchlist.upsert({
             where: { tokenAddress: token.address.toLowerCase() },
             update: {
                 symbol: token.symbol,
                 name: token.name,
+                tradingMode: currentMode,
+                status: 'WATCHING',
             },
             create: {
                 tokenAddress: token.address.toLowerCase(),
@@ -510,8 +575,42 @@ export class LPEngineAgent {
             tickLower = ticks.tickLower;
             tickUpper = ticks.tickUpper;
         }
+        // Addendum §3, §7: Entry Windows & Regime modifiers
+        const regimeCfg = await prisma.systemConfig.findUnique({ where: { key: 'lp.portfolio.regime' } });
+        const regime = regimeCfg?.value || 'normal';
+        const regimeMultCfg = await prisma.systemConfig.findUnique({ where: { key: 'lp.portfolio.crowdedSizeMult' } });
+        const regimeMult = parseFloat(regimeMultCfg?.value || '0.6');
+        const windowMultCfg = await prisma.systemConfig.findUnique({ where: { key: 'lp.entryWindows.outsideSizeMult' } });
+        const windowMult = parseFloat(windowMultCfg?.value || '0.5');
+        const now = new Date();
+        const jakartaTime = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Jakarta" }));
+        const currentMins = jakartaTime.getHours() * 60 + jakartaTime.getMinutes();
+        const windows = [
+            { start: 9 * 60, end: 10 * 60 + 30 },
+            { start: 18 * 60, end: 19 * 60 + 30 },
+            { start: 22 * 60, end: 23 * 60 + 30 }
+        ];
+        const isInsideWindow = windows.some(w => currentMins >= w.start && currentMins <= w.end);
+        let baseStartSize = isDryRun ? config.startSizeDryRun : config.startSizeLive;
+        let finalStartSize = baseStartSize;
+        let sizingLog = [];
+        if (regime === 'crowded') {
+            finalStartSize *= regimeMult;
+            sizingLog.push(`Regime=Crowded (${regimeMult}x)`);
+        }
+        // Shadow logging window state
+        if (!isInsideWindow) {
+            sizingLog.push(`Out-of-Window (Would size ${windowMult}x)`);
+            // Keeping size untouched for now as per shadow mode rules, only logging.
+        }
+        else {
+            sizingLog.push(`In-Window`);
+        }
+        if (sizingLog.length > 0) {
+            console.log(`[LPEngine] ⚖️ Sizing adjustments for $${token.symbol}: ${sizingLog.join(', ')}. Base: $${baseStartSize} -> Final: $${finalStartSize}`);
+        }
         // Amount calculation: split startSize 50/50 between token0 and token1
-        const currentStartSize = isDryRun ? config.startSizeDryRun : config.startSizeLive;
+        const currentStartSize = finalStartSize;
         const halfUsd = currentStartSize / 2;
         const poolPriceRaw = Number((BigInt(sqrtPriceX96) * 10000000n) / (2n ** 96n)) / 10000000;
         const poolPrice = poolPriceRaw ** 2;
@@ -576,6 +675,13 @@ export class LPEngineAgent {
             `MCap: $${(token.marketCap / 1000).toFixed(0)}K | Vol24h: $${(token.volume24h / 1000).toFixed(0)}K`;
         const defaultModeRecord = await prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } });
         const currentMode = defaultModeRecord?.value || 'MANUAL';
+        let lastFeeGrowth0 = null;
+        let lastFeeGrowth1 = null;
+        if (isDryRun) {
+            const { feeGrowthGlobal0, feeGrowthGlobal1 } = await getFeeGrowthGlobal(poolAddress);
+            lastFeeGrowth0 = feeGrowthGlobal0.toString();
+            lastFeeGrowth1 = feeGrowthGlobal1.toString();
+        }
         // Save PENDING record to DB (or OPEN if DRY RUN simulation)
         const dbRecord = await prisma.lPPosition.create({
             data: {
@@ -597,7 +703,10 @@ export class LPEngineAgent {
                 nightMode: options.nightMode,
                 source: options.source ?? 'SYSTEM',
                 tradingMode: isDryRun ? 'DRY_RUN' : 'LIVE',
+                sentimentStatus: candidate.sentimentStatus || candidate.grokLabel,
                 simulatedLiquidity: isDryRun ? simulatedLiquidity.toString() : null,
+                lastFeeGrowth0,
+                lastFeeGrowth1,
             },
         });
         console.log(`[LPEngine] 📝 LPPosition created in DB: ${dbRecord.id} (PENDING)`);
@@ -637,6 +746,11 @@ export class LPEngineAgent {
                         data: calldata
                     }];
                 const txHash = await buildAndSendLPUserOperation(client, calls);
+                // Save txHash immediately to prevent zombie states if process restarts during wait
+                await prisma.lPPosition.update({
+                    where: { id: dbRecord.id },
+                    data: { txHash }
+                });
                 console.log(`[LPEngine] 📜 Waiting for receipt to extract TokenID...`);
                 const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
                 let realTokenId = dbRecord.tokenId; // Fallback to PENDING-...
@@ -675,6 +789,10 @@ export class LPEngineAgent {
             catch (e) {
                 await logEvent('ERROR', `[LP] Auto-Open Failed`, { error: e.message });
                 console.error(`[LPEngine] Failed to auto-open position: ${e.message}`);
+                await prisma.lPPosition.update({
+                    where: { id: dbRecord.id },
+                    data: { status: 'FAILED' }
+                });
                 proposal.description = `❌ *Auto-Open Failed*\n` + proposal.description + `\nError: ${e.message}`;
                 if (this.onProposal)
                     await this.onProposal(proposal);

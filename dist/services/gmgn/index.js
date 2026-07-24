@@ -1,7 +1,11 @@
 import { getTrendingPairs, getTokenInfo, fetchTopTraders } from './endpoints.js';
 import { publicClient } from '../viem.js';
 import { getDexConfig } from '../../core/dexConfig.js';
+import { checkLiveness } from '../../agents/liveness.js';
 import { parseAbi } from 'viem';
+import { prisma } from '../../core/db.js';
+import { getTrailingVolume5m } from '../volume.js';
+import { IntelligenceLayer } from '../intelligence.js';
 const FACTORY_ABI = parseAbi([
     'function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address pool)'
 ]);
@@ -22,6 +26,15 @@ export { getTrendingPairs, getTokenInfo, fetchTopTraders };
 export async function screenPairs(criteria) {
     const config = criteria ?? (await loadScreeningCriteria());
     console.log('[MarketData] 🔍 Screening pairs via GMGN v2 (Anti-Detect)...');
+    // RHC canonical quote assets: USDG (6 decimals, Paxos) and WETH (18 decimals).
+    // NOTE: USDC does NOT exist on Robinhood Chain — all USDC is converted to USDG at bridge.
+    const quoteConfig = await prisma.systemConfig.findMany({
+        where: { key: { in: ['tokens.quote.weth', 'tokens.quote.usdg'] } }
+    });
+    const quoteMap = Object.fromEntries(quoteConfig.map(c => [c.key, c.value]));
+    const wethAddress = quoteMap['tokens.quote.weth'] || process.env.WETH_ADDRESS || '';
+    const usdgAddress = quoteMap['tokens.quote.usdg'] || process.env.USDG_ADDRESS || '';
+    // usdcAddress intentionally omitted — not canonical on RHC
     // 1. Get initial broad list from GMGN Trending
     const gtTokens = await getTrendingPairs(150);
     // Get factory address
@@ -43,12 +56,17 @@ export async function screenPairs(criteria) {
             reasons.push(`vol24h ${token.volume24h.toFixed(0)} < ${config.minVol24h}`);
         if (token.pairCreatedAt) {
             const ageHours = (Date.now() - token.pairCreatedAt) / (1000 * 60 * 60);
-            if (ageHours < config.minAgeHours)
+            if (ageHours < config.minAgeHours) {
                 reasons.push(`age ${ageHours.toFixed(1)}h < ${config.minAgeHours}h`);
+            }
         }
         // 3. Category filter
         if (!config.categories.some(c => token.category?.toLowerCase().includes(c.toLowerCase()))) {
-            reasons.push(`category "${token.category}" not in whitelist`);
+            // Allow virtuals and agent-token categories (Addendum §4)
+            const isAgentMeta = token.category?.toLowerCase().includes('virtuals') || token.category?.toLowerCase().includes('agent-token');
+            if (!isAgentMeta) {
+                reasons.push(`category "${token.category}" not in whitelist`);
+            }
         }
         if (config.blacklist.some(b => token.launchPad?.toLowerCase().includes(b.toLowerCase())))
             reasons.push(`launchpad blacklisted`);
@@ -58,48 +76,154 @@ export async function screenPairs(criteria) {
         if (token.buyTax > 5 || token.sellTax > 5)
             reasons.push(`high tax: buy=${token.buyTax}% sell=${token.sellTax}%`);
         // if (!token.isVerified) reasons.push('contract not verified');
-        if (reasons.length > 0) {
+        // Lane A and B Shadow Mode check
+        const hardReasons = reasons.filter(r => r.includes('honeypot') || r.includes('tax') || r.includes('category') || r.includes('blacklisted'));
+        let shadowLaneA = false;
+        let shadowLaneB = false;
+        if (hardReasons.length === 0) {
+            if (reasons.length === 1 && reasons[0].startsWith('age')) {
+                shadowLaneA = true;
+            }
+            else {
+                if (token.athPrice && token.priceUsd && token.priceUsd > 0 && token.athPrice > 0) {
+                    const athMcap = token.marketCap * (token.athPrice / token.priceUsd);
+                    const dd = (token.athPrice - token.priceUsd) / token.athPrice;
+                    if (athMcap >= 1000000 && athMcap <= 2000000 && dd >= 0.45 && dd <= 0.60) {
+                        shadowLaneB = true;
+                    }
+                }
+            }
+        }
+        if (!shadowLaneA && !shadowLaneB && reasons.length > 0) {
             console.log(`[MarketData] ❌ ${token.symbol} REJECTED: ${reasons.join('; ')}`);
             continue;
         }
         // Fetch real pool address and fee tier from Factory
-        const quoteTokenAddress = token.quoteToken || process.env.WETH_ADDRESS || '';
-        let realPoolAddress = '';
-        let bestFeeTier = 3000;
+        // Priority order: USDG → WETH (USDC not canonical on RHC)
+        const quoteTokensToTry = [
+            usdgAddress,
+            wethAddress,
+            token.quoteToken
+        ].filter(Boolean);
+        const uniqueQuoteTokens = Array.from(new Set(quoteTokensToTry.map(a => a.toLowerCase())));
+        const discoveredPools = [];
         if (factoryAddress) {
             // Try standard fee tiers
             const tiers = [10000, 3000, 500, 100];
-            for (const tier of tiers) {
-                try {
-                    const pAddr = await publicClient.readContract({
-                        address: factoryAddress,
-                        abi: FACTORY_ABI,
-                        functionName: 'getPool',
-                        args: [token.address, quoteTokenAddress, tier],
-                    });
-                    if (pAddr && pAddr.toLowerCase() !== '0x0000000000000000000000000000000000000000') {
-                        realPoolAddress = pAddr;
-                        bestFeeTier = tier;
-                        // Stop at first valid pool (or we could fetch liquidity for all and pick highest, but this is simpler)
-                        break;
+            for (const qt of uniqueQuoteTokens) {
+                for (const tier of tiers) {
+                    try {
+                        const pAddr = await publicClient.readContract({
+                            address: factoryAddress,
+                            abi: FACTORY_ABI,
+                            functionName: 'getPool',
+                            args: [token.address, qt, tier],
+                        });
+                        if (pAddr && pAddr.toLowerCase() !== '0x0000000000000000000000000000000000000000') {
+                            const feeTierPct = tier / 1000000;
+                            const activeLiquidity = token.liquidity || 1;
+                            const estAPRRaw = ((token.volume24h * feeTierPct) / activeLiquidity) * 365;
+                            discoveredPools.push({
+                                address: pAddr,
+                                quoteToken: qt,
+                                feeTier: tier,
+                                estAPRRaw: estAPRRaw,
+                                protocol: 'v3'
+                            });
+                        }
                     }
-                }
-                catch (err) {
-                    // Ignore call errors
+                    catch (err) {
+                        // Ignore call errors
+                    }
                 }
             }
         }
-        if (!realPoolAddress) {
+        if (discoveredPools.length === 0) {
             console.log(`[MarketData] ❌ ${token.symbol} REJECTED: No on-chain pool found`);
             continue;
         }
-        const feeTierPct = bestFeeTier / 1000000; // e.g. 3000 = 0.003
-        const activeLiquidity = token.liquidity || 1;
-        const estimatedFeeAPR = ((token.volume24h * feeTierPct) / activeLiquidity) * 365;
-        // Safety score constraint (max 100 on safety, but we now rank by APR)
-        // We will use estimatedFeeAPR as the primary score.
-        const score = Math.round(estimatedFeeAPR * 100) / 100; // Store as raw APR percentage
-        console.log(`[MarketData] ✅ ${token.symbol} PASSED — estAPR: ${score}%, mcap: $${(token.marketCap / 1000).toFixed(0)}K, vol: $${(token.volume24h / 1000).toFixed(0)}K`);
+        // Sort by estAPR descending
+        discoveredPools.sort((a, b) => b.estAPRRaw - a.estAPRRaw);
+        const bestPool = discoveredPools[0];
+        const quoteAssetSymbol = bestPool.quoteToken.toLowerCase() === usdgAddress.toLowerCase() && usdgAddress ? 'USDG'
+            : bestPool.quoteToken.toLowerCase() === wethAddress.toLowerCase() && wethAddress ? 'WETH'
+                : 'Unknown (non-canonical)';
+        const bestPoolAprPct = bestPool.estAPRRaw * 100;
+        console.log(`[MarketData] ${token.symbol} | best pool: ${bestPool.protocol} · ${quoteAssetSymbol} · fee ${(bestPool.feeTier / 10000).toFixed(2)}% · estAPR ${bestPoolAprPct.toLocaleString('en-US', { maximumFractionDigits: 0 })}% (dari ${discoveredPools.length} pool ditemukan)`);
+        if (bestPoolAprPct < 300) {
+            console.log(`[MarketData] ⚠️ Weak candidate ${token.symbol} (best APR ${bestPoolAprPct.toFixed(0)}% < 300%). Skipping.`);
+            continue;
+        }
+        const quoteTokenAddress = bestPool.quoteToken;
+        let realPoolAddress = bestPool.address;
+        let bestFeeTier = bestPool.feeTier;
+        if (shadowLaneA) {
+            const regimeCfg = await prisma.systemConfig.findUnique({ where: { key: 'lp.portfolio.regime' } });
+            if (regimeCfg?.value === 'crowded') {
+                console.log(`[Shadow Mode] 👻 Lane A is DISABLED because regime is CROWDED.`);
+                // continue;
+            }
+            else {
+                const wethPriceInfo = await getTokenInfo(wethAddress);
+                const wethPrice = wethPriceInfo?.priceUsd || 0;
+                const vol5m = await getTrailingVolume5m(realPoolAddress, token.address, quoteTokenAddress, wethPrice);
+                const minVolCfg = await prisma.systemConfig.findUnique({ where: { key: 'lp.lanes.newPair.minVol5mUsd' } });
+                const minVol = Number(minVolCfg?.value || 300000);
+                if (vol5m >= minVol) {
+                    console.log(`[Shadow Mode] 👻 Lane A WOULD HAVE ACCEPTED $${token.symbol} (5m Vol: $${vol5m.toFixed(0)} >= $${minVol}) despite age rejection.`);
+                }
+                else {
+                    console.log(`[MarketData] ❌ ${token.symbol} REJECTED: ${reasons.join('; ')} (Lane A failed: 5m Vol $${vol5m.toFixed(0)} < $${minVol})`);
+                }
+            }
+            continue; // Shadow mode -> always reject for now.
+        }
+        if (shadowLaneB) {
+            const liveness = await checkLiveness(token.address, token, realPoolAddress);
+            if (liveness.alive) {
+                console.log(`[Shadow Mode] 👻 Lane B (Dip Catcher) WOULD HAVE ACCEPTED $${token.symbol} despite rejections: ${reasons.join('; ')}.`);
+            }
+            else {
+                console.log(`[MarketData] ❌ ${token.symbol} REJECTED: ${reasons.join('; ')} (Lane B failed Liveness: ${liveness.failReason})`);
+            }
+            continue; // Shadow mode -> always reject for now.
+        }
+        // NEW: Liveness Gate
+        const liveness = await checkLiveness(token.address, token, realPoolAddress);
+        if (!liveness.alive) {
+            console.log(`[MarketData] ❌ [Liveness] REJECT $${token.symbol} — ${liveness.failedCheck}: ${liveness.failReason}`);
+            continue;
+        }
+        // FUD CHECK FOR TECH TOKENS
+        let sentimentStatus = 'SKIPPED';
+        const isTechOrUtility = ['tech', 'utility', 'virtuals', 'agent-token'].some(cat => token.category?.toLowerCase().includes(cat));
+        if (isTechOrUtility) {
+            const { fudScore, skipped } = await IntelligenceLayer.analyzeFUD(token.symbol, token.address);
+            if (!skipped) {
+                const rejectAboveCfg = await prisma.systemConfig.findUnique({ where: { key: 'lp.fudCheck.rejectAbove' } });
+                const rejectAbove = parseFloat(rejectAboveCfg?.value || '60');
+                const grokModeCfg = await prisma.systemConfig.findUnique({ where: { key: 'grok.mode' } });
+                const grokMode = grokModeCfg?.value || 'VETO';
+                if (fudScore > rejectAbove) {
+                    if (grokMode === 'ANNOTATION') {
+                        console.log(`[MarketData] 📝 FUD Score is ${fudScore} (> ${rejectAbove}) for $${token.symbol}, but grok.mode is ANNOTATION. Proceeding.`);
+                        sentimentStatus = 'FAIL'; // Failed score, but we proceed
+                    }
+                    else {
+                        console.log(`[Shadow Mode] 👻 FUD Check WOULD HAVE REJECTED $${token.symbol} (Score: ${fudScore} > ${rejectAbove})`);
+                        sentimentStatus = 'FAIL';
+                        // Shadow mode -> Do not actually continue/reject, just log for now!
+                        // continue;
+                    }
+                }
+                else {
+                    console.log(`[MarketData] ✅ FUD Check passed for $${token.symbol} (Score: ${fudScore} <= ${rejectAbove})`);
+                    sentimentStatus = 'PASS';
+                }
+            }
+        }
+        const score = Math.round(bestPool.estAPRRaw * 100) / 100; // Store as raw APR ratio
+        console.log(`[MarketData] ✅ ${token.symbol} PASSED — estAPR: ${(score * 100).toLocaleString('en-US', { maximumFractionDigits: 0 })}%, mcap: $${(token.marketCap / 1000).toFixed(0)}K, vol: $${(token.volume24h / 1000).toFixed(0)}K`);
         const pool = {
             address: realPoolAddress,
             token0: token.address,
@@ -109,26 +233,24 @@ export async function screenPairs(criteria) {
             volume24h: token.volume24h,
             volTvlRatio: token.liquidity > 0 ? token.volume24h / token.liquidity : 0,
         };
-        passed.push({ pool, token, score });
+        passed.push({ pool, token, score, sentimentStatus });
         // Delay to respect rate limit (GMGN client handles this if needed, but a small delay is good)
         await new Promise(r => setTimeout(r, 250));
     }
-    // Quote Asset Priority
+    // Quote Asset Priority: USDG first (main stablecoin on RHC), then WETH
     const getQuotePriority = (address) => {
         if (!address)
             return 0;
         const addr = address.toLowerCase();
-        if (addr === process.env.USDG_ADDRESS?.toLowerCase())
-            return 3;
-        if (addr === process.env.WETH_ADDRESS?.toLowerCase())
+        if (addr === usdgAddress.toLowerCase() && usdgAddress)
             return 2;
-        if (addr === process.env.USDC_ADDRESS?.toLowerCase())
+        if (addr === wethAddress.toLowerCase() && wethAddress)
             return 1;
-        return 0; // Other quote assets
+        return 0; // Other (non-canonical) quote assets
     };
     passed.sort((a, b) => {
-        const priorityA = getQuotePriority(a.token.quoteToken);
-        const priorityB = getQuotePriority(b.token.quoteToken);
+        const priorityA = getQuotePriority(a.pool.token1);
+        const priorityB = getQuotePriority(b.pool.token1);
         if (priorityA !== priorityB) {
             return priorityB - priorityA; // Higher priority first
         }

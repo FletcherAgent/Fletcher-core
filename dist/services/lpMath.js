@@ -168,6 +168,31 @@ export async function getNPMPosition(tokenId, managerAddress) {
         tokensOwed1: r[11],
     };
 }
+/**
+ * Fetch current feeGrowthGlobal from the pool.
+ */
+export async function getFeeGrowthGlobal(poolAddress) {
+    try {
+        const poolAddr = poolAddress;
+        const [fg0, fg1] = await Promise.all([
+            publicClient.readContract({
+                address: poolAddr,
+                abi: POOL_ABI,
+                functionName: 'feeGrowthGlobal0X128'
+            }),
+            publicClient.readContract({
+                address: poolAddr,
+                abi: POOL_ABI,
+                functionName: 'feeGrowthGlobal1X128'
+            })
+        ]);
+        return { feeGrowthGlobal0: fg0, feeGrowthGlobal1: fg1 };
+    }
+    catch (err) {
+        console.error(`Error fetching feeGrowthGlobal for ${poolAddress}:`, err);
+        return { feeGrowthGlobal0: 0n, feeGrowthGlobal1: 0n };
+    }
+}
 // ─── Range Status ─────────────────────────────────────────────────────────────
 /**
  * Check if the position is still in-range based on the current tick.

@@ -1,7 +1,7 @@
 import { parseAbi, parseEther } from 'viem';
 import { prisma } from '../core/db.js';
 import { detectBestFee } from '../services/poolFeeDetector.js';
-import { calcAnnualizedFeeRate, calcIL, getNPMPosition, checkPositionRange, isPastDayCloseTime, tickToPrice } from '../services/lpMath.js';
+import { calcAnnualizedFeeRate, calcIL, getNPMPosition, checkPositionRange, isPastDayCloseTime, tickToPrice, getFeeGrowthGlobal } from '../services/lpMath.js';
 import { getTokenInfo } from '../services/gmgn/index.js';
 import { fetchOHLCV, calculateIndicators } from '../services/ohlcv.js';
 import { logEvent } from '../utils/logger.js';
@@ -70,6 +70,17 @@ export class GuardianAgent {
             const maxIlHours = parseInt(config?.value ?? '4');
             const capConfig = await prisma.systemConfig.findUnique({ where: { key: 'lp.positionCap' } });
             const positionCap = parseFloat(capConfig?.value ?? '2000');
+            // Fetch dynamic WETH price
+            const globalWethAddr = (process.env.WETH_ADDRESS ?? '').toLowerCase();
+            let wethPrice = 3500;
+            try {
+                const wethInfo = await getTokenInfo(globalWethAddr);
+                if (wethInfo?.priceUsd)
+                    wethPrice = wethInfo.priceUsd;
+            }
+            catch (e) {
+                console.warn(`[Guardian] ⚠️ Failed to fetch WETH price, falling back to $3500`);
+            }
             // (Simulate token price from Uniswap V3 current tick)
             let rangeStatus;
             try {
@@ -80,12 +91,10 @@ export class GuardianAgent {
                     // Fallback gracefully for simulated V2/unsupported pools
                     let mockTick = pos.entryTick ?? 0;
                     try {
-                        const wethAddr = (process.env.WETH_ADDRESS ?? '').toLowerCase();
-                        const tokenAddress = pos.token0.toLowerCase() === wethAddr ? pos.token1 : pos.token0;
+                        const tokenAddress = pos.token0.toLowerCase() === globalWethAddr ? pos.token1 : pos.token0;
                         const tokenInfo = await getTokenInfo(tokenAddress);
                         if (tokenInfo && tokenInfo.priceUsd) {
                             const isToken0 = BigInt(pos.token0) < BigInt(process.env.WETH_ADDRESS ?? '0');
-                            const wethPrice = 3500;
                             const priceRatio = isToken0
                                 ? tokenInfo.priceUsd / wethPrice
                                 : wethPrice / tokenInfo.priceUsd;
@@ -96,12 +105,16 @@ export class GuardianAgent {
                         console.warn(`[Guardian] ⚠️ Failed to fetch live price for SIM IL calc:`, e.message);
                         // mockTick remains entryTick
                     }
+                    const distanceLower = Math.abs(mockTick - pos.tickLower);
+                    const distanceUpper = Math.abs(pos.tickUpper - mockTick);
+                    const rangeWidth = pos.tickUpper - pos.tickLower;
+                    const distanceToBoundaryPct = rangeWidth > 0 ? (Math.min(distanceLower, distanceUpper) / rangeWidth) * 100 : 0;
                     rangeStatus = {
                         inRange: mockTick >= pos.tickLower && mockTick <= pos.tickUpper,
                         currentTick: mockTick,
                         tickLower: pos.tickLower,
                         tickUpper: pos.tickUpper,
-                        distanceToBoundaryPct: 50
+                        distanceToBoundaryPct
                     };
                 }
                 else {
@@ -110,9 +123,7 @@ export class GuardianAgent {
             }
             const currentPrice = tickToPrice(rangeStatus.currentTick);
             // 2. Calc IL
-            // Simplification: WETH base price = 3500
             const isToken0 = BigInt(pos.token0) < BigInt(process.env.WETH_ADDRESS ?? '0');
-            const wethPrice = 3500;
             const entryPriceBase = tickToPrice(pos.entryTick ?? rangeStatus.currentTick);
             const entryP0 = isToken0 ? wethPrice * entryPriceBase : wethPrice;
             const entryP1 = isToken0 ? wethPrice : wethPrice / entryPriceBase;
@@ -128,29 +139,59 @@ export class GuardianAgent {
             let feesUsd = 0;
             if (pos.tokenId.startsWith('SIM-') || pos.tradingMode === 'DRY_RUN') {
                 try {
-                    // Use case-insensitive comparison to avoid mismatch (e.g. 0xABC vs 0xabc)
-                    const wethAddr = (process.env.WETH_ADDRESS ?? '').toLowerCase();
-                    const tokenAddress = pos.token0.toLowerCase() === wethAddr ? pos.token1 : pos.token0;
-                    const tokenInfo = await getTokenInfo(tokenAddress);
-                    if (tokenInfo) {
-                        const poolLiquidityUsd = tokenInfo.liquidity || 500000;
-                        const ourShare = pos.entryValue / poolLiquidityUsd;
-                        const volume = tokenInfo.volume24h;
-                        const feeTierPerc = pos.feeTier / 1_000_000;
-                        const hourlyFee = (volume / 24) * feeTierPerc * ourShare;
-                        const hoursOpen = Math.max(0.1, (Date.now() - pos.createdAt.getTime()) / 3600000);
-                        let cumulativeFees = hourlyFee * hoursOpen;
-                        cumulativeFees *= (pos.nightMode ? 5 : 1);
-                        feesUsd = Math.max(0, cumulativeFees - pos.harvestedFees);
-                        // Debug log to diagnose zero-fee issues
-                        console.log(`[Guardian] 🔍 SIM fee debug | token=${tokenAddress.slice(0, 10)} vol24h=$${volume.toFixed(0)} liq=$${poolLiquidityUsd.toFixed(0)} share=${(ourShare * 100).toFixed(4)}% hrFee=$${hourlyFee.toFixed(4)} hrs=${hoursOpen.toFixed(1)} → fees=$${feesUsd.toFixed(4)}`);
+                    if (pos.lastFeeGrowth0 && pos.lastFeeGrowth1 && pos.simulatedLiquidity) {
+                        // Fetch real current feeGrowthGlobal from on-chain pool
+                        const { feeGrowthGlobal0, feeGrowthGlobal1 } = await getFeeGrowthGlobal(pos.pool);
+                        const delta0 = feeGrowthGlobal0 - BigInt(pos.lastFeeGrowth0);
+                        const delta1 = feeGrowthGlobal1 - BigInt(pos.lastFeeGrowth1);
+                        const liq = BigInt(pos.simulatedLiquidity);
+                        const Q128 = 2n ** 128n;
+                        // Approximation: assume fee is earned proportionally to global growth 
+                        // (technically accurate if we were in range the whole time)
+                        const fee0Str = ((delta0 * liq) / Q128).toString();
+                        const fee1Str = ((delta1 * liq) / Q128).toString();
+                        const fee0Eth = Number(fee0Str) / 1e18;
+                        const fee1Eth = Number(fee1Str) / 1e18;
+                        // Convert to USD using WETH price
+                        const tokenAddress = pos.token0.toLowerCase() === globalWethAddr ? pos.token1 : pos.token0;
+                        const tokenInfo = await getTokenInfo(tokenAddress);
+                        const tokenPrice = tokenInfo?.priceUsd || 0;
+                        let usd0 = 0;
+                        let usd1 = 0;
+                        if (isToken0) {
+                            usd0 = fee0Eth * tokenPrice;
+                            usd1 = fee1Eth * wethPrice;
+                        }
+                        else {
+                            usd0 = fee0Eth * wethPrice;
+                            usd1 = fee1Eth * tokenPrice;
+                        }
+                        feesUsd = usd0 + usd1;
+                        // Update lastFeeGrowth to current so we only capture delta next time, 
+                        // OR just accumulate total from entry. If we just calculate from entry, 
+                        // the result is the total fees earned since opening.
+                        // Since feesUsd represents TOTAL fees, we don't update lastFeeGrowth here,
+                        // we just keep measuring from the entry values!
+                        console.log(`[Guardian] 🔍 SIM fee debug | token=${tokenAddress.slice(0, 10)} fee0=${fee0Eth.toFixed(6)} fee1=${fee1Eth.toFixed(6)} → fees=$${feesUsd.toFixed(4)}`);
                     }
                     else {
-                        console.warn(`[Guardian] ⚠️ getTokenInfo returned null for ${tokenAddress} — fee estimation skipped`);
+                        // Fallback to old math if missing DB records (legacy positions)
+                        const tokenAddress = pos.token0.toLowerCase() === globalWethAddr ? pos.token1 : pos.token0;
+                        const tokenInfo = await getTokenInfo(tokenAddress);
+                        if (tokenInfo) {
+                            const poolLiquidityUsd = tokenInfo.liquidity || 500000;
+                            const ourShare = pos.entryValue / poolLiquidityUsd;
+                            const volume = tokenInfo.volume24h;
+                            const feeTierPerc = pos.feeTier / 1_000_000;
+                            const hourlyFee = (volume / 24) * feeTierPerc * ourShare;
+                            const hoursOpen = Math.max(0.1, (Date.now() - pos.createdAt.getTime()) / 3600000);
+                            let cumulativeFees = hourlyFee * hoursOpen;
+                            feesUsd = Math.max(0, cumulativeFees - pos.harvestedFees);
+                        }
                     }
                 }
                 catch (e) {
-                    console.warn(`[Guardian] Failed to estimate fees for SIM position ${pos.id}`);
+                    console.warn(`[Guardian] Failed to estimate real fees for SIM position ${pos.id}`);
                 }
             }
             else {
@@ -172,13 +213,32 @@ export class GuardianAgent {
             // So lower bound is `tickUpper`. Breach happens if `currentTick > tickUpper`.
             const wethAddr = (process.env.WETH_ADDRESS ?? '').toLowerCase();
             const isAltcoinToken0 = pos.token0.toLowerCase() !== wethAddr;
-            if (isAltcoinToken0 && rangeStatus.currentTick < pos.tickLower) {
-                exitRule = 'K2';
-                exitReason = `K2 (Range Breach): Price exited lower bound (Tick ${rangeStatus.currentTick} < ${pos.tickLower})`;
+            // OOR_LEFT_CUT (Addendum §6): Exit immediately if out-of-range left and price <= entryPrice * 0.90
+            const altEntryPrice = isAltcoinToken0 ? entryP0 : entryP1;
+            const altCurrentPrice = isAltcoinToken0 ? curP0 : curP1;
+            // Fetch dynamic cut threshold from config
+            const oorCutCfg = await prisma.systemConfig.findUnique({ where: { key: 'lp.guardian.oorLeftCutAtPnlPct' } });
+            const oorCutPct = parseFloat(oorCutCfg?.value || '-10');
+            const priceDropPct = altEntryPrice > 0 ? ((altCurrentPrice - altEntryPrice) / altEntryPrice) * 100 : 0;
+            const isOorLeft = isAltcoinToken0 ? (rangeStatus.currentTick < pos.tickLower) : (rangeStatus.currentTick > pos.tickUpper);
+            if (isOorLeft && priceDropPct <= oorCutPct) {
+                exitRule = 'OOR_LEFT_CUT';
+                exitReason = `OOR_LEFT_CUT: Price dropped ${priceDropPct.toFixed(1)}% (Threshold: ${oorCutPct}%) and went out of range left.`;
             }
-            else if (!isAltcoinToken0 && rangeStatus.currentTick > pos.tickUpper) {
-                exitRule = 'K2';
-                exitReason = `K2 (Range Breach): Price exited lower bound (Tick ${rangeStatus.currentTick} > ${pos.tickUpper})`;
+            // K2: Range Breach (spot price exits LOWER bound of the LP range)
+            // If Token0 is altcoin, price is quote/alt, tick goes DOWN when price drops.
+            // So lower bound is `tickLower`. Breach happens if `currentTick < tickLower`.
+            // If Token1 is altcoin, price is alt/quote, tick goes UP when price drops.
+            // So lower bound is `tickUpper`. Breach happens if `currentTick > tickUpper`.
+            if (!exitReason) {
+                if (isAltcoinToken0 && rangeStatus.currentTick < pos.tickLower) {
+                    exitRule = 'K2';
+                    exitReason = `K2 (Range Breach): Price exited lower bound (Tick ${rangeStatus.currentTick} < ${pos.tickLower})`;
+                }
+                else if (!isAltcoinToken0 && rangeStatus.currentTick > pos.tickUpper) {
+                    exitRule = 'K2';
+                    exitReason = `K2 (Range Breach): Price exited lower bound (Tick ${rangeStatus.currentTick} > ${pos.tickUpper})`;
+                }
             }
             if (!exitReason && ta && candles.length >= 4) {
                 // E1: Profit Taking 1
@@ -227,6 +287,34 @@ export class GuardianAgent {
                     }
                 }
             }
+            // DEAD_POOL: Fee Floor & Liveness Gate Re-check
+            if (!exitReason) {
+                const wethAddr = (process.env.WETH_ADDRESS ?? '').toLowerCase();
+                const tAddress = pos.token0.toLowerCase() === wethAddr ? pos.token1 : pos.token0;
+                const tokenInfo = await getTokenInfo(tAddress);
+                if (tokenInfo) {
+                    // Rule from Patch Brief Section 4: Absolute floor
+                    if (hoursOpen >= 4) {
+                        const configFee = await prisma.systemConfig.findUnique({ where: { key: 'deadPoolExit.feeFloorUsd4h' } });
+                        const configSwaps = await prisma.systemConfig.findUnique({ where: { key: 'deadPoolExit.minPoolSwaps4h' } });
+                        const feeFloor = parseFloat(configFee?.value || '5');
+                        const swapsFloor = parseInt(configSwaps?.value || '20', 10);
+                        const estimatedSwaps4h = tokenInfo.swaps1h * 4;
+                        if (feesUsd < feeFloor && estimatedSwaps4h < swapsFloor) {
+                            exitRule = 'DEAD_POOL';
+                            exitReason = `DEAD_POOL (Fee Floor): Fees < $${feeFloor} ($${feesUsd.toFixed(2)}) and est 4h swaps < ${swapsFloor} (${estimatedSwaps4h}) after 4+ hours`;
+                        }
+                    }
+                    if (!exitReason) {
+                        const { checkLiveness } = await import('./liveness.js');
+                        const liveness = await checkLiveness(tAddress, tokenInfo, pos.pool);
+                        if (!liveness.alive) {
+                            exitRule = 'DEAD_POOL';
+                            exitReason = `DEAD_POOL (Liveness Gate): ${liveness.failedCheck} - ${liveness.failReason}`;
+                        }
+                    }
+                }
+            }
             // Update DB counters
             const newFees = Math.max(pos.feesCollected || 0, feesUsd);
             await prisma.lPPosition.update({
@@ -240,15 +328,15 @@ export class GuardianAgent {
                 console.log(`[Guardian] 🚨 LP ${pos.id.slice(0, 8)} EXIT TRIGGERED: ${exitReason}`);
                 await logEvent('WARN', `[LP] Guardian triggered EXIT: ${exitReason}`, { positionId: pos.id });
                 // Add to TokenBlacklist
-                if (ta && ta.highestClose) {
+                if (ta && ta.windowHighClose) {
                     const wethAddr = (process.env.WETH_ADDRESS ?? '').toLowerCase();
                     const tAddress = pos.token0.toLowerCase() === wethAddr ? pos.token1 : pos.token0;
                     await prisma.tokenBlacklist.upsert({
                         where: { tokenAddress: tAddress },
-                        update: { athPriceAtExit: ta.highestClose, reason: exitRule || 'MANUAL' },
-                        create: { tokenAddress: tAddress, athPriceAtExit: ta.highestClose, reason: exitRule || 'MANUAL' }
+                        update: { athPriceAtExit: ta.windowHighClose, reason: exitRule || 'MANUAL' },
+                        create: { tokenAddress: tAddress, athPriceAtExit: ta.windowHighClose, reason: exitRule || 'MANUAL' }
                     });
-                    console.log(`[Guardian] 🚫 Added ${tAddress} to Blacklist (ATH: ${ta.highestClose})`);
+                    console.log(`[Guardian] 🚫 Added ${tAddress} to Blacklist (ATH: ${ta.windowHighClose})`);
                 }
                 if (this.onLPCloseSignal)
                     this.onLPCloseSignal(pos, exitReason);

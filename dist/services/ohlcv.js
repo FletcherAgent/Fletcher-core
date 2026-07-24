@@ -1,13 +1,16 @@
 import { gotScraping as got } from 'got-scraping';
 import { RSI, MACD, BollingerBands } from 'technicalindicators';
-export async function fetchOHLCV(poolAddress, limit = 100) {
+export async function fetchOHLCV(poolAddress, limit = 100, aggregate = 15) {
     try {
-        const url = `https://api.geckoterminal.com/api/v2/networks/robinhood/pools/${poolAddress}/ohlcv/minute?aggregate=15&limit=${limit}`;
-        const res = await got.get(url, { responseType: 'json' }).json();
-        if (!res?.data?.attributes?.ohlcv_list)
+        const url = `https://api.geckoterminal.com/api/v2/networks/robinhood/pools/${poolAddress}/ohlcv/minute?aggregate=${aggregate}&limit=${limit}`;
+        const response = await got.get(url, { responseType: 'json' });
+        const res = response.body;
+        const list = res?.data?.attributes?.ohlcv_list || [];
+        const rawCandles = list.length;
+        console.log(`[OHLCV] pool: ${poolAddress} | http: ${response.statusCode} | raw candles: ${rawCandles}`);
+        if (rawCandles === 0)
             return [];
         // API returns [timestamp, open, high, low, close, volume]
-        const list = res.data.attributes.ohlcv_list;
         // GeckoTerminal returns newest first. We need oldest first for indicators.
         const reversed = list.reverse();
         return reversed.map((c) => ({
@@ -20,12 +23,13 @@ export async function fetchOHLCV(poolAddress, limit = 100) {
         }));
     }
     catch (error) {
-        console.error(`[OHLCV] Failed to fetch for ${poolAddress}:`, error.message);
+        const statusCode = error.response?.statusCode || 'Network/Other';
+        console.log(`[OHLCV] pool: ${poolAddress} | http: ${statusCode} | raw candles: 0 (${error.message})`);
         return [];
     }
 }
 export function calculateIndicators(candles) {
-    if (candles.length < 50)
+    if (candles.length < 35)
         return null; // Need enough history
     const highs = candles.map(c => c.high);
     const lows = candles.map(c => c.low);
@@ -91,7 +95,7 @@ export function calculateIndicators(candles) {
     });
     const currentBB = bbResult[bbResult.length - 1] || { upper: 0, middle: 0, lower: 0 };
     // 5. Highest Close (ATH logic)
-    const highestClose = Math.max(...closes);
+    const windowHighClose = Math.max(...closes);
     return {
         supertrend: {
             upper: supertrendUpper,
@@ -110,8 +114,9 @@ export function calculateIndicators(candles) {
             middle: currentBB.middle,
             lower: currentBB.lower
         },
-        highestClose,
+        windowHighClose,
         currentClose: closes[closes.length - 1],
+        atr: atrValues[atrValues.length - 1] || 0,
         volumeHistory: volumes.slice(-4)
     };
 }

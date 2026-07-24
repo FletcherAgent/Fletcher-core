@@ -382,10 +382,31 @@ export class Orchestrator {
                 const watchlistAgent = new WatchlistAgent(this.lpEngine);
                 watchlistAgent.runWatchlistLoop().catch(console.error);
             }
+            // Auto-Delist Dead Factories (Nightly at 23:55)
+            if (h === 23 && m === 55) {
+                this.runFactoryAutoDelist().catch(console.error);
+            }
         };
         // Poll every minute
         setInterval(runCron, 60_000);
-        console.log('[Orchestrator] LP cron scheduled (Hourly scan, Watchlist every 5m)');
+        console.log('[Orchestrator] LP cron scheduled (Hourly scan, Watchlist every 5m, Nightly Factory cleanup at 23:55)');
+    }
+    async runFactoryAutoDelist() {
+        console.log(`[Orchestrator] 🧹 Running Factory Auto-Delist check...`);
+        try {
+            const configObj = await prisma.systemConfig.findUnique({ where: { key: 'factoryAutoDelist.consecutiveLivenessFails' } });
+            const failLimit = parseInt(configObj?.value || '10', 10);
+            const factories = await prisma.factoryRegistry.findMany({ where: { status: 'active' } });
+            for (const f of factories) {
+                if (f.consecutiveLivenessFails >= failLimit) {
+                    console.log(`[Orchestrator] 💀 Factory ${f.name} has ${f.consecutiveLivenessFails} consecutive liveness fails. Marking as DEAD.`);
+                    await prisma.factoryRegistry.update({ where: { id: f.id }, data: { status: 'dead' } });
+                }
+            }
+        }
+        catch (e) {
+            console.error(`[Orchestrator] Error during runFactoryAutoDelist:`, e);
+        }
     }
     async processAlphaSpotSignal(tokenAddress, score) {
         const lowerToken = tokenAddress.toLowerCase();
