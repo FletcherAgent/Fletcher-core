@@ -23,6 +23,7 @@ async function main() {
     { key: 'lp.fudCheck.enabled', value: 'true' },
     { key: 'lp.fudCheck.onlyCategories', value: 'tech,utility' },
     { key: 'lp.fudCheck.rejectAbove', value: '60' },
+    { key: 'grok.mode', value: 'VETO' }, // VETO or ANNOTATION
     { key: 'lp.maxPositions', value: '5' },
   ];
 

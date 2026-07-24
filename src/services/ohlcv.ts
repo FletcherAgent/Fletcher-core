@@ -32,12 +32,16 @@ export interface Indicators {
 export async function fetchOHLCV(poolAddress: string, limit: number = 100, aggregate: number = 15): Promise<Candle[]> {
   try {
     const url = `https://api.geckoterminal.com/api/v2/networks/robinhood/pools/${poolAddress}/ohlcv/minute?aggregate=${aggregate}&limit=${limit}`;
-    const res = await got.get(url, { responseType: 'json' }).json<any>();
+    const response = await got.get(url, { responseType: 'json' });
+    const res = response.body as any;
     
-    if (!res?.data?.attributes?.ohlcv_list) return [];
+    const list = res?.data?.attributes?.ohlcv_list || [];
+    const rawCandles = list.length;
+    console.log(`[OHLCV] pool: ${poolAddress} | http: ${response.statusCode} | raw candles: ${rawCandles}`);
+
+    if (rawCandles === 0) return [];
     
     // API returns [timestamp, open, high, low, close, volume]
-    const list = res.data.attributes.ohlcv_list;
     // GeckoTerminal returns newest first. We need oldest first for indicators.
     const reversed = list.reverse();
     
@@ -50,7 +54,8 @@ export async function fetchOHLCV(poolAddress: string, limit: number = 100, aggre
       volume: parseFloat(c[5])
     }));
   } catch (error: any) {
-    console.error(`[OHLCV] Failed to fetch for ${poolAddress}:`, error.message);
+    const statusCode = error.response?.statusCode || 'Network/Other';
+    console.log(`[OHLCV] pool: ${poolAddress} | http: ${statusCode} | raw candles: 0 (${error.message})`);
     return [];
   }
 }

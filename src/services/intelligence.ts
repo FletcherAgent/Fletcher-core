@@ -5,8 +5,8 @@ dotenv.config();
 const GROK_API_URL = 'https://api.x.ai/v1/chat/completions';
 
 export type SentimentResult = {
-  score: number; // 1-100
-  label: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  score: number | null; // 1-100 or null if skipped
+  label: 'BULLISH' | 'BEARISH' | 'NEUTRAL' | 'SKIPPED';
   reasoning: string;
 };
 
@@ -24,8 +24,8 @@ export class IntelligenceLayer {
     try {
       const config = await prisma.systemConfig.findUnique({ where: { key: 'GROK_ENABLED' } });
       if (config && config.value === 'false') {
-        console.log(`[IntelligenceLayer] GROK_ENABLED is false. Bypassing Grok analysis for ${tokenSymbol}.`);
-        return { score: 100, label: 'BULLISH', reasoning: 'Grok LLM is disabled by configuration. Auto-approving.' };
+        console.log(`[IntelligenceLayer] Grok disabled, sentiment check SKIPPED (no input).`);
+        return { score: null, label: 'SKIPPED', reasoning: 'Grok disabled by config' };
       }
     } catch(e) {
       console.warn(`[IntelligenceLayer] Failed to read GROK_ENABLED from DB, defaulting to enabled.`);

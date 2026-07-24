@@ -113,8 +113,10 @@ export class WatchlistAgent {
         }
 
         if (!ta) {
-          console.log(`[Watchlist] Not enough closed candle data for ${item.symbol} even at ${tf}m TF.`);
+          console.log(`[Watchlist] ${item.symbol} | closed candles: ${closedCandles.length} | min required: 35 → ❌ Not enough closed candle data even at ${tf}m TF.`);
           continue;
+        } else {
+          console.log(`[Watchlist] ${item.symbol} | closed candles: ${closedCandles.length} | min required: 35 → OK`);
         }
 
         // Check Blacklist (Re-entry Rule) using persistent ATH

@@ -378,23 +378,36 @@ export class LPEngineAgent {
 
     let selectedCandidate: PoolCandidate | null = null;
     
+    const grokModeConfig = await prisma.systemConfig.findUnique({ where: { key: 'grok.mode' } });
+    const grokMode = grokModeConfig?.value || 'VETO';
+
     // Evaluate candidates with Grok
     for (const candidate of candidates) {
       console.log(`[LPEngine] 🧠 Asking Grok to analyze sentiment for ${candidate.token.symbol}...`);
       
       const sentiment = await IntelligenceLayer.analyzeSentiment(candidate.token.symbol, candidate.token.address);
-      console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
-      
-      if (sentiment.label === 'BEARISH' || sentiment.score < config.minGrokScore) {
-        console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < ${config.minGrokScore}`);
-        continue;
+      if (sentiment.label === 'SKIPPED') {
+        console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: SKIPPED - ${sentiment.reasoning}`);
+        candidate.grokScore = undefined;
+        candidate.grokLabel = 'SKIPPED';
+      } else if (sentiment.label === 'BEARISH' || (sentiment.score !== null && sentiment.score < config.minGrokScore)) {
+        console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
+        if (grokMode === 'ANNOTATION') {
+          console.log(`[LPEngine] 📝 Grok flagged ${candidate.token.symbol} as BEARISH, but grok.mode is ANNOTATION. Proceeding.`);
+          candidate.grokScore = sentiment.score ?? undefined;
+          candidate.grokLabel = sentiment.label;
+        } else {
+          console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < ${config.minGrokScore}`);
+          continue;
+        }
+      } else {
+        console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
+        console.log(`[LPEngine] ✅ Grok APPROVED ${candidate.token.symbol}`);
+        if (this.onNotification) await this.onNotification(`✅ *Grok APPROVED $${candidate.token.symbol}*\nScore: ${sentiment.score}\n_Wait for V3 pool..._`);
+        candidate.grokScore = sentiment.score ?? undefined;
+        candidate.grokLabel = sentiment.label;
       }
       
-      console.log(`[LPEngine] ✅ Grok APPROVED ${candidate.token.symbol}`);
-      if (this.onNotification) await this.onNotification(`✅ *Grok APPROVED $${candidate.token.symbol}*\nScore: ${sentiment.score}\n_Wait for V3 pool..._`);
-      
-      candidate.grokScore = sentiment.score;
-      candidate.grokLabel = sentiment.label;
       selectedCandidate = candidate;
       break; // Found the top candidate that passed Grok
     }
@@ -461,6 +474,9 @@ export class LPEngineAgent {
     const candidates = await screenPairs();
     const toOpen: PoolCandidate[] = [];
     
+    const grokModeConfig = await prisma.systemConfig.findUnique({ where: { key: 'grok.mode' } });
+    const grokMode = grokModeConfig?.value || 'VETO';
+
     // Evaluate candidates with Grok until we fill the slots
     for (const candidate of candidates) {
       if (toOpen.length >= Math.min(slotsLeft, 3)) break;
@@ -468,18 +484,28 @@ export class LPEngineAgent {
       console.log(`[LPEngine] 🧠 Asking Grok to analyze sentiment for ${candidate.token.symbol}...`);
       
       const sentiment = await IntelligenceLayer.analyzeSentiment(candidate.token.symbol, candidate.token.address);
-      console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
-      
-      if (sentiment.label === 'BEARISH' || sentiment.score < config.minGrokScore) {
-        console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < ${config.minGrokScore}`);
-        continue;
+      if (sentiment.label === 'SKIPPED') {
+        console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: SKIPPED - ${sentiment.reasoning}`);
+        candidate.grokScore = undefined;
+        candidate.grokLabel = 'SKIPPED';
+      } else if (sentiment.label === 'BEARISH' || (sentiment.score !== null && sentiment.score < config.minGrokScore)) {
+        console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
+        if (grokMode === 'ANNOTATION') {
+          console.log(`[LPEngine] 📝 Grok flagged ${candidate.token.symbol} as BEARISH, but grok.mode is ANNOTATION. Proceeding.`);
+          candidate.grokScore = sentiment.score ?? undefined;
+          candidate.grokLabel = sentiment.label;
+        } else {
+          console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < ${config.minGrokScore}`);
+          continue;
+        }
+      } else {
+        console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
+        console.log(`[LPEngine] ✅ Grok APPROVED ${candidate.token.symbol}`);
+        if (this.onNotification) await this.onNotification(`✅ *Grok APPROVED $${candidate.token.symbol}*\nScore: ${sentiment.score}\n_Wait for V3 pool..._`);
+        candidate.grokScore = sentiment.score ?? undefined;
+        candidate.grokLabel = sentiment.label;
       }
       
-      console.log(`[LPEngine] ✅ Grok APPROVED ${candidate.token.symbol}`);
-      if (this.onNotification) await this.onNotification(`✅ *Grok APPROVED $${candidate.token.symbol}*\nScore: ${sentiment.score}\n_Wait for V3 pool..._`);
-      
-      candidate.grokScore = sentiment.score;
-      candidate.grokLabel = sentiment.label;
       toOpen.push(candidate);
     }
 

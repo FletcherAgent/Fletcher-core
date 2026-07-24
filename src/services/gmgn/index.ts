@@ -202,11 +202,17 @@ export async function screenPairs(criteria?: LPScreeningCriteria): Promise<PoolC
       if (!skipped) {
         const rejectAboveCfg = await prisma.systemConfig.findUnique({ where: { key: 'lp.fudCheck.rejectAbove' } });
         const rejectAbove = parseFloat(rejectAboveCfg?.value || '60');
+        const grokModeCfg = await prisma.systemConfig.findUnique({ where: { key: 'grok.mode' } });
+        const grokMode = grokModeCfg?.value || 'VETO';
         
         if (fudScore > rejectAbove) {
-          console.log(`[Shadow Mode] 👻 FUD Check WOULD HAVE REJECTED $${token.symbol} (Score: ${fudScore} > ${rejectAbove})`);
-          // Shadow mode -> Do not actually continue/reject, just log for now!
-          // continue;
+          if (grokMode === 'ANNOTATION') {
+            console.log(`[MarketData] 📝 FUD Score is ${fudScore} (> ${rejectAbove}) for $${token.symbol}, but grok.mode is ANNOTATION. Proceeding.`);
+          } else {
+            console.log(`[Shadow Mode] 👻 FUD Check WOULD HAVE REJECTED $${token.symbol} (Score: ${fudScore} > ${rejectAbove})`);
+            // Shadow mode -> Do not actually continue/reject, just log for now!
+            // continue;
+          }
         } else {
           console.log(`[MarketData] ✅ FUD Check passed for $${token.symbol} (Score: ${fudScore} <= ${rejectAbove})`);
         }
