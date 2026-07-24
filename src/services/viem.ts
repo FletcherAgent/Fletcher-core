@@ -30,6 +30,11 @@ export const publicClient = createPublicClient({
   chain: robinhoodChain,
   transport: http(rpcUrl, {
     batch: true,
+    onFetchResponse: (res) => {
+      if (res.status === 429) {
+        console.warn(`[Viem] 🚨 RPC RATE LIMIT REACHED (HTTP 429 Too Many Requests) on publicClient! Alchemy limit exceeded.`);
+      }
+    }
   }),
   // TODO: Once you upgrade to a premium RPC (like Alchemy), remove or reduce this interval (default is 4000)
   // so the Scout agent can detect events much faster (real-time).
@@ -44,7 +49,13 @@ export const wssClient = createPublicClient({
   transport: isWs ? webSocket(wssUrl, {
     keepAlive: true,
     reconnect: true,
-  }) : http(rpcUrl),
+  }) : http(rpcUrl, {
+    onFetchResponse: (res) => {
+      if (res.status === 429) {
+        console.warn(`[Viem] 🚨 RPC RATE LIMIT REACHED (HTTP 429 Too Many Requests) on wssClient fallback!`);
+      }
+    }
+  }),
   // TODO: Same as above. If using a premium RPC or true WSS, remove this pollingInterval.
   pollingInterval: 15_000,
 });
