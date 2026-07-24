@@ -369,15 +369,15 @@ export class GuardianAgent {
         await logEvent('WARN', `[LP] Guardian triggered EXIT: ${exitReason}`, { positionId: pos.id });
         
         // Add to TokenBlacklist
-        if (ta && ta.highestClose) {
+        if (ta && ta.windowHighClose) {
           const wethAddr = (process.env.WETH_ADDRESS ?? '').toLowerCase();
           const tAddress = pos.token0.toLowerCase() === wethAddr ? pos.token1 : pos.token0;
           await prisma.tokenBlacklist.upsert({
             where: { tokenAddress: tAddress },
-            update: { athPriceAtExit: ta.highestClose, reason: exitRule || 'MANUAL' },
-            create: { tokenAddress: tAddress, athPriceAtExit: ta.highestClose, reason: exitRule || 'MANUAL' }
+            update: { athPriceAtExit: ta.windowHighClose, reason: exitRule || 'MANUAL' },
+            create: { tokenAddress: tAddress, athPriceAtExit: ta.windowHighClose, reason: exitRule || 'MANUAL' }
           });
-          console.log(`[Guardian] 🚫 Added ${tAddress} to Blacklist (ATH: ${ta.highestClose})`);
+          console.log(`[Guardian] 🚫 Added ${tAddress} to Blacklist (ATH: ${ta.windowHighClose})`);
         }
 
         if (this.onLPCloseSignal) this.onLPCloseSignal(pos, exitReason);

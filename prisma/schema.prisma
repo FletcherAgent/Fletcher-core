@@ -155,6 +155,8 @@ model Watchlist {
   lastCheckedAt   DateTime?
   tradingMode     String   @default("LIVE")
   status          String   @default("WATCHING") // WATCHING, EXECUTED, DROPPED
+  athClose        Float?
+  timeframe       Int      @default(15)
 }
 
 model TokenBlacklist {

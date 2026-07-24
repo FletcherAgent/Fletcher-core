@@ -23,14 +23,15 @@ export interface Indicators {
     middle: number;
     lower: number;
   };
-  highestClose: number;
+  windowHighClose: number;
   currentClose: number;
+  atr: number;
   volumeHistory: number[];
 }
 
-export async function fetchOHLCV(poolAddress: string, limit: number = 100): Promise<Candle[]> {
+export async function fetchOHLCV(poolAddress: string, limit: number = 100, aggregate: number = 15): Promise<Candle[]> {
   try {
-    const url = `https://api.geckoterminal.com/api/v2/networks/robinhood/pools/${poolAddress}/ohlcv/minute?aggregate=15&limit=${limit}`;
+    const url = `https://api.geckoterminal.com/api/v2/networks/robinhood/pools/${poolAddress}/ohlcv/minute?aggregate=${aggregate}&limit=${limit}`;
     const res = await got.get(url, { responseType: 'json' }).json<any>();
     
     if (!res?.data?.attributes?.ohlcv_list) return [];
@@ -55,7 +56,7 @@ export async function fetchOHLCV(poolAddress: string, limit: number = 100): Prom
 }
 
 export function calculateIndicators(candles: Candle[]): Indicators | null {
-  if (candles.length < 50) return null; // Need enough history
+  if (candles.length < 35) return null; // Need enough history
 
   const highs = candles.map(c => c.high);
   const lows = candles.map(c => c.low);
@@ -133,7 +134,7 @@ export function calculateIndicators(candles: Candle[]): Indicators | null {
   const currentBB = bbResult[bbResult.length - 1] || { upper: 0, middle: 0, lower: 0 };
 
   // 5. Highest Close (ATH logic)
-  const highestClose = Math.max(...closes);
+  const windowHighClose = Math.max(...closes);
 
   return {
     supertrend: {
@@ -153,8 +154,9 @@ export function calculateIndicators(candles: Candle[]): Indicators | null {
       middle: currentBB.middle,
       lower: currentBB.lower
     },
-    highestClose,
+    windowHighClose,
     currentClose: closes[closes.length - 1],
+    atr: atrValues[atrValues.length - 1] || 0,
     volumeHistory: volumes.slice(-4)
   };
 }
