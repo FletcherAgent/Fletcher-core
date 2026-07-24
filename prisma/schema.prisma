@@ -131,6 +131,7 @@ model LPPosition {
   updatedAt       DateTime @updatedAt
   source          String   @default("SYSTEM")
   managerAddress  String?
+  sentimentStatus String?
 }
 
 model SessionKey {
@@ -157,6 +158,7 @@ model Watchlist {
   status          String   @default("WATCHING") // WATCHING, EXECUTED, DROPPED
   athClose        Float?
   timeframe       Int      @default(15)
+  sentimentStatus String?
 }
 
 model TokenBlacklist {

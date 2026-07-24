@@ -168,11 +168,16 @@ export class LPEngineAgent {
     const dexConfig = await getDexConfig('V3');
     const npmAddress = (dexConfig.positionManager || '') as Address;
     const factoryAddress = (dexConfig.factoryAddress || '') as Address;
-    const wethAddress = (process.env.WETH_ADDRESS || '') as Address;
+
+    const quoteConfig = await prisma.systemConfig.findMany({
+      where: { key: { in: ['tokens.quote.weth'] } }
+    });
+    const quoteMap = Object.fromEntries(quoteConfig.map(c => [c.key, c.value]));
+    const wethAddress = (quoteMap['tokens.quote.weth'] || process.env.WETH_ADDRESS || '') as Address;
 
     if (!npmAddress)     console.warn('[LPEngine] ⚠️ POSITION_MANAGER not set');
     if (!factoryAddress) console.warn('[LPEngine] ⚠️ UNISWAP_V3_FACTORY_ADDRESS not set');
-    if (!wethAddress)    console.warn('[LPEngine] ⚠️ WETH_ADDRESS not set');
+    if (!wethAddress)    console.warn('[LPEngine] ⚠️ WETH_ADDRESS not set (DB nor env)');
 
     return { npmAddress, factoryAddress, wethAddress };
   }
@@ -206,7 +211,7 @@ export class LPEngineAgent {
    */
   public async resolvePool(
     token0: string,
-    token1: string,
+    token1?: string,
     preferredFee = 3000
   ): Promise<{ poolAddress: string; feeTier: number; factoryAddress: string; managerAddress: string } | null> {
     const v3Configs = await getAllDexConfigs('V3');
@@ -214,29 +219,47 @@ export class LPEngineAgent {
       (v, i, arr) => arr.indexOf(v) === i
     );
 
+    // RHC canonical quote assets: USDG (6 dec, Paxos stablecoin) and WETH (18 dec).
+    // USDC does NOT exist on Robinhood Chain — bridged USDC becomes USDG.
+    const quoteConfig = await prisma.systemConfig.findMany({
+      where: { key: { in: ['tokens.quote.weth', 'tokens.quote.usdg'] } }
+    });
+    const quoteMap = Object.fromEntries(quoteConfig.map(c => [c.key, c.value]));
+    const wethAddress = quoteMap['tokens.quote.weth'] || process.env.WETH_ADDRESS || '';
+    const usdgAddress = quoteMap['tokens.quote.usdg'] || process.env.USDG_ADDRESS || '';
+    // usdcAddress intentionally omitted — not canonical on RHC
+
+    const quotesToTry = token1 ? [token1] : [
+      usdgAddress,
+      wethAddress,
+    ].filter(Boolean) as string[];
+    const uniqueQuotes = Array.from(new Set(quotesToTry.map(a => a.toLowerCase())));
+
     for (const config of v3Configs) {
       if (!config.factoryAddress || !config.positionManager) continue;
 
-      for (const fee of feesToTry) {
-        try {
-          const poolAddr = await publicClient.readContract({
-            address: config.factoryAddress as Address,
-            abi: FACTORY_ABI,
-            functionName: 'getPool',
-            args: [token0 as Address, token1 as Address, fee],
-          }) as string;
+      for (const qt of uniqueQuotes) {
+        for (const fee of feesToTry) {
+          try {
+            const poolAddr = await publicClient.readContract({
+              address: config.factoryAddress as Address,
+              abi: FACTORY_ABI,
+              functionName: 'getPool',
+              args: [token0 as Address, qt as Address, fee],
+            }) as string;
 
-          if (poolAddr && poolAddr !== '0x0000000000000000000000000000000000000000') {
-            console.log(`[LPEngine] ✅ Pool found: ${poolAddr} on factory ${config.factoryAddress} (fee: ${fee})`);
-            return { 
-              poolAddress: poolAddr, 
-              feeTier: fee, 
-              factoryAddress: config.factoryAddress, 
-              managerAddress: config.positionManager 
-            };
+            if (poolAddr && poolAddr !== '0x0000000000000000000000000000000000000000') {
+              console.log(`[LPEngine] ✅ Pool found: ${poolAddr} on factory ${config.factoryAddress} (quote: ${qt}, fee: ${fee})`);
+              return { 
+                poolAddress: poolAddr, 
+                feeTier: fee, 
+                factoryAddress: config.factoryAddress, 
+                managerAddress: config.positionManager 
+              };
+            }
+          } catch (error) {
+            console.warn(`[LPEngine] ⚠️ getPool failed on factory ${config.factoryAddress} (fee: ${fee}):`, error);
           }
-        } catch (error) {
-          console.warn(`[LPEngine] ⚠️ getPool failed on factory ${config.factoryAddress} (fee: ${fee}):`, error);
         }
       }
     }
@@ -425,12 +448,14 @@ export class LPEngineAgent {
         symbol: selectedCandidate.token.symbol,
         name: selectedCandidate.token.name,
         poolAddress: selectedCandidate.pool.address.toLowerCase(),
+        sentimentStatus: selectedCandidate.grokLabel,
       },
       create: {
         tokenAddress: selectedCandidate.token.address.toLowerCase(),
         symbol: selectedCandidate.token.symbol,
         name: selectedCandidate.token.name,
         poolAddress: selectedCandidate.pool.address.toLowerCase(),
+        sentimentStatus: selectedCandidate.grokLabel,
         tradingMode: (await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } }))?.value === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE',
       }
     });
@@ -516,12 +541,14 @@ export class LPEngineAgent {
           symbol: candidate.token.symbol,
           name: candidate.token.name,
           poolAddress: candidate.pool.address.toLowerCase(),
+          sentimentStatus: candidate.grokLabel,
         },
         create: {
           tokenAddress: candidate.token.address.toLowerCase(),
           symbol: candidate.token.symbol,
           name: candidate.token.name,
           poolAddress: candidate.pool.address.toLowerCase(),
+          sentimentStatus: candidate.grokLabel,
           tradingMode: currentMode,
         }
       });
@@ -569,7 +596,7 @@ export class LPEngineAgent {
   // ─── Core: Propose Open Position ────────────────────────────────────────────
 
   public async proposeOpenPosition(
-    candidate: { token: GMGNToken; score: number; grokScore?: number; grokLabel?: string },
+    candidate: { token: GMGNToken; score: number; grokScore?: number; grokLabel?: string; sentimentStatus?: string },
     options: { dayMode: boolean; nightMode: boolean; nightRange?: number; strategyMode?: boolean; lowerPct?: number; upperPct?: number; source?: string }
   ): Promise<void> {
     const config    = await loadLPConfig();
@@ -825,6 +852,7 @@ export class LPEngineAgent {
         nightMode:   options.nightMode,
         source:      options.source ?? 'SYSTEM',
         tradingMode: isDryRun ? 'DRY_RUN' : 'LIVE',
+        sentimentStatus: candidate.sentimentStatus || candidate.grokLabel,
         simulatedLiquidity: isDryRun ? simulatedLiquidity.toString() : null,
         lastFeeGrowth0,
         lastFeeGrowth1,

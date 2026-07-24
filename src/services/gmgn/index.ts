@@ -17,6 +17,7 @@ export interface PoolCandidate {
   score:      number; // This is actually the GMGN Estimated Fee APR score
   grokScore?: number;
   grokLabel?: string;
+  sentimentStatus?: string; // 'PASS' | 'FAIL' | 'SKIPPED'
 }
 
 export interface LPScreeningCriteria {
@@ -49,6 +50,17 @@ export { getTrendingPairs, getTokenInfo, fetchTopTraders };
 export async function screenPairs(criteria?: LPScreeningCriteria): Promise<PoolCandidate[]> {
   const config = criteria ?? (await loadScreeningCriteria());
   console.log('[MarketData] 🔍 Screening pairs via GMGN v2 (Anti-Detect)...');
+  
+  // RHC canonical quote assets: USDG (6 decimals, Paxos) and WETH (18 decimals).
+  // NOTE: USDC does NOT exist on Robinhood Chain — all USDC is converted to USDG at bridge.
+  const quoteConfig = await prisma.systemConfig.findMany({
+    where: { key: { in: ['tokens.quote.weth', 'tokens.quote.usdg'] } }
+  });
+  const quoteMap = Object.fromEntries(quoteConfig.map(c => [c.key, c.value]));
+  
+  const wethAddress = quoteMap['tokens.quote.weth'] || process.env.WETH_ADDRESS || '';
+  const usdgAddress = quoteMap['tokens.quote.usdg'] || process.env.USDG_ADDRESS || '';
+  // usdcAddress intentionally omitted — not canonical on RHC
   
   // 1. Get initial broad list from GMGN Trending
   const gtTokens = await getTrendingPairs(150);
@@ -121,38 +133,80 @@ export async function screenPairs(criteria?: LPScreeningCriteria): Promise<PoolC
     }
     
     // Fetch real pool address and fee tier from Factory
-    const quoteTokenAddress = token.quoteToken || process.env.WETH_ADDRESS || '';
-    let realPoolAddress = '';
-    let bestFeeTier = 3000;
+    // Priority order: USDG → WETH (USDC not canonical on RHC)
+    const quoteTokensToTry = [
+      usdgAddress,
+      wethAddress,
+      token.quoteToken
+    ].filter(Boolean) as string[];
+    const uniqueQuoteTokens = Array.from(new Set(quoteTokensToTry.map(a => a.toLowerCase())));
+
+    interface DiscoveredPool {
+      address: string;
+      quoteToken: string;
+      feeTier: number;
+      estAPRRaw: number;
+      protocol: string;
+    }
+    const discoveredPools: DiscoveredPool[] = [];
 
     if (factoryAddress) {
       // Try standard fee tiers
       const tiers = [10000, 3000, 500, 100];
-      for (const tier of tiers) {
-        try {
-          const pAddr = await publicClient.readContract({
-            address: factoryAddress as `0x${string}`,
-            abi: FACTORY_ABI,
-            functionName: 'getPool',
-            args: [token.address as `0x${string}`, quoteTokenAddress as `0x${string}`, tier],
-          }) as string;
-          
-          if (pAddr && pAddr.toLowerCase() !== '0x0000000000000000000000000000000000000000') {
-            realPoolAddress = pAddr;
-            bestFeeTier = tier;
-            // Stop at first valid pool (or we could fetch liquidity for all and pick highest, but this is simpler)
-            break; 
+      for (const qt of uniqueQuoteTokens) {
+        for (const tier of tiers) {
+          try {
+            const pAddr = await publicClient.readContract({
+              address: factoryAddress as `0x${string}`,
+              abi: FACTORY_ABI,
+              functionName: 'getPool',
+              args: [token.address as `0x${string}`, qt as `0x${string}`, tier],
+            }) as string;
+            
+            if (pAddr && pAddr.toLowerCase() !== '0x0000000000000000000000000000000000000000') {
+              const feeTierPct = tier / 1000000;
+              const activeLiquidity = token.liquidity || 1;
+              const estAPRRaw = ((token.volume24h * feeTierPct) / activeLiquidity) * 365;
+              
+              discoveredPools.push({
+                address: pAddr,
+                quoteToken: qt,
+                feeTier: tier,
+                estAPRRaw: estAPRRaw,
+                protocol: 'v3'
+              });
+            }
+          } catch (err) {
+            // Ignore call errors
           }
-        } catch (err) {
-          // Ignore call errors
         }
       }
     }
 
-    if (!realPoolAddress) {
+    if (discoveredPools.length === 0) {
       console.log(`[MarketData] ❌ ${token.symbol} REJECTED: No on-chain pool found`);
       continue;
     }
+
+    // Sort by estAPR descending
+    discoveredPools.sort((a, b) => b.estAPRRaw - a.estAPRRaw);
+    const bestPool = discoveredPools[0];
+
+    const quoteAssetSymbol = bestPool.quoteToken.toLowerCase() === usdgAddress.toLowerCase() && usdgAddress ? 'USDG' 
+                           : bestPool.quoteToken.toLowerCase() === wethAddress.toLowerCase() && wethAddress ? 'WETH'
+                           : 'Unknown (non-canonical)';
+
+    const bestPoolAprPct = bestPool.estAPRRaw * 100;
+    console.log(`[MarketData] ${token.symbol} | best pool: ${bestPool.protocol} · ${quoteAssetSymbol} · fee ${(bestPool.feeTier / 10000).toFixed(2)}% · estAPR ${bestPoolAprPct.toLocaleString('en-US', {maximumFractionDigits: 0})}% (dari ${discoveredPools.length} pool ditemukan)`);
+
+    if (bestPoolAprPct < 300) {
+      console.log(`[MarketData] ⚠️ Weak candidate ${token.symbol} (best APR ${bestPoolAprPct.toFixed(0)}% < 300%). Skipping.`);
+      continue;
+    }
+
+    const quoteTokenAddress = bestPool.quoteToken;
+    let realPoolAddress = bestPool.address;
+    let bestFeeTier = bestPool.feeTier;
 
     if (shadowLaneA) {
       const regimeCfg = await prisma.systemConfig.findUnique({ where: { key: 'lp.portfolio.regime' } });
@@ -160,7 +214,7 @@ export async function screenPairs(criteria?: LPScreeningCriteria): Promise<PoolC
          console.log(`[Shadow Mode] 👻 Lane A is DISABLED because regime is CROWDED.`);
          // continue;
       } else {
-        const wethPriceInfo = await getTokenInfo(process.env.WETH_ADDRESS ?? '');
+        const wethPriceInfo = await getTokenInfo(wethAddress);
         const wethPrice = wethPriceInfo?.priceUsd || 0;
         const vol5m = await getTrailingVolume5m(realPoolAddress, token.address, quoteTokenAddress, wethPrice);
         
@@ -194,6 +248,7 @@ export async function screenPairs(criteria?: LPScreeningCriteria): Promise<PoolC
     }
 
     // FUD CHECK FOR TECH TOKENS
+    let sentimentStatus = 'SKIPPED';
     const isTechOrUtility = ['tech', 'utility', 'virtuals', 'agent-token'].some(cat => 
       token.category?.toLowerCase().includes(cat)
     );
@@ -208,26 +263,23 @@ export async function screenPairs(criteria?: LPScreeningCriteria): Promise<PoolC
         if (fudScore > rejectAbove) {
           if (grokMode === 'ANNOTATION') {
             console.log(`[MarketData] 📝 FUD Score is ${fudScore} (> ${rejectAbove}) for $${token.symbol}, but grok.mode is ANNOTATION. Proceeding.`);
+            sentimentStatus = 'FAIL'; // Failed score, but we proceed
           } else {
             console.log(`[Shadow Mode] 👻 FUD Check WOULD HAVE REJECTED $${token.symbol} (Score: ${fudScore} > ${rejectAbove})`);
+            sentimentStatus = 'FAIL';
             // Shadow mode -> Do not actually continue/reject, just log for now!
             // continue;
           }
         } else {
           console.log(`[MarketData] ✅ FUD Check passed for $${token.symbol} (Score: ${fudScore} <= ${rejectAbove})`);
+          sentimentStatus = 'PASS';
         }
       }
     }
 
-    const feeTierPct = bestFeeTier / 1000000; // e.g. 3000 = 0.003
-    const activeLiquidity = token.liquidity || 1;
-    const estimatedFeeAPR = ((token.volume24h * feeTierPct) / activeLiquidity) * 365;
+    const score = Math.round(bestPool.estAPRRaw * 100) / 100; // Store as raw APR ratio
     
-    // Safety score constraint (max 100 on safety, but we now rank by APR)
-    // We will use estimatedFeeAPR as the primary score.
-    const score = Math.round(estimatedFeeAPR * 100) / 100; // Store as raw APR percentage
-    
-    console.log(`[MarketData] ✅ ${token.symbol} PASSED — estAPR: ${score}%, mcap: $${(token.marketCap/1000).toFixed(0)}K, vol: $${(token.volume24h/1000).toFixed(0)}K`);
+    console.log(`[MarketData] ✅ ${token.symbol} PASSED — estAPR: ${(score * 100).toLocaleString('en-US', {maximumFractionDigits: 0})}%, mcap: $${(token.marketCap/1000).toFixed(0)}K, vol: $${(token.volume24h/1000).toFixed(0)}K`);
     
     const pool: GMGNPool = {
       address: realPoolAddress,
@@ -239,25 +291,24 @@ export async function screenPairs(criteria?: LPScreeningCriteria): Promise<PoolC
       volTvlRatio: token.liquidity > 0 ? token.volume24h / token.liquidity : 0,
     };
     
-    passed.push({ pool, token, score });
+    passed.push({ pool, token, score, sentimentStatus });
     
     // Delay to respect rate limit (GMGN client handles this if needed, but a small delay is good)
     await new Promise(r => setTimeout(r, 250));
   }
   
-  // Quote Asset Priority
+  // Quote Asset Priority: USDG first (main stablecoin on RHC), then WETH
   const getQuotePriority = (address?: string) => {
     if (!address) return 0;
     const addr = address.toLowerCase();
-    if (addr === process.env.USDG_ADDRESS?.toLowerCase()) return 3;
-    if (addr === process.env.WETH_ADDRESS?.toLowerCase()) return 2;
-    if (addr === process.env.USDC_ADDRESS?.toLowerCase()) return 1;
-    return 0; // Other quote assets
+    if (addr === usdgAddress.toLowerCase() && usdgAddress) return 2;
+    if (addr === wethAddress.toLowerCase() && wethAddress) return 1;
+    return 0; // Other (non-canonical) quote assets
   };
 
   passed.sort((a, b) => {
-    const priorityA = getQuotePriority(a.token.quoteToken);
-    const priorityB = getQuotePriority(b.token.quoteToken);
+    const priorityA = getQuotePriority(a.pool.token1);
+    const priorityB = getQuotePriority(b.pool.token1);
     if (priorityA !== priorityB) {
       return priorityB - priorityA; // Higher priority first
     }

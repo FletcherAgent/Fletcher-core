@@ -52,8 +52,7 @@ export class WatchlistAgent {
       try {
         if (!item.poolAddress) {
           console.log(`[Watchlist] 🔍 Resolving pool address for ${item.symbol}...`);
-          const { wethAddress } = await this.lpEngine.getAddresses();
-          const resolved = await this.lpEngine.resolvePool(item.tokenAddress, wethAddress);
+          const resolved = await this.lpEngine.resolvePool(item.tokenAddress);
           if (resolved) {
             item.poolAddress = resolved.poolAddress.toLowerCase();
             await prisma.watchlist.update({
