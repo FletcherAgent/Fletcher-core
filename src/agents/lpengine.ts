@@ -189,7 +189,7 @@ export class LPEngineAgent {
    * This prevents them from becoming zombies that block new entries if the process restarts
    * while waiting for a transaction to be mined.
    */
-  private async cleanupZombiePositions(): Promise<void> {
+  public async cleanupZombiePositions(): Promise<void> {
     const threshold = new Date(Date.now() - 10 * 60 * 1000); // 10 minutes ago
     try {
       const zombies = await prisma.lPPosition.findMany({

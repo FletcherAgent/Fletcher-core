@@ -423,6 +423,9 @@ export class Orchestrator {
       const h = parseInt(parts.find(p => p.type === 'hour')!.value);
       const m = parseInt(parts.find(p => p.type === 'minute')!.value);
 
+      // Clean up any stale PENDING positions every minute
+      this.lpEngine.cleanupZombiePositions().catch(console.error);
+
       // NIGHT mode (Aggressive Scouting): Run every hour
       if (m === 0) {
         console.log(`[Orchestrator] 🚀 LP Engine hourly scan triggered (Hour: ${h})`);
