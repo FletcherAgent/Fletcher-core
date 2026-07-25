@@ -1337,7 +1337,14 @@ export class LPEngineAgent {
         if (process.env.ALCHEMY_API_KEY) {
           errorMsg = errorMsg.replace(new RegExp(process.env.ALCHEMY_API_KEY, 'g'), '[REDACTED_ALCHEMY_KEY]');
         }
-        await logEvent('ERROR', `[LP] Auto-Close Failed`, { error: errorMsg });
+        
+        // Revert status back to OPEN so it stays in Active LP and can be retried
+        await prisma.lPPosition.update({
+          where: { id: positionId },
+          data: { status: 'OPEN' } as any,
+        });
+
+        await logEvent('ERROR', `[LP] Auto-Close Failed (Reverted to OPEN)`, { error: errorMsg });
         console.error(`[LPEngine] Failed to auto-close position: ${errorMsg}`);
         proposal.description = `❌ *Auto-Close Failed*\n` + proposal.description + `\nError: ${errorMsg}`;
         if (this.onProposal) await this.onProposal(proposal);
