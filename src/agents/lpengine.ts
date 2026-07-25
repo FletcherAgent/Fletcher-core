@@ -245,35 +245,31 @@ export class LPEngineAgent {
 
   // ─── Pool Resolution ────────────────────────────────────────────────────────
 
-  /**
-   * Resolve pool address from Uniswap V3 Factory.
-   * Try fee tiers: 500 -> 3000 -> 10000, use the first available.
-   */
   public async resolvePool(
     token0: string,
     token1?: string,
     preferredFee = 3000
   ): Promise<{ poolAddress: string; feeTier: number; factoryAddress: string; managerAddress: string } | null> {
     const v3Configs = await getAllDexConfigs('V3');
-    const feesToTry = [preferredFee, 500, 3000, 10000].filter(
-      (v, i, arr) => arr.indexOf(v) === i
-    );
+    // Try all standard fees to find the most liquid pool
+    const feesToTry = [10000, 3000, 500, 100];
 
-    // RHC canonical quote assets: USDG (6 dec, Paxos stablecoin) and WETH (18 dec).
-    // USDC does NOT exist on Robinhood Chain — bridged USDC becomes USDG.
     const quoteConfig = await prisma.systemConfig.findMany({
       where: { key: { in: ['tokens.quote.weth', 'tokens.quote.usdg'] } }
     });
     const quoteMap = Object.fromEntries(quoteConfig.map(c => [c.key, c.value]));
     const wethAddress = quoteMap['tokens.quote.weth'] || process.env.WETH_ADDRESS || '';
     const usdgAddress = quoteMap['tokens.quote.usdg'] || process.env.USDG_ADDRESS || '';
-    // usdcAddress intentionally omitted — not canonical on RHC
 
     const quotesToTry = token1 ? [token1] : [
       usdgAddress,
       wethAddress,
     ].filter(Boolean) as string[];
     const uniqueQuotes = Array.from(new Set(quotesToTry.map(a => a.toLowerCase())));
+    
+    const poolAbi = parseAbi(['function liquidity() view returns (uint128)']);
+    
+    let bestPool: { poolAddress: string; feeTier: number; factoryAddress: string; managerAddress: string; liquidity: bigint } | null = null;
 
     for (const config of v3Configs) {
       if (!config.factoryAddress || !config.positionManager) continue;
@@ -289,19 +285,42 @@ export class LPEngineAgent {
             }) as string;
 
             if (poolAddr && poolAddr !== '0x0000000000000000000000000000000000000000') {
-              console.log(`[LPEngine] ✅ Pool found: ${poolAddr} on factory ${config.factoryAddress} (quote: ${qt}, fee: ${fee})`);
-              return { 
-                poolAddress: poolAddr, 
-                feeTier: fee, 
-                factoryAddress: config.factoryAddress, 
-                managerAddress: config.positionManager 
-              };
+              let liq = 0n;
+              try {
+                liq = await publicClient.readContract({
+                  address: poolAddr as Address,
+                  abi: poolAbi,
+                  functionName: 'liquidity'
+                }) as bigint;
+              } catch (err) {}
+              
+              console.log(`[LPEngine] 🔎 Found pool candidate: ${poolAddr} on ${config.factoryAddress} (fee: ${fee}, liq: ${liq})`);
+              
+              if (!bestPool || liq > bestPool.liquidity) {
+                bestPool = {
+                  poolAddress: poolAddr,
+                  feeTier: fee,
+                  factoryAddress: config.factoryAddress,
+                  managerAddress: config.positionManager,
+                  liquidity: liq
+                };
+              }
             }
           } catch (error) {
-            console.warn(`[LPEngine] ⚠️ getPool failed on factory ${config.factoryAddress} (fee: ${fee}):`, error);
+            // suppress getPool fail errors to avoid log spam
           }
         }
       }
+    }
+    
+    if (bestPool) {
+      console.log(`[LPEngine] ✅ Best Pool Selected: ${bestPool.poolAddress} (fee: ${bestPool.feeTier}, liq: ${bestPool.liquidity})`);
+      return { 
+        poolAddress: bestPool.poolAddress, 
+        feeTier: bestPool.feeTier, 
+        factoryAddress: bestPool.factoryAddress, 
+        managerAddress: bestPool.managerAddress 
+      };
     }
     return null;
   }
@@ -1004,43 +1023,93 @@ export class LPEngineAgent {
         const wethAmountToSwap = isWeth0 ? amount0Desired : amount1Desired; // WETH is token0, so we need amount0
         console.log(`[LPEngine Debug] wethAmountToSwap=${wethAmountToSwap}, amount0=${amount0Desired}, amount1=${amount1Desired}, isWeth0=${isWeth0}`);
         
-        // ExactInputSingleParams ABI for Universal Router
-        const commands = '0x00' as `0x${string}`; // V3_SWAP_EXACT_IN
-        const feeHex = feeTier.toString(16).padStart(6, '0');
-        const path = (wethAddress + feeHex + memeTokenAddress.replace('0x', '')) as `0x${string}`;
+        const isUniversalRouter = routerAddress.toLowerCase() === '0x8876789976decbfcbbbe364623c63652db8c0904';
+        const isAlpsRouter = routerAddress.toLowerCase() === '0xcaf681a66d020601342297493863e78c959e5cb2';
+        const actualRouterAddress = (isAlpsRouter || isUniversalRouter) ? routerAddress : '0xcaf681a66d020601342297493863e78c959e5cb2'; // Fallback to ALPS
+
+        let swapCalldata: Hex;
+        const PERMIT2_ADDRESS = '0x000000000022D473030F116dDEE9F6B43aC78BA3';
+        const permit2Abi = parseAbi([
+          'function approve(address token, address spender, uint160 amount, uint48 expiration)'
+        ]);
         
-        const exactInputSingleParamsAbi = [
-          { name: 'recipient', type: 'address' },
-          { name: 'amountIn', type: 'uint256' },
-          { name: 'amountOutMin', type: 'uint256' },
-          { name: 'path', type: 'bytes' },
-          { name: 'payerIsUser', type: 'bool' }
-        ];
+        let preSwapCalls: UserOpCall[] = [];
 
-        const amountOutMin = (isWeth0 ? amount1Desired : amount0Desired) * 50n / 100n;
-        const swapInput = encodeAbiParameters(exactInputSingleParamsAbi, [
-          recipient, // recipient: MSG_SENDER (Smart Account)
-          wethAmountToSwap,
-          amountOutMin, // 50% max slippage protection
-          path,
-          false // payerIsUser (use funds transferred to Router)
-        ]);
+        if (actualRouterAddress.toLowerCase() === '0x8876789976decbfcbbbe364623c63652db8c0904') {
+          // ExactInputSingleParams ABI for Universal Router
+          const commands = '0x00' as `0x${string}`; // V3_SWAP_EXACT_IN
+          const feeHex = feeTier.toString(16).padStart(6, '0');
+          const path = (wethAddress + feeHex + memeTokenAddress.replace('0x', '')) as `0x${string}`;
+          
+          const exactInputSingleParamsAbi = [
+            { name: 'recipient', type: 'address' },
+            { name: 'amountIn', type: 'uint256' },
+            { name: 'amountOutMin', type: 'uint256' },
+            { name: 'path', type: 'bytes' },
+            { name: 'payerIsUser', type: 'bool' }
+          ];
 
-        const universalRouterAbi = parseAbi([
-          'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
-        ]);
+          const amountOutMin = 0n; // Test with 0 slippage
+          const swapInput = encodeAbiParameters(exactInputSingleParamsAbi, [
+            recipient, // recipient
+            wethAmountToSwap,
+            amountOutMin, // 0 min out
+            path,
+            true // payerIsUser = true (requires Permit2)
+          ]);
 
-        const swapCalldata = encodeFunctionData({
-          abi: universalRouterAbi,
-          functionName: 'execute',
-          args: [commands, [swapInput], deadline]
-        });
+          const universalRouterAbi = parseAbi([
+            'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
+          ]);
+
+          const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 20);
+
+          swapCalldata = encodeFunctionData({
+            abi: universalRouterAbi,
+            functionName: 'execute',
+            args: [commands, [swapInput], deadline]
+          });
+          
+          preSwapCalls = [
+            { target: wethAddress, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [PERMIT2_ADDRESS, MAX_UINT128] }) },
+            { target: PERMIT2_ADDRESS, data: encodeFunctionData({ abi: permit2Abi, functionName: 'approve', args: [wethAddress, actualRouterAddress, BigInt(MAX_UINT128), 4000000000] }) }
+          ];
+        } else {
+          // Standard SwapRouter02 (ALPS)
+          const swapRouterAbi = parseAbi([
+            'struct ExactInputSingleParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 deadline; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }',
+            'function exactInputSingle(ExactInputSingleParams params) external payable returns (uint256 amountOut)'
+          ]);
+          
+          const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 20);
+
+          swapCalldata = encodeFunctionData({
+            abi: swapRouterAbi,
+            functionName: 'exactInputSingle',
+            args: [{
+              tokenIn: wethAddress as Address,
+              tokenOut: memeTokenAddress as Address,
+              fee: feeTier,
+              recipient: recipient,
+              deadline: deadline,
+              amountIn: wethAmountToSwap,
+              amountOutMinimum: 0n,
+              sqrtPriceLimitX96: 0n
+            }]
+          });
+          
+          // ALPS Router uses direct ERC20 approval, not Permit2
+          preSwapCalls = [
+            { target: wethAddress, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [actualRouterAddress, MAX_UINT128] }) }
+          ];
+        }
+
+        console.log(`[LPEngine Debug] Using Router Address: ${actualRouterAddress}`);
 
         const calls: UserOpCall[] = [
-          // 1. Transfer WETH to Router (since we don't use Permit2)
-          { target: wethAddress, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'transfer', args: [routerAddress, wethAmountToSwap] }) },
-          // 2. Swap WETH to Meme Token
-          { target: routerAddress, data: swapCalldata },
+          ...preSwapCalls,
+          // Swap WETH to Meme Token
+          { target: actualRouterAddress, data: swapCalldata },
           // 3. Approve WETH to NPM
           { target: wethAddress, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [npmAddress, MAX_UINT128] }) },
           // 4. Approve Meme Token to NPM
@@ -1092,8 +1161,12 @@ export class LPEngineAgent {
         if (this.onProposal) await this.onProposal(proposal); // Acts as notification
         return;
       } catch (e: any) {
-        await logEvent('ERROR', `[LP] Auto-Open Failed`, { error: e.message });
-        console.error(`[LPEngine] Failed to auto-open position: ${e.message}`);
+        let errorMsg = e.message;
+        if (process.env.ALCHEMY_API_KEY) {
+          errorMsg = errorMsg.replace(new RegExp(process.env.ALCHEMY_API_KEY, 'g'), '[REDACTED_ALCHEMY_KEY]');
+        }
+        await logEvent('ERROR', `[LP] Auto-Open Failed`, { error: errorMsg });
+        console.error(`[LPEngine] Failed to auto-open position: ${errorMsg}`);
         
         await prisma.lPPosition.update({
           where: { id: dbRecord.id },
@@ -1225,9 +1298,13 @@ export class LPEngineAgent {
         if (this.onProposal) await this.onProposal(proposal);
         return;
       } catch (e: any) {
-        await logEvent('ERROR', `[LP] Auto-Close Failed`, { error: e.message });
-        console.error(`[LPEngine] Failed to auto-close position: ${e.message}`);
-        proposal.description = `❌ *Auto-Close Failed*\n` + proposal.description + `\nError: ${e.message}`;
+        let errorMsg = e.message;
+        if (process.env.ALCHEMY_API_KEY) {
+          errorMsg = errorMsg.replace(new RegExp(process.env.ALCHEMY_API_KEY, 'g'), '[REDACTED_ALCHEMY_KEY]');
+        }
+        await logEvent('ERROR', `[LP] Auto-Close Failed`, { error: errorMsg });
+        console.error(`[LPEngine] Failed to auto-close position: ${errorMsg}`);
+        proposal.description = `❌ *Auto-Close Failed*\n` + proposal.description + `\nError: ${errorMsg}`;
         if (this.onProposal) await this.onProposal(proposal);
         return;
       }
@@ -1317,9 +1394,13 @@ export class LPEngineAgent {
           if (this.onProposal) await this.onProposal(proposal);
           continue; // Move to next position
         } catch (e: any) {
-          await logEvent('ERROR', `[LP] Auto-Harvest Failed`, { error: e.message });
-          console.error(`[LPEngine] Failed to auto-harvest position: ${e.message}`);
-          proposal.description = `❌ *Auto-Harvest Failed*\n` + proposal.description + `\nError: ${e.message}`;
+          let errorMsg = e.message;
+          if (process.env.ALCHEMY_API_KEY) {
+            errorMsg = errorMsg.replace(new RegExp(process.env.ALCHEMY_API_KEY, 'g'), '[REDACTED_ALCHEMY_KEY]');
+          }
+          await logEvent('ERROR', `[LP] Auto-Harvest Failed`, { error: errorMsg });
+          console.error(`[LPEngine] Failed to auto-harvest position: ${errorMsg}`);
+          proposal.description = `❌ *Auto-Harvest Failed*\n` + proposal.description + `\nError: ${errorMsg}`;
           if (this.onProposal) await this.onProposal(proposal);
           continue;
         }
