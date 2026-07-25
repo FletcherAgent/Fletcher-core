@@ -162,7 +162,7 @@ setInterval(() => {
     bot.api.sendMessage(process.env.TELEGRAM_CHAT_ID, `<pre>${safeChunk}</pre>`, { parse_mode: 'HTML' })
       .catch(err => originalError("Failed to send log to Telegram", err));
   }
-}, 3000);
+}, 10000);
 // -----------------------
 
 bot.command("start", (ctx) => {
