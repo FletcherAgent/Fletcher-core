@@ -848,6 +848,14 @@ export class LPEngineAgent {
       amount0Desired = this.usdToTokenAmount(halfUsd, token0Price, t0Dec);
       amount1Desired = this.usdToTokenAmount(halfUsd, token1Price, t1Dec);
     }
+    
+    // Apply a 10% reduction buffer to the desired amounts for minting.
+    // This accommodates the Universal Router swap fee (up to 1%) and price impact.
+    // NPM will pull the proportional amounts based on the current pool price,
+    // leaving a tiny amount of unused dust in the Smart Account, preventing
+    // "ERC20: transfer amount exceeds balance" reverts.
+    amount0Desired = amount0Desired * 90n / 100n;
+    amount1Desired = amount1Desired * 90n / 100n;
 
     const sqrtRatioAX96 = tickToSqrtPriceX96(tickLower);
     const sqrtRatioBX96 = tickToSqrtPriceX96(tickUpper);
