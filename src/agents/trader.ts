@@ -503,49 +503,31 @@ export class TraderAgent {
         });
         finalToAddress = POOL_ROUTER;
       } else if (POOL_TYPE === 'V3') {
-        const isUniversalRouter = finalToAddress.toLowerCase() === '0x8876789976decbfcbbbe364623c63652db8c0904';
+        // Universal Router on some chains (like ALPS) is broken for V3 swaps (SliceOutOfBounds on cmd 0x00)
+        // Fallback to the standard deterministic Uniswap V3 SwapRouter which is supported globally.
+        finalToAddress = (process.env.V3_SWAP_ROUTER || '0xE592427A0AEce92De3Edee1F18E0157C05861564').toLowerCase();
+
+        const swapRouterAbi = parseAbi([
+          'struct ExactInputSingleParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 deadline; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }',
+          'function exactInputSingle(ExactInputSingleParams params) external payable returns (uint256 amountOut)'
+        ]);
+        calldata = encodeFunctionData({
+          abi: swapRouterAbi,
+          functionName: 'exactInputSingle',
+          args: [{
+            tokenIn: WETH_ADDRESS as `0x${string}`,
+            tokenOut: tokenOut as `0x${string}`,
+            fee: POOL_FEE,
+            recipient: account!.address,
+            deadline,
+            amountIn,
+            amountOutMinimum,
+            sqrtPriceLimitX96: 0n
+          }]
+        });
         
-        if (isUniversalRouter) {
-          const commands = '0x00' as `0x${string}`;
-          const feeHex = POOL_FEE.toString(16).padStart(6, '0');
-          const path = (WETH_ADDRESS + feeHex + tokenOut.replace('0x', '')) as `0x${string}`;
-          
-          const swapInput = encodeAbiParameters(
-            [{type: 'address'}, {type: 'uint256'}, {type: 'uint256'}, {type: 'bytes'}, {type: 'bool'}],
-            [account!.address, amountIn, amountOutMinimum, path, true]
-          );
-          
-          const universalRouterAbi = parseAbi([
-            'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
-          ]);
-          calldata = encodeFunctionData({
-            abi: universalRouterAbi,
-            functionName: 'execute',
-            args: [commands, [swapInput], deadline]
-          });
-          return { calldata, amountOutMinimum, expectedOut, toAddress: finalToAddress as `0x${string}`, value: amountIn }; // UR wraps ETH if value > 0
-        } else {
-          // Standard SwapRouter02 (ALPS)
-          const swapRouterAbi = parseAbi([
-            'struct ExactInputSingleParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 deadline; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }',
-            'function exactInputSingle(ExactInputSingleParams params) external payable returns (uint256 amountOut)'
-          ]);
-          calldata = encodeFunctionData({
-            abi: swapRouterAbi,
-            functionName: 'exactInputSingle',
-            args: [{
-              tokenIn: WETH_ADDRESS as `0x${string}`,
-              tokenOut: tokenOut as `0x${string}`,
-              fee: POOL_FEE,
-              recipient: account!.address,
-              deadline,
-              amountIn,
-              amountOutMinimum,
-              sqrtPriceLimitX96: 0n
-            }]
-          });
-          return { calldata, amountOutMinimum, expectedOut, toAddress: finalToAddress as `0x${string}`, value: 0n }; // Sending WETH directly, so 0 ETH value
-        }
+        // Sending ETH directly to SwapRouter which automatically wraps if tokenIn is WETH
+        return { calldata, amountOutMinimum, expectedOut, toAddress: finalToAddress as `0x${string}`, value: amountIn };
       } else {
         // V4_SWAP
         const commands = '0x10' as `0x${string}`;
