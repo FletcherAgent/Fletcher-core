@@ -382,34 +382,64 @@ export class LPEngineAgent {
     });
   }
 
-  buildCollectCalldata(tokenId: bigint, recipient: Address): Hex {
+  /**
+   * Build V4 modifyLiquidities calldata for collecting fees (DECREASE with 0 liquidity then TAKE_PAIR).
+   * On V4, calling decrease with 0 liquidity credits the caller with accrued fees.
+   * This replaces the V3 `collect()` function.
+   */
+  buildCollectCalldata(tokenId: bigint, recipient: Address, token0: Address, token1: Address, deadline: bigint): Hex {
+    // Action 0x01 = DECREASE_LIQUIDITY (with 0 liq = collect fees only), 0x11 = TAKE_PAIR (ALPS V4)
+    const actions = '0x0111' as Hex;
+    const param0 = encodeAbiParameters(
+      parseAbiParameters('uint256 tokenId, uint256 liquidity, uint128 amount0Min, uint128 amount1Min, bytes hookData'),
+      [tokenId, 0n, 0n, 0n, '0x']
+    );
+    const param1 = encodeAbiParameters(
+      parseAbiParameters('address currency0, address currency1, address recipient'),
+      [token0, token1, recipient]
+    );
+    const unlockData = encodeAbiParameters(
+      parseAbiParameters('bytes actions, bytes[] params'),
+      [actions, [param0, param1]]
+    );
     return encodeFunctionData({
-      abi: NPM_ABI,
-      functionName: 'collect',
-      args: [{
-        tokenId,
-        recipient,
-        amount0Max: MAX_UINT128,
-        amount1Max: MAX_UINT128,
-      }],
+      abi: parseAbi(['function modifyLiquidities(bytes unlockData, uint256 deadline) external payable']),
+      functionName: 'modifyLiquidities',
+      args: [unlockData, deadline]
     });
   }
 
+  /**
+   * Build V4 modifyLiquidities calldata for BURN_POSITION.
+   * BURN_POSITION (0x06) automatically decreases 100% liquidity and burns the NFT.
+   * Must be followed by TAKE_PAIR (0x0e) to sweep tokens to recipient.
+   */
   buildDecreaseLiquidityCalldata(
     tokenId: bigint,
     liquidity: bigint,
-    deadline: bigint
+    deadline: bigint,
+    token0: Address,
+    token1: Address,
+    recipient: Address
   ): Hex {
+    // Action 0x03 = BURN_POSITION, 0x11 = TAKE_PAIR (ALPS V4 action values)
+    const actions = '0x0311' as Hex;
+    const param0 = encodeAbiParameters(
+      parseAbiParameters('uint256 tokenId, uint128 amount0Min, uint128 amount1Min, bytes hookData'),
+      [tokenId, 0n, 0n, '0x']
+    );
+    const param1 = encodeAbiParameters(
+      parseAbiParameters('address currency0, address currency1, address recipient'),
+      [token0, token1, recipient]
+    );
+    const unlockData = encodeAbiParameters(
+      parseAbiParameters('bytes actions, bytes[] params'),
+      [actions, [param0, param1]]
+    );
     return encodeFunctionData({
-      abi: NPM_ABI,
-      functionName: 'decreaseLiquidity',
-      args: [{
-        tokenId,
-        liquidity,
-        amount0Min: 0n,
-        amount1Min: 0n,
-        deadline,
-      }],
+      abi: parseAbi(['function modifyLiquidities(bytes unlockData, uint256 deadline) external payable']),
+      functionName: 'modifyLiquidities',
+      args: [unlockData, deadline]
     });
   }
 
@@ -1240,25 +1270,26 @@ export class LPEngineAgent {
     const recipient = ((process.env.LP_WALLET_ADDRESS || process.env.USER_WALLET_ADDRESS) ?? '') as Address;
 
     // Read current liquidity from NPM (skip if simulated)
+    // V4 uses getPositionLiquidity instead of positions()
     let liquidity = 0n;
     if (!isSim) {
       try {
-        const data = await publicClient.readContract({
+        liquidity = await publicClient.readContract({
           address: npmAddress,
-          abi: NPM_ABI,
-          functionName: 'positions',
+          abi: parseAbi(['function getPositionLiquidity(uint256 tokenId) external view returns (uint128 liquidity)']),
+          functionName: 'getPositionLiquidity',
           args: [tokenId],
-        }) as unknown as any[];
-        liquidity = data[7] as bigint;
+        }) as bigint;
+        console.log(`[LPEngine] Position liquidity: ${liquidity}`);
       } catch (e: any) {
-        console.error(`[LPEngine] NPM positions() failed: ${e.message}`);
+        console.error(`[LPEngine] getPositionLiquidity() failed: ${e.message}`);
       }
     } else {
       liquidity = pos.simulatedLiquidity ? BigInt(pos.simulatedLiquidity) : 0n;
     }
 
-    // Decrease 100% liquidity
-    const decreaseCalldata = this.buildDecreaseLiquidityCalldata(tokenId, liquidity, deadline);
+    // Build V4 BURN_POSITION calldata (atomically closes position + sweeps tokens)
+    const closeCalldata = this.buildDecreaseLiquidityCalldata(tokenId, liquidity, deadline, pos.token0 as Address, pos.token1 as Address, recipient);
 
     const description =
       `🔴 *LP CLOSE Proposal*\n` +
@@ -1287,7 +1318,7 @@ export class LPEngineAgent {
       tickLower: pos.tickLower,
       tickUpper: pos.tickUpper,
       entryValueUsd: pos.entryValue,
-      calldata: decreaseCalldata,
+      calldata: closeCalldata,
       to: npmAddress,
       dayMode: pos.dayMode,
       nightMode: pos.nightMode,
@@ -1309,12 +1340,9 @@ export class LPEngineAgent {
       try {
         const tier = await getUserTier(recipient);
         const client = await getSessionKeyClient('FULL', tier);
-        const collectCalldata = this.buildCollectCalldata(tokenId, recipient);
-        
-        // Batch: Decrease + Collect
+        // Single atomic V4 call: BURN_POSITION + TAKE_PAIR
         const calls: UserOpCall[] = [
-          { target: npmAddress, data: decreaseCalldata },
-          { target: npmAddress, data: collectCalldata }
+          { target: npmAddress, data: closeCalldata },
         ];
 
         const txHash = await buildAndSendLPUserOperation(client, calls);
@@ -1331,12 +1359,14 @@ export class LPEngineAgent {
         return;
       } catch (e: any) {
         let errorMsg = e.message;
-        if (errorMsg && errorMsg.length > 500) {
-          errorMsg = errorMsg.substring(0, 500) + '... [TRUNCATED]';
+        if (errorMsg && errorMsg.length > 200) {
+          errorMsg = errorMsg.substring(0, 200) + '...';
         }
         if (process.env.ALCHEMY_API_KEY) {
-          errorMsg = errorMsg.replace(new RegExp(process.env.ALCHEMY_API_KEY, 'g'), '[REDACTED_ALCHEMY_KEY]');
+          errorMsg = errorMsg.replace(new RegExp(process.env.ALCHEMY_API_KEY, 'g'), '[REDACTED]');
         }
+        // Strip Markdown special chars to avoid Telegram parse errors
+        errorMsg = errorMsg.replace(/[_*[\]()~`>#+=|{}.!-]/g, ' ');
         
         // Revert status back to OPEN so it stays in Active LP and can be retried
         await prisma.lPPosition.update({
@@ -1344,9 +1374,9 @@ export class LPEngineAgent {
           data: { status: 'OPEN' } as any,
         });
 
-        await logEvent('ERROR', `[LP] Auto-Close Failed (Reverted to OPEN)`, { error: errorMsg });
-        console.error(`[LPEngine] Failed to auto-close position: ${errorMsg}`);
-        proposal.description = `❌ *Auto-Close Failed*\n` + proposal.description + `\nError: ${errorMsg}`;
+        await logEvent('ERROR', `[LP] Auto-Close Failed (Reverted to OPEN)`, { error: e.message });
+        console.error(`[LPEngine] Failed to auto-close position: ${e.message}`);
+        proposal.description = `❌ Auto-Close Failed\nPair: ${pos.token0Symbol}/${pos.token1Symbol}\nStatus: Reverted to OPEN\nError: ${errorMsg}`;
         if (this.onProposal) await this.onProposal(proposal);
         return;
       }
@@ -1379,7 +1409,8 @@ export class LPEngineAgent {
       const recipient = ((process.env.LP_WALLET_ADDRESS || process.env.USER_WALLET_ADDRESS) ?? '') as Address;
       const npmAddress = (pos.managerAddress as `0x${string}`) || (await this.getAddresses()).npmAddress;
 
-      const calldata = isSim ? '0x' : this.buildCollectCalldata(tokenId, recipient);
+      const harvestDeadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 10);
+      const calldata = isSim ? '0x' : this.buildCollectCalldata(tokenId, recipient, pos.token0 as Address, pos.token1 as Address, harvestDeadline);
 
       const proposal: LPProposal = {
         type: 'HARVEST',
