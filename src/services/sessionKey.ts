@@ -54,6 +54,7 @@ export async function createSmartAccount(privateKeyHex: Hex, tier: number, accou
           publicClient as any,
           {
             policyId: process.env.ALCHEMY_GAS_POLICY_ID,
+            paymasterAddress: '0x4Fd9098af9ddcB41DA48A1d78F91F1398965addc' as `0x${string}`,
           }
         )
       : {}),
@@ -108,9 +109,9 @@ export async function grantSessionKey(
  * Auto-install session key plugin on startup if not already installed.
  */
 export async function installSessionKeyPluginAndDelegate(tier: number) {
-  const envKey = (process.env.USER_PRIVATE_KEY || process.env.PRIVATE_KEY) as Hex;
+  const envKey = process.env.LP_PRIVATE_KEY as Hex;
   if (!envKey) {
-    console.log("[SessionKey] No Master PRIVATE_KEY found in .env, skipping auto-install.");
+    console.log("[SessionKey] No LP_PRIVATE_KEY found in .env, skipping auto-install.");
     return;
   }
 
@@ -214,7 +215,24 @@ export async function buildAndSendLPUserOperation(
 /**
  * Get a Smart Account Client authorized by a valid Session Key.
  */
+/**
+ * Get a Smart Account Client authorized by the MAIN PRIVATE KEY directly.
+ * Bypasses Session Key plugins.
+ */
+export async function getMainAccountClient(tier: number) {
+  const pk = process.env.LP_PRIVATE_KEY;
+  if (!pk) throw new Error("LP_PRIVATE_KEY not set");
+  return await createSmartAccount(pk as `0x${string}`, tier);
+}
+
 export async function getSessionKeyClient(modeRequired: 'SEMI' | 'FULL', tier: number) {
+  const config = await prisma.systemConfig.findUnique({ where: { key: 'USE_SESSION_KEY' } });
+  const useSessionKey = config?.value === 'true';
+
+  if (!useSessionKey) {
+    return await getMainAccountClient(tier);
+  }
+
   // Check for active session key in the database
   const validKeys = await prisma.sessionKey.findMany({
     where: {

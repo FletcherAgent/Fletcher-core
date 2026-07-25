@@ -179,7 +179,11 @@ export class LPEngineAgent {
     if (!factoryAddress) console.warn('[LPEngine] ⚠️ UNISWAP_V3_FACTORY_ADDRESS not set');
     if (!wethAddress)    console.warn('[LPEngine] ⚠️ WETH_ADDRESS not set (DB nor env)');
 
-    return { npmAddress, factoryAddress, wethAddress };
+    return { 
+      npmAddress: npmAddress.toLowerCase() as `0x${string}`, 
+      factoryAddress: factoryAddress.toLowerCase() as `0x${string}`, 
+      wethAddress: wethAddress.toLowerCase() as `0x${string}` 
+    };
   }
 
   // ─── Zombie Cleanup ─────────────────────────────────────────────────────────
