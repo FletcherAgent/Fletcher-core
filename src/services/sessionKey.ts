@@ -195,10 +195,11 @@ export async function buildAndSendLPUserOperation(
 
   console.log(`[Alchemy] UserOp submitted. Hash: ${userOpResult.hash}`);
   
-  // Wait for the tx to be mined
-  const txHash = await client.waitForUserOperationTransaction({
-    hash: userOpResult.hash,
-  });
+  // Wait for the tx to be mined with a 3-minute timeout to prevent hanging
+  const txHash = await Promise.race([
+    client.waitForUserOperationTransaction({ hash: userOpResult.hash }),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('UserOperation Bundler timeout (dropped by mempool)')), 180000))
+  ]) as Hex;
   
   console.log(`[Alchemy] UserOp mined! Tx Hash: ${txHash}`);
   return txHash;
