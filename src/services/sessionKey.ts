@@ -190,7 +190,11 @@ export async function buildAndSendLPUserOperation(
       target: c.target,
       data: c.data,
       value: c.value ?? 0n,
-    }))
+    })),
+    overrides: {
+      maxFeePerGas: { multiplier: 1.25 },
+      maxPriorityFeePerGas: { multiplier: 1.25 }
+    }
   });
 
   console.log(`[Alchemy] UserOp submitted. Hash: ${userOpResult.hash}`);
