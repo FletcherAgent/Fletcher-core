@@ -1162,6 +1162,9 @@ export class LPEngineAgent {
         return;
       } catch (e: any) {
         let errorMsg = e.message;
+        if (errorMsg && errorMsg.length > 500) {
+          errorMsg = errorMsg.substring(0, 500) + '... [TRUNCATED]';
+        }
         if (process.env.ALCHEMY_API_KEY) {
           errorMsg = errorMsg.replace(new RegExp(process.env.ALCHEMY_API_KEY, 'g'), '[REDACTED_ALCHEMY_KEY]');
         }
@@ -1299,6 +1302,9 @@ export class LPEngineAgent {
         return;
       } catch (e: any) {
         let errorMsg = e.message;
+        if (errorMsg && errorMsg.length > 500) {
+          errorMsg = errorMsg.substring(0, 500) + '... [TRUNCATED]';
+        }
         if (process.env.ALCHEMY_API_KEY) {
           errorMsg = errorMsg.replace(new RegExp(process.env.ALCHEMY_API_KEY, 'g'), '[REDACTED_ALCHEMY_KEY]');
         }
@@ -1395,6 +1401,9 @@ export class LPEngineAgent {
           continue; // Move to next position
         } catch (e: any) {
           let errorMsg = e.message;
+          if (errorMsg && errorMsg.length > 500) {
+            errorMsg = errorMsg.substring(0, 500) + '... [TRUNCATED]';
+          }
           if (process.env.ALCHEMY_API_KEY) {
             errorMsg = errorMsg.replace(new RegExp(process.env.ALCHEMY_API_KEY, 'g'), '[REDACTED_ALCHEMY_KEY]');
           }
