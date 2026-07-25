@@ -16,7 +16,7 @@
  * Zero-custody: agent only builds calldata & proposes. User signs.
  */
 
-import { encodeFunctionData, encodeAbiParameters, parseAbi, parseUnits, decodeEventLog, type Address, type Hex } from 'viem';
+import { encodeFunctionData, encodeAbiParameters, parseAbiParameters, parseAbi, parseUnits, decodeEventLog, type Address, type Hex } from 'viem';
 import { PrismaClient } from '@prisma/client';
 import { publicClient, walletClient, account } from '../services/viem.js';
 import { getSessionKeyClient, buildAndSendLPUserOperation, ensureSmartAccountFunded, type UserOpCall } from '../services/sessionKey.js';
@@ -65,7 +65,8 @@ const NPM_ABI = parseAbi([
   // positions (for reading)
   'function positions(uint256 tokenId) external view returns (uint96 nonce, address operator, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128, uint128 tokensOwed0, uint128 tokensOwed1)',
   // events
-  'event IncreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)'
+  'event IncreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)',
+  'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)'
 ]);
 
 const ERC20_ABI = parseAbi([
@@ -349,27 +350,35 @@ export class LPEngineAgent {
   // ─── NPM Calldata Builders ──────────────────────────────────────────────────
 
   buildMintCalldata(params: {
-    token0: Address; token1: Address; fee: number;
+    token0: Address; token1: Address; fee: number; tickSpacing: number; hooks: Address;
     tickLower: number; tickUpper: number;
     amount0Desired: bigint; amount1Desired: bigint;
+    liquidity: bigint;
     recipient: Address; deadline: bigint;
   }): Hex {
+    const MAX_UINT128 = 340282366920938463463374607431768211455n; // 2**128 - 1
+    const actions = '0x020d' as Hex; // MINT_POSITION (0x02), SETTLE_PAIR (0x0d)
+    const param0 = encodeAbiParameters(
+      parseAbiParameters('address currency0, address currency1, uint24 fee, int24 tickSpacing, address hooks, int24 tickLower, int24 tickUpper, uint256 liquidity, uint128 amount0Max, uint128 amount1Max, address owner, bytes hookData'),
+      [
+        params.token0, params.token1, params.fee, params.tickSpacing, params.hooks,
+        params.tickLower, params.tickUpper, params.liquidity, 
+        MAX_UINT128, MAX_UINT128, params.recipient, '0x'
+      ]
+    );
+    const param1 = encodeAbiParameters(
+      parseAbiParameters('address currency0, address currency1'),
+      [params.token0, params.token1]
+    );
+    const unlockData = encodeAbiParameters(
+      parseAbiParameters('bytes actions, bytes[] params'),
+      [actions, [param0, param1]]
+    );
+
     return encodeFunctionData({
-      abi: NPM_ABI,
-      functionName: 'mint',
-      args: [{
-        token0: params.token0,
-        token1: params.token1,
-        fee: params.fee,
-        tickLower: params.tickLower,
-        tickUpper: params.tickUpper,
-        amount0Desired: params.amount0Desired,
-        amount1Desired: params.amount1Desired,
-        amount0Min: 0n, // slippage handled via approval timing
-        amount1Min: 0n,
-        recipient: params.recipient,
-        deadline: params.deadline,
-      }],
+      abi: parseAbi(['function modifyLiquidities(bytes unlockData, uint256 deadline) external payable']),
+      functionName: 'modifyLiquidities',
+      args: [unlockData, params.deadline]
     });
   }
 
@@ -914,6 +923,15 @@ export class LPEngineAgent {
     const adjustedAmount0 = amount0Desired * 50n / 100n;
     const adjustedAmount1 = amount1Desired * 50n / 100n;
 
+    // Calculate adjusted liquidity for the reduced amounts to satisfy V4 exact liquidity requirements
+    const adjustedLiquidity = getLiquidityForAmounts(
+      sqrtPriceX96,
+      sqrtRatioAX96,
+      sqrtRatioBX96,
+      adjustedAmount0,
+      adjustedAmount1
+    );
+
     // Build calldata
     const calldata = this.buildMintCalldata({
       token0: t0 as Address,
@@ -923,6 +941,9 @@ export class LPEngineAgent {
       tickUpper,
       amount0Desired: adjustedAmount0,
       amount1Desired: adjustedAmount1,
+      liquidity: adjustedLiquidity,
+      tickSpacing: feeToTickSpacing(feeTier),
+      hooks: '0x0000000000000000000000000000000000000000',
       recipient,
       deadline,
     });
@@ -1053,11 +1074,13 @@ export class LPEngineAgent {
             { type: 'bool' }
           ];
 
-          const amountOutMin = 0n; // Test with 0 slippage
+          const expectedMemeOut = isWeth0 ? amount1Desired : amount0Desired;
+          const amountOutMin = expectedMemeOut * 90n / 100n; // 10% max slippage
+
           const swapInput = encodeAbiParameters(exactInputSingleParamsAbi, [
             recipient, // recipient
             wethAmountToSwap,
-            amountOutMin, // 0 min out
+            amountOutMin, // 10% slippage protection
             path,
             true // payerIsUser = true (requires Permit2)
           ]);
@@ -1085,6 +1108,9 @@ export class LPEngineAgent {
             'function exactInputSingle(ExactInputSingleParams params) external payable returns (uint256 amountOut)'
           ]);
           
+          const expectedMemeOut = isWeth0 ? amount1Desired : amount0Desired;
+          const amountOutMin = expectedMemeOut * 90n / 100n; // 10% max slippage
+
           swapCalldata = encodeFunctionData({
             abi: swapRouterAbi,
             functionName: 'exactInputSingle',
@@ -1094,7 +1120,7 @@ export class LPEngineAgent {
               fee: feeTier,
               recipient: recipient,
               amountIn: wethAmountToSwap,
-              amountOutMinimum: 0n,
+              amountOutMinimum: amountOutMin, // 10% slippage protection
               sqrtPriceLimitX96: 0n
             }]
           });
@@ -1113,9 +1139,12 @@ export class LPEngineAgent {
           ...preSwapCalls,
           // Swap WETH → Meme Token
           { target: actualRouterAddress, data: swapCalldata },
-          // Approve WETH and Meme Token to NPM
-          { target: wethAddress, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [npmAddress, MAX_UINT128] }) },
-          { target: memeTokenAddress, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [npmAddress, MAX_UINT128] }) },
+          // Approve WETH and Meme Token to Permit2
+          { target: wethAddress, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [PERMIT2_ADDRESS, MAX_UINT128] }) },
+          { target: memeTokenAddress, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [PERMIT2_ADDRESS, MAX_UINT128] }) },
+          // Approve NPM to pull from Permit2
+          { target: PERMIT2_ADDRESS, data: encodeFunctionData({ abi: permit2Abi, functionName: 'approve', args: [wethAddress, npmAddress, BigInt(MAX_UINT128), 4000000000] }) },
+          { target: PERMIT2_ADDRESS, data: encodeFunctionData({ abi: permit2Abi, functionName: 'approve', args: [memeTokenAddress, npmAddress, BigInt(MAX_UINT128), 4000000000] }) },
           // Mint LP Position
           { target: npmAddress, data: calldata }
         ];
@@ -1129,7 +1158,7 @@ export class LPEngineAgent {
         });
         
         console.log(`[LPEngine] 📜 Waiting for receipt to extract TokenID...`);
-        const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+        const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash as Hex });
         
         let realTokenId = dbRecord.tokenId; // Fallback to PENDING-...
         try {
@@ -1140,9 +1169,9 @@ export class LPEngineAgent {
                 data: log.data,
                 topics: log.topics,
               });
-              if (decoded.eventName === 'IncreaseLiquidity') {
+              if (decoded.eventName === 'IncreaseLiquidity' || decoded.eventName === 'Transfer') {
                 realTokenId = (decoded.args as any).tokenId.toString();
-                console.log(`[LPEngine] 🎯 Successfully extracted Real TokenID: ${realTokenId}`);
+                console.log(`[LPEngine] 🎯 Successfully extracted Real TokenID: ${realTokenId} from ${decoded.eventName}`);
                 break;
               }
             } catch (e) {
