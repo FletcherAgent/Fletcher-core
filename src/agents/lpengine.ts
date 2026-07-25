@@ -16,7 +16,7 @@
  * Zero-custody: agent only builds calldata & proposes. User signs.
  */
 
-import { encodeFunctionData, parseAbi, parseUnits, decodeEventLog, type Address, type Hex } from 'viem';
+import { encodeFunctionData, encodeAbiParameters, parseAbi, parseUnits, decodeEventLog, type Address, type Hex } from 'viem';
 import { PrismaClient } from '@prisma/client';
 import { publicClient, walletClient, account } from '../services/viem.js';
 import { getSessionKeyClient, buildAndSendLPUserOperation, type UserOpCall } from '../services/sessionKey.js';
@@ -72,6 +72,8 @@ const ERC20_ABI = parseAbi([
   'function decimals() view returns (uint8)',
   'function symbol() view returns (string)',
   'function balanceOf(address owner) view returns (uint256)',
+  'function approve(address spender, uint256 amount) external returns (bool)',
+  'function transfer(address to, uint256 amount) external returns (bool)',
 ]);
 
 const FACTORY_ABI = parseAbi([
@@ -800,8 +802,52 @@ export class LPEngineAgent {
       token0Price = token1Price * decimalAdjustedPoolPrice;
     }
 
-    const amount0Desired = this.usdToTokenAmount(halfUsd, token0Price, t0Dec);
-    const amount1Desired = this.usdToTokenAmount(halfUsd, token1Price, t1Dec);
+    // Dynamically evaluate Smart Account address
+    let recipient = ((process.env.LP_WALLET_ADDRESS || process.env.USER_WALLET_ADDRESS) ?? '') as Address;
+    if (!isDryRun) {
+      try {
+        const { createSmartAccount } = await import('../services/sessionKey.js');
+        const dummyClient = await createSmartAccount(process.env.LP_PRIVATE_KEY as `0x${string}`, 3);
+        recipient = dummyClient.account.address as Address;
+      } catch(e) {
+        console.warn(`[LPEngine] Failed to evaluate smart account address:`, e);
+      }
+    }
+    const isWeth0 = t0.toLowerCase() === wethAddress.toLowerCase();
+    
+    let wethBalance = 0n;
+    if (!isDryRun) {
+      try {
+        wethBalance = await publicClient.readContract({
+          address: wethAddress,
+          abi: ERC20_ABI,
+          functionName: 'balanceOf',
+          args: [recipient]
+        }) as bigint;
+      } catch (e) {
+        console.warn(`[LPEngine] Failed to fetch WETH balance: ${e}`);
+      }
+    }
+
+    let amount0Desired: bigint;
+    let amount1Desired: bigint;
+
+    if (wethBalance > 0n && !isDryRun) {
+      const halfOnePercentWeth = wethBalance / 200n; // 0.5% of WETH balance (so 1% total for swap + LP)
+      if (isWeth0) {
+        amount0Desired = halfOnePercentWeth;
+        const wethUsdValue = (Number(amount0Desired) / (10 ** t0Dec)) * token0Price;
+        amount1Desired = this.usdToTokenAmount(wethUsdValue, token1Price, t1Dec);
+      } else {
+        amount1Desired = halfOnePercentWeth;
+        const wethUsdValue = (Number(amount1Desired) / (10 ** t1Dec)) * token1Price;
+        amount0Desired = this.usdToTokenAmount(wethUsdValue, token0Price, t0Dec);
+      }
+      console.log(`[LPEngine] 💰 Dynamic Sizing: Using 1% of Wallet WETH Balance`);
+    } else {
+      amount0Desired = this.usdToTokenAmount(halfUsd, token0Price, t0Dec);
+      amount1Desired = this.usdToTokenAmount(halfUsd, token1Price, t1Dec);
+    }
 
     const sqrtRatioAX96 = tickToSqrtPriceX96(tickLower);
     const sqrtRatioBX96 = tickToSqrtPriceX96(tickUpper);
@@ -813,7 +859,7 @@ export class LPEngineAgent {
       amount1Desired
     );
 
-    const recipient = ((process.env.LP_WALLET_ADDRESS || process.env.USER_WALLET_ADDRESS) ?? '') as Address;
+    // recipient already defined above
     const tier = await getUserTier(recipient);
     const limits = getTierLimits(tier);
 
@@ -836,6 +882,11 @@ export class LPEngineAgent {
 
     const deadline  = BigInt(Math.floor(Date.now() / 1000) + 60 * 10); // 10 min
 
+    // Apply a 50% buffer reduction to the swapped token amount to account for swap fees and high price impact
+    // This prevents "ERC20: transfer amount exceeds balance" when NPM tries to pull the minted tokens
+    const adjustedAmount0 = amount0Desired * 50n / 100n;
+    const adjustedAmount1 = amount1Desired * 50n / 100n;
+
     // Build calldata
     const calldata = this.buildMintCalldata({
       token0: t0 as Address,
@@ -843,8 +894,8 @@ export class LPEngineAgent {
       fee: feeTier,
       tickLower,
       tickUpper,
-      amount0Desired,
-      amount1Desired,
+      amount0Desired: adjustedAmount0,
+      amount1Desired: adjustedAmount1,
       recipient,
       deadline,
     });
@@ -936,10 +987,59 @@ export class LPEngineAgent {
       try {
         const tier = await getUserTier(recipient);
         const client = await getSessionKeyClient('FULL', tier);
-        const calls: UserOpCall[] = [{
-          target: npmAddress,
-          data: calldata
-        }];
+        const dexConfig = await getDexConfig('V3');
+        const routerAddress = (dexConfig.routerAddress || process.env.UNIVERSAL_ROUTER || process.env.ROUTER_ADDRESS || '') as Address;
+        
+        // Slippage / Swap setup
+        const isWeth0 = t0.toLowerCase() === wethAddress.toLowerCase();
+        const memeTokenAddress = (isWeth0 ? t1 : t0) as Address;
+        const wethAmountToSwap = isWeth0 ? amount0Desired : amount1Desired; // WETH is token0, so we need amount0
+        console.log(`[LPEngine Debug] wethAmountToSwap=${wethAmountToSwap}, amount0=${amount0Desired}, amount1=${amount1Desired}, isWeth0=${isWeth0}`);
+        
+        // ExactInputSingleParams ABI for Universal Router
+        const commands = '0x00' as `0x${string}`; // V3_SWAP_EXACT_IN
+        const feeHex = feeTier.toString(16).padStart(6, '0');
+        const path = (wethAddress + feeHex + memeTokenAddress.replace('0x', '')) as `0x${string}`;
+        
+        const exactInputSingleParamsAbi = [
+          { name: 'recipient', type: 'address' },
+          { name: 'amountIn', type: 'uint256' },
+          { name: 'amountOutMin', type: 'uint256' },
+          { name: 'path', type: 'bytes' },
+          { name: 'payerIsUser', type: 'bool' }
+        ];
+
+        const amountOutMin = (isWeth0 ? amount1Desired : amount0Desired) * 50n / 100n;
+        const swapInput = encodeAbiParameters(exactInputSingleParamsAbi, [
+          recipient, // recipient: MSG_SENDER (Smart Account)
+          wethAmountToSwap,
+          amountOutMin, // 50% max slippage protection
+          path,
+          false // payerIsUser (use funds transferred to Router)
+        ]);
+
+        const universalRouterAbi = parseAbi([
+          'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
+        ]);
+
+        const swapCalldata = encodeFunctionData({
+          abi: universalRouterAbi,
+          functionName: 'execute',
+          args: [commands, [swapInput], deadline]
+        });
+
+        const calls: UserOpCall[] = [
+          // 1. Transfer WETH to Router (since we don't use Permit2)
+          { target: wethAddress, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'transfer', args: [routerAddress, wethAmountToSwap] }) },
+          // 2. Swap WETH to Meme Token
+          { target: routerAddress, data: swapCalldata },
+          // 3. Approve WETH to NPM
+          { target: wethAddress, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [npmAddress, MAX_UINT128] }) },
+          // 4. Approve Meme Token to NPM
+          { target: memeTokenAddress, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [npmAddress, MAX_UINT128] }) },
+          // 5. Mint LP Position
+          { target: npmAddress, data: calldata }
+        ];
 
         const txHash = await buildAndSendLPUserOperation(client, calls);
         
