@@ -220,23 +220,37 @@ export async function getNPMPosition(tokenId: bigint, managerAddress?: string | 
   }
   if (!NPM_ADDRESS) throw new Error('[lpMath] POSITION_MANAGER not set in DB config');
 
-  const r = await publicClient.readContract({
-    address: NPM_ADDRESS as `0x${string}`,
-    abi: NPM_ABI,
-    functionName: 'positions',
-    args: [tokenId],
-  }) as unknown as any[];
+  try {
+    const r = await publicClient.readContract({
+      address: NPM_ADDRESS as `0x${string}`,
+      abi: NPM_ABI,
+      functionName: 'positions',
+      args: [tokenId],
+    }) as unknown as any[];
 
-  return {
-    token0:      r[2],
-    token1:      r[3],
-    fee:         Number(r[4]),
-    tickLower:   Number(r[5]),
-    tickUpper:   Number(r[6]),
-    liquidity:   r[7] as bigint,
-    tokensOwed0: r[10] as bigint,
-    tokensOwed1: r[11] as bigint,
-  };
+    return {
+      token0:      r[2],
+      token1:      r[3],
+      fee:         Number(r[4]),
+      tickLower:   Number(r[5]),
+      tickUpper:   Number(r[6]),
+      liquidity:   r[7] as bigint,
+      tokensOwed0: r[10] as bigint,
+      tokensOwed1: r[11] as bigint,
+    };
+  } catch (err) {
+    // Graceful fallback for Uniswap V4 / ALPS which doesn't support the V3 positions() struct
+    return {
+      token0: '',
+      token1: '',
+      fee: 0,
+      tickLower: 0,
+      tickUpper: 0,
+      liquidity: 0n,
+      tokensOwed0: 0n,
+      tokensOwed1: 0n,
+    };
+  }
 }
 
 /**
