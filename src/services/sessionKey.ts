@@ -192,8 +192,8 @@ export async function buildAndSendLPUserOperation(
       value: c.value ?? 0n,
     })),
     overrides: {
-      maxFeePerGas: { multiplier: 1.25 },
-      maxPriorityFeePerGas: { multiplier: 1.25 }
+      maxFeePerGas: { multiplier: 1 },
+      maxPriorityFeePerGas: { multiplier: 1 }
     }
   });
 
