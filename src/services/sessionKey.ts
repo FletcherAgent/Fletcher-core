@@ -2,8 +2,8 @@ import { type Address, type Hex, parseAbi, custom } from 'viem';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { prisma } from '../core/db.js';
 import { createMultiOwnerModularAccount } from "@alchemy/aa-accounts";
-import { LocalAccountSigner, createSmartAccountClient } from "@alchemy/aa-core";
-import { alchemyGasManagerMiddleware } from "@alchemy/aa-alchemy";
+import { LocalAccountSigner } from "@alchemy/aa-core";
+import { createAlchemySmartAccountClient } from "@alchemy/aa-alchemy";
 import { http } from "viem";
 import { sessionKeyPluginActions, SessionKeyPermissionsBuilder, SessionKeyAccessListType } from "@alchemy/aa-accounts";
 
@@ -43,18 +43,13 @@ export async function createSmartAccount(privateKeyHex: Hex, tier: number, accou
   
   const limits = getTierLimits(tier);
 
-  const alchemyClient = createSmartAccountClient({
-    transport: transport as any,
+  const alchemyClient = createAlchemySmartAccountClient({
+    rpcUrl: rpcUrl,
     chain: robinhoodChain,
     account,
-    ...(process.env.ALCHEMY_GAS_POLICY_ID && limits.sponsoredGas
-      ? alchemyGasManagerMiddleware(
-          { transport: transport as any, chain: robinhoodChain } as any,
-          {
-            policyId: process.env.ALCHEMY_GAS_POLICY_ID,
-          }
-        )
-      : {}),
+    gasManagerConfig: (process.env.ALCHEMY_GAS_POLICY_ID && limits.sponsoredGas)
+      ? { policyId: process.env.ALCHEMY_GAS_POLICY_ID }
+      : undefined,
   });
 
   return alchemyClient;
