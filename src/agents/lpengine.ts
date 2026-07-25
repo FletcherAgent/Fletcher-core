@@ -182,10 +182,44 @@ export class LPEngineAgent {
     return { npmAddress, factoryAddress, wethAddress };
   }
 
+  // ─── Zombie Cleanup ─────────────────────────────────────────────────────────
+
+  /**
+   * Cleans up PENDING positions older than 10 minutes that have no txHash.
+   * This prevents them from becoming zombies that block new entries if the process restarts
+   * while waiting for a transaction to be mined.
+   */
+  private async cleanupZombiePositions(): Promise<void> {
+    const threshold = new Date(Date.now() - 10 * 60 * 1000); // 10 minutes ago
+    try {
+      const zombies = await prisma.lPPosition.findMany({
+        where: {
+          status: 'PENDING',
+          txHash: null,
+          createdAt: { lt: threshold }
+        }
+      });
+      if (zombies.length > 0) {
+        console.log(`[LPEngine] 🧟 Found ${zombies.length} zombie PENDING positions. Marking as FAILED...`);
+        for (const zombie of zombies) {
+          await prisma.lPPosition.update({
+            where: { id: zombie.id },
+            data: { status: 'FAILED' }
+          });
+          await logEvent('WARN', `[LP] Zombie Cleanup: Marked ${zombie.token0Symbol}/${zombie.token1Symbol} as FAILED`, { positionId: zombie.id });
+        }
+      }
+    } catch (e: any) {
+      console.error(`[LPEngine] Failed to cleanup zombie positions: ${e.message}`);
+    }
+  }
+
   // ─── Position Cap Check ─────────────────────────────────────────────────────
 
   /** Check if new position can be opened (max positions from metaConfig) for the current mode */
   private async canOpenNewPosition(): Promise<{ ok: boolean; reason?: string }> {
+    await this.cleanupZombiePositions();
+
     const config = await loadLPConfig();
     const modeCfg = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
     const isDryRun  = (modeCfg?.value || 'LIVE') === 'DRY_RUN';
