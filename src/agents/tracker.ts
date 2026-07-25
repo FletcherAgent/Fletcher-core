@@ -64,7 +64,7 @@ export class TrackerAgent {
             prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } }),
             prisma.systemConfig.findUnique({ where: { key: 'MAX_POSITION_SIZE' } }),
             prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } }),
-            prisma.lPPosition.aggregate({ _sum: { harvestedFees: true } })
+            prisma.lPPosition.aggregate({ _sum: { feesCollected: true } })
           ]);
           
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -80,7 +80,7 @@ export class TrackerAgent {
               tradingMode: tradingModeConfig?.value || 'LIVE',
               autonomyMode: autonomyConfig?.value || 'SEMI',
               maxPositionSize: maxPosConfig?.value ? parseInt(maxPosConfig.value, 10) : 2000,
-              allTimeHarvested: harvestedFeesAggregate?._sum?.harvestedFees || 0
+              allTimeHarvested: harvestedFeesAggregate?._sum?.feesCollected || 0
             }
           }));
         } catch (e) {
