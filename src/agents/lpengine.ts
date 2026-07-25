@@ -19,7 +19,7 @@
 import { encodeFunctionData, encodeAbiParameters, parseAbi, parseUnits, decodeEventLog, type Address, type Hex } from 'viem';
 import { PrismaClient } from '@prisma/client';
 import { publicClient, walletClient, account } from '../services/viem.js';
-import { getSessionKeyClient, buildAndSendLPUserOperation, type UserOpCall } from '../services/sessionKey.js';
+import { getSessionKeyClient, buildAndSendLPUserOperation, ensureSmartAccountFunded, type UserOpCall } from '../services/sessionKey.js';
 import { getUserTier, getTierLimits } from '../services/tierGate.js';
 import { prisma } from '../core/db.js';
 import { logEvent } from '../utils/logger.js';
@@ -1013,7 +1013,12 @@ export class LPEngineAgent {
       console.log(`[LPEngine] Mode FULL — Executing automatically via Alchemy Session Key`);
       try {
         const tier = await getUserTier(recipient);
-        const client = await getSessionKeyClient('FULL', tier);
+        // selfFunded=true: creates client without Alchemy paymaster middleware.
+        // LP UserOps are self-funded from SA's ETH to avoid paymaster policy restrictions.
+        const client = await getSessionKeyClient('FULL', tier, true);
+        
+        // Ensure smart account has enough ETH for gas
+        await ensureSmartAccountFunded(client.account.address);
         const dexConfig = await getDexConfig('V3');
         const routerAddress = (dexConfig.routerAddress || process.env.UNIVERSAL_ROUTER || process.env.ROUTER_ADDRESS || '') as Address;
         
@@ -1023,17 +1028,16 @@ export class LPEngineAgent {
         const wethAmountToSwap = isWeth0 ? amount0Desired : amount1Desired; // WETH is token0, so we need amount0
         console.log(`[LPEngine Debug] wethAmountToSwap=${wethAmountToSwap}, amount0=${amount0Desired}, amount1=${amount1Desired}, isWeth0=${isWeth0}`);
         
-        const isUniversalRouter = routerAddress.toLowerCase() === '0x8876789976decbfcbbbe364623c63652db8c0904';
-        const isAlpsRouter = routerAddress.toLowerCase() === '0xcaf681a66d020601342297493863e78c959e5cb2';
-        const actualRouterAddress = (isAlpsRouter || isUniversalRouter) ? routerAddress : '0xcaf681a66d020601342297493863e78c959e5cb2'; // Fallback to ALPS
-
+        const isUniversalRouter = false;
+        const isAlpsRouter = true;
+        const actualRouterAddress = '0xcaf681a66d020601342297493863e78c959e5cb2' as Address; // ALPS SwapRouter02 (uses same factory as pool)
         let swapCalldata: Hex;
-        const PERMIT2_ADDRESS = '0x000000000022D473030F116dDEE9F6B43aC78BA3';
+        
+        let preSwapCalls: UserOpCall[] = [];
+        const PERMIT2_ADDRESS = '0x000000000022D473030F116dDEE9F6B43aC78BA3' as Address;
         const permit2Abi = parseAbi([
           'function approve(address token, address spender, uint160 amount, uint48 expiration)'
         ]);
-        
-        let preSwapCalls: UserOpCall[] = [];
 
         if (actualRouterAddress.toLowerCase() === '0x8876789976decbfcbbbe364623c63652db8c0904') {
           // ExactInputSingleParams ABI for Universal Router
@@ -1042,11 +1046,11 @@ export class LPEngineAgent {
           const path = (wethAddress + feeHex + memeTokenAddress.replace('0x', '')) as `0x${string}`;
           
           const exactInputSingleParamsAbi = [
-            { name: 'recipient', type: 'address' },
-            { name: 'amountIn', type: 'uint256' },
-            { name: 'amountOutMin', type: 'uint256' },
-            { name: 'path', type: 'bytes' },
-            { name: 'payerIsUser', type: 'bool' }
+            { type: 'address' },
+            { type: 'uint256' },
+            { type: 'uint256' },
+            { type: 'bytes' },
+            { type: 'bool' }
           ];
 
           const amountOutMin = 0n; // Test with 0 slippage
@@ -1077,12 +1081,10 @@ export class LPEngineAgent {
         } else {
           // Standard SwapRouter02 (ALPS)
           const swapRouterAbi = parseAbi([
-            'struct ExactInputSingleParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 deadline; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }',
+            'struct ExactInputSingleParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }',
             'function exactInputSingle(ExactInputSingleParams params) external payable returns (uint256 amountOut)'
           ]);
           
-          const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 20);
-
           swapCalldata = encodeFunctionData({
             abi: swapRouterAbi,
             functionName: 'exactInputSingle',
@@ -1091,7 +1093,6 @@ export class LPEngineAgent {
               tokenOut: memeTokenAddress as Address,
               fee: feeTier,
               recipient: recipient,
-              deadline: deadline,
               amountIn: wethAmountToSwap,
               amountOutMinimum: 0n,
               sqrtPriceLimitX96: 0n
@@ -1106,20 +1107,21 @@ export class LPEngineAgent {
 
         console.log(`[LPEngine Debug] Using Router Address: ${actualRouterAddress}`);
 
+        // Single atomic batch: approve → swap → approve NPM × 2 → mint
+        // State changes from step 1 (approve) are visible to step 2 (swap) in the same UserOp.
         const calls: UserOpCall[] = [
           ...preSwapCalls,
-          // Swap WETH to Meme Token
+          // Swap WETH → Meme Token
           { target: actualRouterAddress, data: swapCalldata },
-          // 3. Approve WETH to NPM
+          // Approve WETH and Meme Token to NPM
           { target: wethAddress, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [npmAddress, MAX_UINT128] }) },
-          // 4. Approve Meme Token to NPM
           { target: memeTokenAddress, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [npmAddress, MAX_UINT128] }) },
-          // 5. Mint LP Position
+          // Mint LP Position
           { target: npmAddress, data: calldata }
         ];
 
         const txHash = await buildAndSendLPUserOperation(client, calls);
-        
+
         // Save txHash immediately to prevent zombie states if process restarts during wait
         await prisma.lPPosition.update({
           where: { id: dbRecord.id },
@@ -1162,9 +1164,7 @@ export class LPEngineAgent {
         return;
       } catch (e: any) {
         let errorMsg = e.message;
-        if (errorMsg && errorMsg.length > 500) {
-          errorMsg = errorMsg.substring(0, 500) + '... [TRUNCATED]';
-        }
+        console.log("[LPEngine Detailed Error]:", e.message);
         if (process.env.ALCHEMY_API_KEY) {
           errorMsg = errorMsg.replace(new RegExp(process.env.ALCHEMY_API_KEY, 'g'), '[REDACTED_ALCHEMY_KEY]');
         }

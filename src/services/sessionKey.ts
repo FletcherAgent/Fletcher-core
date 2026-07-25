@@ -1,18 +1,19 @@
-import { type Address, type Hex, parseAbi, custom } from 'viem';
+import { type Address, type Hex, parseAbi, createWalletClient } from 'viem';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { prisma } from '../core/db.js';
 import { createMultiOwnerModularAccount } from "@alchemy/aa-accounts";
 import { LocalAccountSigner, createSmartAccountClient } from "@alchemy/aa-core";
 import { alchemyGasManagerMiddleware } from "@alchemy/aa-alchemy";
-import { http, createPublicClient } from "viem";
+import { http, createPublicClient, parseEther } from "viem";
 import { sessionKeyPluginActions, SessionKeyPermissionsBuilder, SessionKeyAccessListType } from "@alchemy/aa-accounts";
+import { privateKeyToAccount as ethPrivToAccount } from 'viem/accounts';
 
 /**
  * Initialize Alchemy Smart Account Client (MultiOwnerModularAccount)
  */
 import { getTierLimits } from "./tierGate.js";
 
-export async function createSmartAccount(privateKeyHex: Hex, tier: number, accountAddress?: Address) {
+export async function createSmartAccount(privateKeyHex: Hex, tier: number, accountAddress?: Address, selfFunded = false) {
   if (!process.env.ALCHEMY_API_KEY) throw new Error("Missing ALCHEMY_API_KEY");
   
   const rpcUrl = `https://robinhood-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}`;
@@ -45,11 +46,12 @@ export async function createSmartAccount(privateKeyHex: Hex, tier: number, accou
 
   const publicClient = createPublicClient({ transport: transport as any, chain: robinhoodChain });
 
+  // selfFunded = true: no paymaster middleware (used for LP ops to avoid policy restrictions)
   const alchemyClient = createSmartAccountClient({
     transport: transport as any,
     chain: robinhoodChain,
     account,
-    ...(process.env.ALCHEMY_GAS_POLICY_ID && limits.sponsoredGas
+    ...(!selfFunded && process.env.ALCHEMY_GAS_POLICY_ID && limits.sponsoredGas
       ? alchemyGasManagerMiddleware(
           publicClient as any,
           {
@@ -172,7 +174,45 @@ export type UserOpCall = {
 };
 
 /**
- * Build and Send a UserOperation for LP actions
+ * Ensure the smart account has enough ETH for gas.
+ * If not, transfers from the EOA signer (PRIVATE_KEY env).
+ */
+export async function ensureSmartAccountFunded(
+  accountAddress: Address,
+  minEth: bigint = parseEther('0.005')
+): Promise<void> {
+  const rpcUrl = `https://robinhood-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}`;
+  const chain = {
+    id: 4663, name: 'Robinhood',
+    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+    rpcUrls: { default: { http: [rpcUrl] } }
+  } as any;
+
+  const publicC = createPublicClient({ transport: http(rpcUrl), chain });
+  const balance = await publicC.getBalance({ address: accountAddress });
+  
+  if (balance >= minEth) {
+    console.log(`[SessionKey] Smart account ETH sufficient: ${Number(balance)/1e18} ETH`);
+    return;
+  }
+
+  const eoaKey = process.env.PRIVATE_KEY as Hex;
+  if (!eoaKey) throw new Error('[SessionKey] PRIVATE_KEY not set — cannot fund smart account');
+
+  const eoaAccount = ethPrivToAccount(eoaKey);
+  const walletC = createWalletClient({ account: eoaAccount, transport: http(rpcUrl), chain });
+  const needed = minEth - balance;
+  console.log(`[SessionKey] 💸 Funding smart account with ${Number(needed)/1e18} ETH for gas...`);
+  const hash = await walletC.sendTransaction({ to: accountAddress, value: needed, chain });
+  await publicC.waitForTransactionReceipt({ hash });
+  console.log(`[SessionKey] ✅ Funded! Tx: ${hash}`);
+}
+
+/**
+ * Build and Send a UserOperation for LP actions.
+ * Uses self-funded mode (no paymaster) to avoid Alchemy policy restrictions.
+ * Bypasses eth_estimateUserOperationGas (which fails on approve+swap batches)
+ * by using empirically-validated gas limits.
  */
 export async function buildAndSendLPUserOperation(
   client: any,
@@ -187,50 +227,135 @@ export async function buildAndSendLPUserOperation(
     return `0xSimulatedTxHash_${Date.now()}` as Hex;
   }
 
-  // Convert to alchemy's SendUserOperationParams
-  const userOpResult = await client.sendUserOperation({
-    uo: calls.map(c => ({
-      target: c.target,
-      data: c.data,
-      value: c.value ?? 0n,
-    })),
-    overrides: {
-      maxFeePerGas: { multiplier: 1 },
-      maxPriorityFeePerGas: { multiplier: 1 }
-    }
-  });
+  const rpcUrl = `https://robinhood-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}`;
+  const ENTRY_POINT = '0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789';
 
-  console.log(`[Alchemy] UserOp submitted. Hash: ${userOpResult.hash}`);
-  
-  // Wait for the tx to be mined with a 3-minute timeout to prevent hanging
-  const txHash = await Promise.race([
-    client.waitForUserOperationTransaction({ hash: userOpResult.hash }),
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('UserOperation Bundler timeout (dropped by mempool)')), 180000))
-  ]) as Hex;
-  
-  console.log(`[Alchemy] UserOp mined! Tx Hash: ${txHash}`);
-  return txHash;
+  // Fetch bundler's recommended priority fee and use 3× for fast inclusion
+  let maxPriorityFeePerGas: bigint;
+  try {
+    const feeResp = await fetch(rpcUrl, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', method: 'rundler_maxPriorityFeePerGas', params: [], id: 1 })
+    });
+    const feeJson = await feeResp.json();
+    maxPriorityFeePerGas = BigInt(feeJson.result || '0x507159') * 3n;
+  } catch {
+    maxPriorityFeePerGas = 16000000n; // fallback ~0.016 gwei
+  }
+  const maxFeePerGas = 200000000n + maxPriorityFeePerGas; // ~0.2 gwei base
+
+  // Get current account nonce from EntryPoint
+  const nonceResp = await fetch(rpcUrl, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0', method: 'eth_call',
+      params: [{
+        to: ENTRY_POINT,
+        data: '0x35567e1a' + // getNonce(address,uint192)
+          client.account.address.toLowerCase().slice(2).padStart(64, '0') +
+          '0'.repeat(64)
+      }, 'latest'],
+      id: 1
+    })
+  });
+  const nonceJson = await nonceResp.json();
+  const nonce = BigInt(nonceJson.result || '0x0');
+
+
+  // Prefer encodeBatchExecute for multiple calls
+  let encodedCallData: Hex;
+  if (calls.length === 1) {
+    encodedCallData = await client.account.encodeExecute({
+      target: calls[0].target,
+      data: calls[0].data,
+      value: calls[0].value ?? 0n,
+    });
+  } else {
+    encodedCallData = await client.account.encodeBatchExecute(
+      calls.map(c => ({ target: c.target, data: c.data, value: c.value ?? 0n }))
+    );
+  }
+
+  // Check if account is deployed
+  const codeResp = await fetch(rpcUrl, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', method: 'eth_getCode', params: [client.account.address, 'latest'], id: 1 })
+  });
+  const codeJson = await codeResp.json();
+  const isDeployed = codeJson.result && codeJson.result !== '0x';
+  const initCode: Hex = isDeployed ? '0x' : (await client.account.getInitCode() as Hex);
+
+  // Empirically-validated gas limits for LP operations (approve+swap+approveNPM+approveToken+mint)
+  // Measured from successful on-chain execution. Using 2× headroom for safety.
+  const callGasLimit    = 0x80000n;  // ~524288 (covers full approve+swap+mint batch)
+  const verifGasLimit   = 0xE0000n;  // ~917504 (covers account deployment + validation)
+  const preVerifGas     = 0x10000n;  // ~65536
+
+  const userOp = {
+    sender:                 client.account.address as `0x${string}`,
+    nonce:                  `0x${nonce.toString(16)}` as `0x${string}`,
+    initCode:               initCode,
+    callData:               encodedCallData,
+    callGasLimit:           `0x${callGasLimit.toString(16)}` as `0x${string}`,
+    verificationGasLimit:   `0x${verifGasLimit.toString(16)}` as `0x${string}`,
+    preVerificationGas:     `0x${preVerifGas.toString(16)}` as `0x${string}`,
+    maxFeePerGas:           `0x${maxFeePerGas.toString(16)}` as `0x${string}`,
+    maxPriorityFeePerGas:   `0x${maxPriorityFeePerGas.toString(16)}` as `0x${string}`,
+    paymasterAndData:       '0x' as `0x${string}`,
+    signature:              '0x' as `0x${string}`,
+  };
+
+  // Sign the UserOp
+  const signedUO = await client.signUserOperation({ uoStruct: userOp });
+
+  console.log(`[Alchemy] Sending UserOp: nonce=${nonce}, callGas=0x${callGasLimit.toString(16)}, prio=${maxPriorityFeePerGas}`);
+
+  // Send directly via RPC (self-funded, no paymaster)
+  const sendResp = await fetch(rpcUrl, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', method: 'eth_sendUserOperation', params: [signedUO, ENTRY_POINT], id: 1 })
+  });
+  const sendJson = await sendResp.json();
+  if (sendJson.error) throw new Error(`[Alchemy] UserOp send failed: ${JSON.stringify(sendJson.error)}`);
+
+  const uoHash: Hex = sendJson.result;
+  console.log(`[Alchemy] UserOp submitted. Hash: ${uoHash}`);
+
+  // Poll for receipt with 3-minute timeout
+  const deadline = Date.now() + 180000;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 3000));
+    const rcptResp = await fetch(rpcUrl, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', method: 'eth_getUserOperationReceipt', params: [uoHash], id: 1 })
+    });
+    const rcpt = await rcptResp.json();
+    if (rcpt.result) {
+      const txHash: Hex = rcpt.result.receipt?.transactionHash;
+      if (!rcpt.result.success) throw new Error(`[Alchemy] UserOp reverted on-chain. Tx: ${txHash}`);
+      console.log(`[Alchemy] UserOp mined! Tx Hash: ${txHash}`);
+      return txHash;
+    }
+  }
+  throw new Error('UserOperation Bundler timeout (dropped by mempool)');
 }
 
-/**
- * Get a Smart Account Client authorized by a valid Session Key.
- */
 /**
  * Get a Smart Account Client authorized by the MAIN PRIVATE KEY directly.
  * Bypasses Session Key plugins.
  */
-export async function getMainAccountClient(tier: number) {
+export async function getMainAccountClient(tier: number, selfFunded = false) {
   const pk = process.env.LP_PRIVATE_KEY;
   if (!pk) throw new Error("LP_PRIVATE_KEY not set");
-  return await createSmartAccount(pk as `0x${string}`, tier);
+  return await createSmartAccount(pk as `0x${string}`, tier, undefined, selfFunded);
 }
 
-export async function getSessionKeyClient(modeRequired: 'SEMI' | 'FULL', tier: number) {
+export async function getSessionKeyClient(modeRequired: 'SEMI' | 'FULL', tier: number, selfFunded = false) {
   const config = await prisma.systemConfig.findUnique({ where: { key: 'USE_SESSION_KEY' } });
   const useSessionKey = config?.value === 'true';
 
   if (!useSessionKey) {
-    return await getMainAccountClient(tier);
+    return await getMainAccountClient(tier, selfFunded);
   }
 
   // Check for active session key in the database
@@ -255,5 +380,5 @@ export async function getSessionKeyClient(modeRequired: 'SEMI' | 'FULL', tier: n
   const accountAddress = validKey.userId as Address;
   
   // Create client using the SESSION KEY (Zero Custody)
-  return await createSmartAccount(pk, tier, accountAddress);
+  return await createSmartAccount(pk, tier, accountAddress, selfFunded);
 }
