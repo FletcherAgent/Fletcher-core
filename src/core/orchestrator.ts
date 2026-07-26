@@ -539,6 +539,12 @@ export class Orchestrator {
         return; // Return immediately so we don't block the caller
       } else {
         console.warn(`[Orchestrator] Risk Warden rejected Alpha signal for ${tokenAddress}. Reason: ${riskEvaluation.reason}`);
+        if (riskEvaluation.reason === 'INSUFFICIENT_FUNDS_AFTER_BUFFER') {
+          const chatId = process.env.TELEGRAM_CHAT_ID || process.env.TELEGRAM_OWNER_ID || '';
+          if (chatId) {
+            await this.bot.api.sendMessage(chatId, `⚠️ *Alpha Signal Rejected*\nAddress: \`${tokenAddress}\`\nReason: Insufficient WETH/USDG balance to meet the minimum trade size (gas buffer reserved).`, { parse_mode: 'Markdown' }).catch(err => console.error('[Orchestrator] Failed to send insufficient funds alert', err));
+          }
+        }
         this.processingTokens.delete(lowerToken);
       }
     } catch (e) {
