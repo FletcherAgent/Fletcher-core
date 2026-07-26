@@ -1119,7 +1119,7 @@ export class LPEngineAgent {
                 const txHash = await buildAndSendLPUserOperation(client, calls);
                 await prisma.lPPosition.update({
                     where: { id: positionId },
-                    data: { status: 'CLOSED' },
+                    data: { status: 'CLOSED', exitTxHash: txHash },
                 });
                 await logEvent('INFO', `[LP] Position Closed (Confirmed)`, { positionId });
                 proposal.description = `✅ *Auto-Closed LP*\n` + proposal.description + `\nTx: \`${txHash.slice(0, 10)}...\``;
@@ -1259,11 +1259,12 @@ export class LPEngineAgent {
         await logEvent('INFO', `[LP] Position Opened (Confirmed) - TokenID: ${realTokenId}`, { positionId, txHash });
         console.log(`[LPEngine] ✅ Position ${positionId} confirmed — tokenId: ${realTokenId}`);
     }
-    async onCloseConfirmed(positionId, feesCollectedUsd) {
+    async onCloseConfirmed(positionId, feesCollectedUsd, txHash) {
         await prisma.lPPosition.update({
             where: { id: positionId },
             data: {
                 status: 'CLOSED',
+                exitTxHash: txHash,
                 feesCollected: { increment: feesCollectedUsd },
             },
         });

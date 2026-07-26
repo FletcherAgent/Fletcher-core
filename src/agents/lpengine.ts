@@ -1349,7 +1349,7 @@ export class LPEngineAgent {
         
         await prisma.lPPosition.update({
           where: { id: positionId },
-          data: { status: 'CLOSED' } as any,
+          data: { status: 'CLOSED', exitTxHash: txHash } as any,
         });
 
         await logEvent('INFO', `[LP] Position Closed (Confirmed)`, { positionId });
@@ -1501,11 +1501,12 @@ export class LPEngineAgent {
     console.log(`[LPEngine] ✅ Position ${positionId} confirmed — tokenId: ${realTokenId}`);
   }
 
-  async onCloseConfirmed(positionId: string, feesCollectedUsd: number): Promise<void> {
+  async onCloseConfirmed(positionId: string, feesCollectedUsd: number, txHash?: string): Promise<void> {
     await prisma.lPPosition.update({
       where: { id: positionId },
       data: {
         status: 'CLOSED',
+        exitTxHash: txHash,
         feesCollected: { increment: feesCollectedUsd },
       },
     });

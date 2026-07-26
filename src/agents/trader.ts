@@ -308,7 +308,7 @@ export class TraderAgent {
           dbLogger.info(`SELL TX Confirmed`, { txHash: txHashFinal, token: tokenAddress, block: blockNumber.toString(), reason, mode });
           this.emitToSigningBoundary(tokenAddress, txHashFinal, `SELL EXECUTED [${reason}]`);
 
-          await this.updatePositionStatus(posId, tokenAddress, estimatedExitPrice, reason);
+          await this.updatePositionStatus(posId, tokenAddress, estimatedExitPrice, reason, txHashFinal);
         } else {
           throw new Error('Transaction reverted by network');
         }
@@ -905,7 +905,7 @@ export class TraderAgent {
   /**
    * Updates a position's status to CLOSED in the database.
    */
-  public async updatePositionStatus(posId: string, tokenAddress: string, exitPrice: number, exitReason?: string) {
+  public async updatePositionStatus(posId: string, tokenAddress: string, exitPrice: number, exitReason?: string, exitTxHash?: string) {
     try {
       const position = await prisma.position.findUnique({
         where: { id: posId }
@@ -915,7 +915,7 @@ export class TraderAgent {
         
         await prisma.position.update({
           where: { id: position.id },
-          data: { status: 'CLOSED', exitPrice, pnl: pnlRatio, exitReason } // IDE should pick up new types now
+          data: { status: 'CLOSED', exitPrice, pnl: pnlRatio, exitReason, exitTxHash } // IDE should pick up new types now
         });
         console.log(`[Trader] 💾 DB UPDATE: Position ${position.id} CLOSED in DB. PNL: ${(pnlRatio*100).toFixed(2)}%`);
 

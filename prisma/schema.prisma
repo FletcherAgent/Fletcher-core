@@ -23,6 +23,7 @@ model Position {
   tokenName    String?
   tokenSymbol  String?
   txHash       String?
+  exitTxHash   String?
   tradingMode  String   @default("LIVE")
   exitReason   String?
 }
@@ -101,6 +102,7 @@ model LPPosition {
   id              String   @id @default(uuid())
   tokenId         String   @unique
   txHash          String?
+  exitTxHash      String?
   pool            String
   token0          String
   token1          String
