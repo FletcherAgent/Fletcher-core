@@ -88,7 +88,8 @@ async function main() {
       poolAddress: poolAddress.toLowerCase(),
       feeTier: feeTier,
       factoryAddress: dexV4?.poolManager || '',
-      managerAddress: npmAddress
+      managerAddress: npmAddress,
+      version: 'V4' // Provide 'V4' so LPEngine knows to use ALPS router
     };
   };
 

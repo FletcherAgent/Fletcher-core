@@ -250,8 +250,20 @@ export class LPEngineAgent {
     token0: string,
     token1?: string,
     preferredFee = 3000
-  ): Promise<{ poolAddress: string; feeTier: number; factoryAddress: string; managerAddress: string } | null> {
-    const v3Configs = await getAllDexConfigs('V3');
+  ): Promise<{ poolAddress: string; feeTier: number; factoryAddress: string; managerAddress: string; version: string } | null> {
+    const v3ConfigsRaw = await getAllDexConfigs('V3');
+    const v4ConfigsRaw = await getAllDexConfigs('V4');
+    
+    // Map V4's poolManager to factoryAddress so getPool works
+    const v4ConfigsMapped = v4ConfigsRaw.map(c => ({
+      ...c,
+      factoryAddress: c.poolManager || c.factoryAddress,
+      version: 'V4'
+    }));
+    
+    const v3Configs = v3ConfigsRaw.map(c => ({ ...c, version: 'V3' }));
+    const allConfigs = [...v3Configs, ...v4ConfigsMapped];
+
     // Try all standard fees to find the most liquid pool
     const feesToTry = [10000, 3000, 500, 100];
 
@@ -270,9 +282,9 @@ export class LPEngineAgent {
     
     const poolAbi = parseAbi(['function liquidity() view returns (uint128)']);
     
-    let bestPool: { poolAddress: string; feeTier: number; factoryAddress: string; managerAddress: string; liquidity: bigint } | null = null;
+    let bestPool: { poolAddress: string; feeTier: number; factoryAddress: string; managerAddress: string; liquidity: bigint; version: string } | null = null;
 
-    for (const config of v3Configs) {
+    for (const config of allConfigs) {
       if (!config.factoryAddress || !config.positionManager) continue;
 
       for (const qt of uniqueQuotes) {
@@ -303,7 +315,8 @@ export class LPEngineAgent {
                   feeTier: fee,
                   factoryAddress: config.factoryAddress,
                   managerAddress: config.positionManager,
-                  liquidity: liq
+                  liquidity: liq,
+                  version: config.version
                 };
               }
             }
@@ -320,7 +333,8 @@ export class LPEngineAgent {
         poolAddress: bestPool.poolAddress, 
         feeTier: bestPool.feeTier, 
         factoryAddress: bestPool.factoryAddress, 
-        managerAddress: bestPool.managerAddress 
+        managerAddress: bestPool.managerAddress,
+        version: bestPool.version
       };
     }
     return null;
@@ -742,7 +756,7 @@ export class LPEngineAgent {
       if (this.onNotification) await this.onNotification(`⚠️ *Open Position Canceled*\nActive pool for $${token.symbol}/WETH not found.`);
       return;
     }
-    const { poolAddress, feeTier, managerAddress } = resolved;
+    const { poolAddress, feeTier, managerAddress, version } = resolved;
     const npmAddress = managerAddress as `0x${string}`;
 
     // Get token meta
@@ -1070,7 +1084,7 @@ export class LPEngineAgent {
         
         // Ensure smart account has enough ETH for gas
         await ensureSmartAccountFunded(client.account.address);
-        const dexConfig = await getDexConfig('V3');
+        const dexConfig = await getDexConfig(version as 'V3' | 'V4');
         const routerAddress = (dexConfig.routerAddress || process.env.UNIVERSAL_ROUTER || process.env.ROUTER_ADDRESS || '') as Address;
         
         // Slippage / Swap setup
@@ -1079,9 +1093,9 @@ export class LPEngineAgent {
         const wethAmountToSwap = isWeth0 ? amount0Desired : amount1Desired; // WETH is token0, so we need amount0
         console.log(`[LPEngine Debug] wethAmountToSwap=${wethAmountToSwap}, amount0=${amount0Desired}, amount1=${amount1Desired}, isWeth0=${isWeth0}`);
         
-        const isUniversalRouter = false;
-        const isAlpsRouter = true;
-        const actualRouterAddress = '0xcaf681a66d020601342297493863e78c959e5cb2' as Address; // ALPS SwapRouter02 (uses same factory as pool)
+        const isUniversalRouter = version === 'V3';
+        const isAlpsRouter = version === 'V4';
+        const actualRouterAddress = isAlpsRouter ? '0xcaf681a66d020601342297493863e78c959e5cb2' as Address : routerAddress;
         let swapCalldata: Hex;
         
         let preSwapCalls: UserOpCall[] = [];

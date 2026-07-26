@@ -196,8 +196,8 @@ export async function ensureSmartAccountFunded(
     return;
   }
 
-  const eoaKey = process.env.PRIVATE_KEY as Hex;
-  if (!eoaKey) throw new Error('[SessionKey] PRIVATE_KEY not set — cannot fund smart account');
+  const eoaKey = (process.env.LP_PRIVATE_KEY || process.env.PRIVATE_KEY) as Hex;
+  if (!eoaKey) throw new Error('[SessionKey] PRIVATE_KEY or LP_PRIVATE_KEY not set — cannot fund smart account');
 
   const eoaAccount = ethPrivToAccount(eoaKey);
   const walletC = createWalletClient({ account: eoaAccount, transport: http(rpcUrl), chain });
