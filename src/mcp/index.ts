@@ -73,5 +73,5 @@ app.post("/mcp/message", async (req, res) => {
 
 const PORT = process.env.PORT || process.env.MCP_PORT || 3005;
 app.listen(PORT, () => {
-  console.log(`[MCP] Fletcher MCP Server running on SSE: https://api.fletcheragent.pro/mcp/sse (Internal Port: ${PORT})`);
+  console.log(`[MCP] Fletcher MCP Server running on SSE: https://fletcher-core-production-d4b8.up.railway.app/mcp/sse (Internal Port: ${PORT})`);
 });
