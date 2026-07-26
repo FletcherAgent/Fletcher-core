@@ -159,6 +159,8 @@ export class WatchlistAgent {
             catch (err) {
                 console.error(`[Watchlist] ❌ Failed to process ${item.symbol}: ${err.message}`);
             }
+            // Add a 2-second delay between processing each token to respect GeckoTerminal API limits (30/min)
+            await new Promise(r => setTimeout(r, 2000));
         }
     }
 }

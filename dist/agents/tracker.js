@@ -6,12 +6,15 @@ import { prisma } from '../core/db.js';
 import { dbLogger } from '../services/logger.js';
 import { WalletProfiler } from '../services/walletProfiler.js';
 import { publicClient } from '../services/viem.js';
+import { mcpServer } from '../mcp/index.js';
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 const TRANSFER_EVENT = parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)');
 export class TrackerAgent {
     onCopyBuySignal;
     onCopySellSignal;
     onSwapActivity;
     server;
+    mcpTransport = null;
     processedTxHashes = new Set();
     lastBuyTime = new Map(); // For anti-farm: wallet-token -> timestamp
     constructor() { }
@@ -30,6 +33,23 @@ export class TrackerAgent {
                     'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-alchemy-signature'
                 });
                 res.end();
+                return;
+            }
+            // --- MCP Server Endpoints ---
+            if (req.method === 'GET' && req.url === '/mcp/sse') {
+                this.mcpTransport = new SSEServerTransport("/mcp/message", res);
+                await mcpServer.connect(this.mcpTransport);
+                console.log('[MCP] Client connected via SSE on main Tracker port');
+                return;
+            }
+            if (req.method === 'POST' && req.url?.startsWith('/mcp/message')) {
+                if (this.mcpTransport) {
+                    await this.mcpTransport.handlePostMessage(req, res);
+                }
+                else {
+                    res.writeHead(503);
+                    res.end("SSE transport not active");
+                }
                 return;
             }
             // Check API Key for dashboard and settings endpoints

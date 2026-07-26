@@ -142,7 +142,7 @@ setInterval(() => {
         bot.api.sendMessage(process.env.TELEGRAM_CHAT_ID, `<pre>${safeChunk}</pre>`, { parse_mode: 'HTML' })
             .catch(err => originalError("Failed to send log to Telegram", err));
     }
-}, 3000);
+}, 10000);
 // -----------------------
 bot.command("start", (ctx) => {
     ctx.reply("🟢 Fletcher Agent Core is online.\nRobinhood Chain Active Range Manager.\n\nType /help to see the list of commands.");
@@ -801,8 +801,12 @@ async function startApp() {
         // Connect Database
         await connectDb();
         // Auto-install Session Key for Zero-Custody architecture
-        const { installSessionKeyPluginAndDelegate } = await import('../services/sessionKey.js');
-        await installSessionKeyPluginAndDelegate(3); // default tier 3
+        const config = await prisma.systemConfig.findUnique({ where: { key: 'USE_SESSION_KEY' } });
+        const useSessionKey = config?.value === 'true';
+        if (useSessionKey) {
+            const { installSessionKeyPluginAndDelegate } = await import('../services/sessionKey.js');
+            await installSessionKeyPluginAndDelegate(3); // default tier 3
+        }
         // Start Fletcher agents (Event Listener, Webhook Server, etc.)
         await orchestrator.startAll();
         // Start Telegram Bot with retry logic for zero-downtime deploys

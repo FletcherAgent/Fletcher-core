@@ -137,7 +137,7 @@ export class GuardianAgent {
             });
             // 3. Calc Fees (Simulated for DRY_RUN positions)
             let feesUsd = 0;
-            if (pos.tokenId.startsWith('SIM-') || pos.tradingMode === 'DRY_RUN') {
+            if (pos.tokenId.startsWith('SIM-') || pos.tradingMode === 'DRY_RUN' || pos.managerAddress?.toLowerCase() === '0x58daec3116aae6d93017baaea7749052e8a04fa7') {
                 try {
                     if (pos.lastFeeGrowth0 && pos.lastFeeGrowth1 && pos.simulatedLiquidity) {
                         // Fetch real current feeGrowthGlobal from on-chain pool

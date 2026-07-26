@@ -76,12 +76,48 @@ export class TraderAgent {
                     blockNumber = await publicClient.getBlockNumber();
                 }
                 else {
+                    // --- 0. Check and Wrap ETH / Approve WETH ---
+                    const wethAddress = process.env.WETH_ADDRESS;
+                    const currentWethBalance = await publicClient.readContract({
+                        address: wethAddress,
+                        abi: parseAbi(['function balanceOf(address account) view returns (uint256)']),
+                        functionName: 'balanceOf',
+                        args: [account.address]
+                    });
+                    if (currentWethBalance < sizeInWeth) {
+                        const amountToWrap = sizeInWeth - currentWethBalance;
+                        console.log(`[Trader] 🔄 Wrapping ${Number(amountToWrap) / 1e18} ETH to WETH...`);
+                        const wrapTx = await walletClient.sendTransaction({
+                            account,
+                            to: wethAddress,
+                            value: amountToWrap,
+                            data: encodeFunctionData({ abi: parseAbi(['function deposit() payable']), functionName: 'deposit' })
+                        });
+                        await publicClient.waitForTransactionReceipt({ hash: wrapTx });
+                        console.log(`[Trader] ✅ Wrapped ETH successfully.`);
+                    }
+                    const currentAllowance = await publicClient.readContract({
+                        address: wethAddress,
+                        abi: parseAbi(['function allowance(address owner, address spender) view returns (uint256)']),
+                        functionName: 'allowance',
+                        args: [account.address, toAddress]
+                    });
+                    if (currentAllowance < sizeInWeth) {
+                        console.log(`[Trader] 🔓 Approving Router to spend WETH...`);
+                        const approveTx = await walletClient.sendTransaction({
+                            account,
+                            to: wethAddress,
+                            data: encodeFunctionData({ abi: parseAbi(['function approve(address spender, uint256 amount)']), functionName: 'approve', args: [toAddress, 2n ** 256n - 1n] })
+                        });
+                        await publicClient.waitForTransactionReceipt({ hash: approveTx });
+                        console.log(`[Trader] ✅ WETH Approve confirmed!`);
+                    }
                     console.log(`[Trader] ⚡ Broadcasting BUY transaction for ${tokenAddress}...`);
                     txHash = await walletClient.sendTransaction({
                         account,
                         to: toAddress,
                         data: calldata,
-                        value: value
+                        value: value // value should be 0n if we are using WETH directly
                     });
                     console.log(`[Trader] ✅ BUY TX Broadcasted: ${txHash}. Waiting for confirmation...`);
                 }
@@ -270,7 +306,7 @@ export class TraderAgent {
                     if (pos) {
                         await prisma.position.update({
                             where: { id: posId },
-                            data: { status: 'CLOSED', pnl: -1, exitPrice: 0 }
+                            data: { status: 'CLOSED', pnl: -1, exitPrice: 0, exitReason: reason }
                         }).catch(console.error);
                     }
                 }
@@ -451,18 +487,29 @@ export class TraderAgent {
                 finalToAddress = POOL_ROUTER;
             }
             else if (POOL_TYPE === 'V3') {
-                const commands = '0x00';
-                const feeHex = POOL_FEE.toString(16).padStart(6, '0');
-                const path = (WETH_ADDRESS + feeHex + tokenOut.replace('0x', ''));
-                const swapInput = encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }, { type: 'uint256' }, { type: 'bytes' }, { type: 'bool' }], [account.address, amountIn, amountOutMinimum, path, true]);
-                const universalRouterAbi = parseAbi([
-                    'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
+                // Universal Router on some chains (like ALPS) is broken for V3 swaps (SliceOutOfBounds on cmd 0x00)
+                // Fallback to the standard deterministic Uniswap V3 SwapRouter which is supported globally.
+                finalToAddress = (process.env.V3_SWAP_ROUTER || '0xE592427A0AEce92De3Edee1F18E0157C05861564').toLowerCase();
+                const swapRouterAbi = parseAbi([
+                    'struct ExactInputSingleParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 deadline; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }',
+                    'function exactInputSingle(ExactInputSingleParams params) external payable returns (uint256 amountOut)'
                 ]);
                 calldata = encodeFunctionData({
-                    abi: universalRouterAbi,
-                    functionName: 'execute',
-                    args: [commands, [swapInput], deadline]
+                    abi: swapRouterAbi,
+                    functionName: 'exactInputSingle',
+                    args: [{
+                            tokenIn: WETH_ADDRESS,
+                            tokenOut: tokenOut,
+                            fee: POOL_FEE,
+                            recipient: account.address,
+                            deadline,
+                            amountIn,
+                            amountOutMinimum,
+                            sqrtPriceLimitX96: 0n
+                        }]
                 });
+                // Sending ETH directly to SwapRouter which automatically wraps if tokenIn is WETH
+                return { calldata, amountOutMinimum, expectedOut, toAddress: finalToAddress, value: amountIn };
             }
             else {
                 // V4_SWAP
@@ -640,18 +687,42 @@ export class TraderAgent {
                 finalToAddress = POOL_ROUTER;
             }
             else if (POOL_TYPE === 'V3') {
-                const commands = '0x00';
-                const feeHex = POOL_FEE.toString(16).padStart(6, '0');
-                const path = (tokenIn.replace('0x', '') + feeHex + TARGET_OUT.replace('0x', ''));
-                const swapInput = encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }, { type: 'uint256' }, { type: 'bytes' }, { type: 'bool' }], [account.address, amountIn, amountOutMinimum, path, true]);
-                const universalRouterAbi = parseAbi([
-                    'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
-                ]);
-                calldata = encodeFunctionData({
-                    abi: universalRouterAbi,
-                    functionName: 'execute',
-                    args: [commands, [swapInput], deadline]
-                });
+                const isUniversalRouter = finalToAddress.toLowerCase() === '0x8876789976decbfcbbbe364623c63652db8c0904';
+                if (isUniversalRouter) {
+                    const commands = '0x00';
+                    const feeHex = POOL_FEE.toString(16).padStart(6, '0');
+                    const path = (tokenIn.replace('0x', '') + feeHex + TARGET_OUT.replace('0x', ''));
+                    const swapInput = encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }, { type: 'uint256' }, { type: 'bytes' }, { type: 'bool' }], [account.address, amountIn, amountOutMinimum, path, true]);
+                    const universalRouterAbi = parseAbi([
+                        'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
+                    ]);
+                    calldata = encodeFunctionData({
+                        abi: universalRouterAbi,
+                        functionName: 'execute',
+                        args: [commands, [swapInput], deadline]
+                    });
+                }
+                else {
+                    // Standard SwapRouter02 (ALPS)
+                    const swapRouterAbi = parseAbi([
+                        'struct ExactInputSingleParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 deadline; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }',
+                        'function exactInputSingle(ExactInputSingleParams params) external payable returns (uint256 amountOut)'
+                    ]);
+                    calldata = encodeFunctionData({
+                        abi: swapRouterAbi,
+                        functionName: 'exactInputSingle',
+                        args: [{
+                                tokenIn: tokenIn,
+                                tokenOut: TARGET_OUT,
+                                fee: POOL_FEE,
+                                recipient: account.address,
+                                deadline,
+                                amountIn,
+                                amountOutMinimum,
+                                sqrtPriceLimitX96: 0n
+                            }]
+                    });
+                }
             }
             else {
                 // V4_SWAP

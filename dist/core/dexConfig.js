@@ -13,12 +13,12 @@ export async function getDexConfig(version) {
         console.warn(`[DexConfig] DB findFirst failed for ${version}. Falling back to .env configuration.`);
     }
     return {
-        routerAddress: dbConfig?.routerAddress || process.env.UNIVERSAL_ROUTER || process.env.ROUTER_ADDRESS,
-        factoryAddress: dbConfig?.factoryAddress || process.env[`${version}_FACTORY`],
-        quoterAddress: dbConfig?.quoterAddress || process.env[`${version}_QUOTER`],
-        positionManager: dbConfig?.positionManager || process.env.V3_NONFUNGIBLE_POSITION_MANAGER || process.env.POSITION_MANAGER || process.env[`${version}_POSITION_MANAGER`],
-        poolManager: dbConfig?.poolManager || process.env.V4_POOL_MANAGER,
-        stateView: dbConfig?.stateView || process.env.V4_STATE_VIEW,
+        routerAddress: (dbConfig?.routerAddress || process.env.UNIVERSAL_ROUTER || process.env.ROUTER_ADDRESS || '').toLowerCase(),
+        factoryAddress: (dbConfig?.factoryAddress || process.env[`${version}_FACTORY`] || '').toLowerCase(),
+        quoterAddress: (dbConfig?.quoterAddress || process.env[`${version}_QUOTER`] || '').toLowerCase(),
+        positionManager: (dbConfig?.positionManager || process.env.V3_NONFUNGIBLE_POSITION_MANAGER || process.env.POSITION_MANAGER || process.env[`${version}_POSITION_MANAGER`] || '').toLowerCase(),
+        poolManager: (dbConfig?.poolManager || process.env.V4_POOL_MANAGER || '').toLowerCase(),
+        stateView: (dbConfig?.stateView || process.env.V4_STATE_VIEW || '').toLowerCase(),
     };
 }
 export async function getAllDexConfigs(version) {
@@ -37,11 +37,11 @@ export async function getAllDexConfigs(version) {
         return [await getDexConfig(version)];
     }
     return configs.map(dbConfig => ({
-        routerAddress: dbConfig.routerAddress || process.env.UNIVERSAL_ROUTER || process.env.ROUTER_ADDRESS,
-        factoryAddress: dbConfig.factoryAddress || process.env[`${version}_FACTORY`],
-        quoterAddress: dbConfig.quoterAddress || process.env[`${version}_QUOTER`],
-        positionManager: dbConfig.positionManager || process.env.V3_NONFUNGIBLE_POSITION_MANAGER || process.env.POSITION_MANAGER || process.env[`${version}_POSITION_MANAGER`],
-        poolManager: dbConfig.poolManager || process.env.V4_POOL_MANAGER,
-        stateView: dbConfig.stateView || process.env.V4_STATE_VIEW,
+        routerAddress: (dbConfig.routerAddress || process.env.UNIVERSAL_ROUTER || process.env.ROUTER_ADDRESS || '').toLowerCase(),
+        factoryAddress: (dbConfig.factoryAddress || process.env[`${version}_FACTORY`] || '').toLowerCase(),
+        quoterAddress: (dbConfig.quoterAddress || process.env[`${version}_QUOTER`] || '').toLowerCase(),
+        positionManager: (dbConfig.positionManager || process.env.V3_NONFUNGIBLE_POSITION_MANAGER || process.env.POSITION_MANAGER || process.env[`${version}_POSITION_MANAGER`] || '').toLowerCase(),
+        poolManager: (dbConfig.poolManager || process.env.V4_POOL_MANAGER || '').toLowerCase(),
+        stateView: (dbConfig.stateView || process.env.V4_STATE_VIEW || '').toLowerCase(),
     }));
 }

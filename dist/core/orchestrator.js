@@ -117,7 +117,7 @@ export class Orchestrator {
             }
             if (tokenAmountToSell === 0n) {
                 console.warn(`[Orchestrator] Real wallet balance is 0. Closing position in DB without swapping.`);
-                await prisma.position.update({ where: { id: pos.id }, data: { status: 'CLOSED' } });
+                await prisma.position.update({ where: { id: pos.id }, data: { status: 'CLOSED', exitReason: reason } });
                 return;
             }
             if (tokenAmountToSell > 0n) {
@@ -371,6 +371,8 @@ export class Orchestrator {
             const parts = fmt.formatToParts(now);
             const h = parseInt(parts.find(p => p.type === 'hour').value);
             const m = parseInt(parts.find(p => p.type === 'minute').value);
+            // Clean up any stale PENDING positions every minute
+            this.lpEngine.cleanupZombiePositions().catch(console.error);
             // NIGHT mode (Aggressive Scouting): Run every hour
             if (m === 0) {
                 console.log(`[Orchestrator] 🚀 LP Engine hourly scan triggered (Hour: ${h})`);

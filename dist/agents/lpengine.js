@@ -15,9 +15,9 @@
  *
  * Zero-custody: agent only builds calldata & proposes. User signs.
  */
-import { encodeFunctionData, parseAbi, decodeEventLog } from 'viem';
+import { encodeFunctionData, encodeAbiParameters, parseAbiParameters, parseAbi, decodeEventLog } from 'viem';
 import { publicClient } from '../services/viem.js';
-import { getSessionKeyClient, buildAndSendLPUserOperation } from '../services/sessionKey.js';
+import { getSessionKeyClient, buildAndSendLPUserOperation, ensureSmartAccountFunded } from '../services/sessionKey.js';
 import { getUserTier, getTierLimits } from '../services/tierGate.js';
 import { prisma } from '../core/db.js';
 import { logEvent } from '../utils/logger.js';
@@ -44,12 +44,15 @@ const NPM_ABI = parseAbi([
     // positions (for reading)
     'function positions(uint256 tokenId) external view returns (uint96 nonce, address operator, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128, uint128 tokensOwed0, uint128 tokensOwed1)',
     // events
-    'event IncreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)'
+    'event IncreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)',
+    'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)'
 ]);
 const ERC20_ABI = parseAbi([
     'function decimals() view returns (uint8)',
     'function symbol() view returns (string)',
     'function balanceOf(address owner) view returns (uint256)',
+    'function approve(address spender, uint256 amount) external returns (bool)',
+    'function transfer(address to, uint256 amount) external returns (bool)',
 ]);
 const FACTORY_ABI = parseAbi([
     'function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address pool)',
@@ -112,7 +115,11 @@ export class LPEngineAgent {
             console.warn('[LPEngine] ⚠️ UNISWAP_V3_FACTORY_ADDRESS not set');
         if (!wethAddress)
             console.warn('[LPEngine] ⚠️ WETH_ADDRESS not set (DB nor env)');
-        return { npmAddress, factoryAddress, wethAddress };
+        return {
+            npmAddress: npmAddress.toLowerCase(),
+            factoryAddress: factoryAddress.toLowerCase(),
+            wethAddress: wethAddress.toLowerCase()
+        };
     }
     // ─── Zombie Cleanup ─────────────────────────────────────────────────────────
     /**
@@ -165,27 +172,23 @@ export class LPEngineAgent {
         return { ok: true };
     }
     // ─── Pool Resolution ────────────────────────────────────────────────────────
-    /**
-     * Resolve pool address from Uniswap V3 Factory.
-     * Try fee tiers: 500 -> 3000 -> 10000, use the first available.
-     */
     async resolvePool(token0, token1, preferredFee = 3000) {
         const v3Configs = await getAllDexConfigs('V3');
-        const feesToTry = [preferredFee, 500, 3000, 10000].filter((v, i, arr) => arr.indexOf(v) === i);
-        // RHC canonical quote assets: USDG (6 dec, Paxos stablecoin) and WETH (18 dec).
-        // USDC does NOT exist on Robinhood Chain — bridged USDC becomes USDG.
+        // Try all standard fees to find the most liquid pool
+        const feesToTry = [10000, 3000, 500, 100];
         const quoteConfig = await prisma.systemConfig.findMany({
             where: { key: { in: ['tokens.quote.weth', 'tokens.quote.usdg'] } }
         });
         const quoteMap = Object.fromEntries(quoteConfig.map(c => [c.key, c.value]));
         const wethAddress = quoteMap['tokens.quote.weth'] || process.env.WETH_ADDRESS || '';
         const usdgAddress = quoteMap['tokens.quote.usdg'] || process.env.USDG_ADDRESS || '';
-        // usdcAddress intentionally omitted — not canonical on RHC
         const quotesToTry = token1 ? [token1] : [
             usdgAddress,
             wethAddress,
         ].filter(Boolean);
         const uniqueQuotes = Array.from(new Set(quotesToTry.map(a => a.toLowerCase())));
+        const poolAbi = parseAbi(['function liquidity() view returns (uint128)']);
+        let bestPool = null;
         for (const config of v3Configs) {
             if (!config.factoryAddress || !config.positionManager)
                 continue;
@@ -199,20 +202,41 @@ export class LPEngineAgent {
                             args: [token0, qt, fee],
                         });
                         if (poolAddr && poolAddr !== '0x0000000000000000000000000000000000000000') {
-                            console.log(`[LPEngine] ✅ Pool found: ${poolAddr} on factory ${config.factoryAddress} (quote: ${qt}, fee: ${fee})`);
-                            return {
-                                poolAddress: poolAddr,
-                                feeTier: fee,
-                                factoryAddress: config.factoryAddress,
-                                managerAddress: config.positionManager
-                            };
+                            let liq = 0n;
+                            try {
+                                liq = await publicClient.readContract({
+                                    address: poolAddr,
+                                    abi: poolAbi,
+                                    functionName: 'liquidity'
+                                });
+                            }
+                            catch (err) { }
+                            console.log(`[LPEngine] 🔎 Found pool candidate: ${poolAddr} on ${config.factoryAddress} (fee: ${fee}, liq: ${liq})`);
+                            if (!bestPool || liq > bestPool.liquidity) {
+                                bestPool = {
+                                    poolAddress: poolAddr,
+                                    feeTier: fee,
+                                    factoryAddress: config.factoryAddress,
+                                    managerAddress: config.positionManager,
+                                    liquidity: liq
+                                };
+                            }
                         }
                     }
                     catch (error) {
-                        console.warn(`[LPEngine] ⚠️ getPool failed on factory ${config.factoryAddress} (fee: ${fee}):`, error);
+                        // suppress getPool fail errors to avoid log spam
                     }
                 }
             }
+        }
+        if (bestPool) {
+            console.log(`[LPEngine] ✅ Best Pool Selected: ${bestPool.poolAddress} (fee: ${bestPool.feeTier}, liq: ${bestPool.liquidity})`);
+            return {
+                poolAddress: bestPool.poolAddress,
+                feeTier: bestPool.feeTier,
+                factoryAddress: bestPool.factoryAddress,
+                managerAddress: bestPool.managerAddress
+            };
         }
         return null;
     }
@@ -238,47 +262,53 @@ export class LPEngineAgent {
     }
     // ─── NPM Calldata Builders ──────────────────────────────────────────────────
     buildMintCalldata(params) {
+        const MAX_UINT128 = 340282366920938463463374607431768211455n; // 2**128 - 1
+        const actions = '0x020d'; // MINT_POSITION (0x02), SETTLE_PAIR (0x0d)
+        const param0 = encodeAbiParameters(parseAbiParameters('address currency0, address currency1, uint24 fee, int24 tickSpacing, address hooks, int24 tickLower, int24 tickUpper, uint256 liquidity, uint128 amount0Max, uint128 amount1Max, address owner, bytes hookData'), [
+            params.token0, params.token1, params.fee, params.tickSpacing, params.hooks,
+            params.tickLower, params.tickUpper, params.liquidity,
+            MAX_UINT128, MAX_UINT128, params.recipient, '0x'
+        ]);
+        const param1 = encodeAbiParameters(parseAbiParameters('address currency0, address currency1'), [params.token0, params.token1]);
+        const unlockData = encodeAbiParameters(parseAbiParameters('bytes actions, bytes[] params'), [actions, [param0, param1]]);
         return encodeFunctionData({
-            abi: NPM_ABI,
-            functionName: 'mint',
-            args: [{
-                    token0: params.token0,
-                    token1: params.token1,
-                    fee: params.fee,
-                    tickLower: params.tickLower,
-                    tickUpper: params.tickUpper,
-                    amount0Desired: params.amount0Desired,
-                    amount1Desired: params.amount1Desired,
-                    amount0Min: 0n, // slippage handled via approval timing
-                    amount1Min: 0n,
-                    recipient: params.recipient,
-                    deadline: params.deadline,
-                }],
+            abi: parseAbi(['function modifyLiquidities(bytes unlockData, uint256 deadline) external payable']),
+            functionName: 'modifyLiquidities',
+            args: [unlockData, params.deadline]
         });
     }
-    buildCollectCalldata(tokenId, recipient) {
+    /**
+     * Build V4 modifyLiquidities calldata for collecting fees (DECREASE with 0 liquidity then TAKE_PAIR).
+     * On V4, calling decrease with 0 liquidity credits the caller with accrued fees.
+     * This replaces the V3 `collect()` function.
+     */
+    buildCollectCalldata(tokenId, recipient, token0, token1, deadline) {
+        // Action 0x01 = DECREASE_LIQUIDITY (with 0 liq = collect fees only), 0x11 = TAKE_PAIR (ALPS V4)
+        const actions = '0x0111';
+        const param0 = encodeAbiParameters(parseAbiParameters('uint256 tokenId, uint256 liquidity, uint128 amount0Min, uint128 amount1Min, bytes hookData'), [tokenId, 0n, 0n, 0n, '0x']);
+        const param1 = encodeAbiParameters(parseAbiParameters('address currency0, address currency1, address recipient'), [token0, token1, recipient]);
+        const unlockData = encodeAbiParameters(parseAbiParameters('bytes actions, bytes[] params'), [actions, [param0, param1]]);
         return encodeFunctionData({
-            abi: NPM_ABI,
-            functionName: 'collect',
-            args: [{
-                    tokenId,
-                    recipient,
-                    amount0Max: MAX_UINT128,
-                    amount1Max: MAX_UINT128,
-                }],
+            abi: parseAbi(['function modifyLiquidities(bytes unlockData, uint256 deadline) external payable']),
+            functionName: 'modifyLiquidities',
+            args: [unlockData, deadline]
         });
     }
-    buildDecreaseLiquidityCalldata(tokenId, liquidity, deadline) {
+    /**
+     * Build V4 modifyLiquidities calldata for BURN_POSITION.
+     * BURN_POSITION (0x06) automatically decreases 100% liquidity and burns the NFT.
+     * Must be followed by TAKE_PAIR (0x0e) to sweep tokens to recipient.
+     */
+    buildDecreaseLiquidityCalldata(tokenId, liquidity, deadline, token0, token1, recipient) {
+        // Action 0x03 = BURN_POSITION, 0x11 = TAKE_PAIR (ALPS V4 action values)
+        const actions = '0x0311';
+        const param0 = encodeAbiParameters(parseAbiParameters('uint256 tokenId, uint128 amount0Min, uint128 amount1Min, bytes hookData'), [tokenId, 0n, 0n, '0x']);
+        const param1 = encodeAbiParameters(parseAbiParameters('address currency0, address currency1, address recipient'), [token0, token1, recipient]);
+        const unlockData = encodeAbiParameters(parseAbiParameters('bytes actions, bytes[] params'), [actions, [param0, param1]]);
         return encodeFunctionData({
-            abi: NPM_ABI,
-            functionName: 'decreaseLiquidity',
-            args: [{
-                    tokenId,
-                    liquidity,
-                    amount0Min: 0n,
-                    amount1Min: 0n,
-                    deadline,
-                }],
+            abi: parseAbi(['function modifyLiquidities(bytes unlockData, uint256 deadline) external payable']),
+            functionName: 'modifyLiquidities',
+            args: [unlockData, deadline]
         });
     }
     buildIncreaseLiquidityCalldata(tokenId, amount0Desired, amount1Desired, deadline) {
@@ -656,12 +686,64 @@ export class LPEngineAgent {
             token1Price = token.priceUsd;
             token0Price = token1Price * decimalAdjustedPoolPrice;
         }
-        const amount0Desired = this.usdToTokenAmount(halfUsd, token0Price, t0Dec);
-        const amount1Desired = this.usdToTokenAmount(halfUsd, token1Price, t1Dec);
+        // Dynamically evaluate Smart Account address
+        let recipient = ((process.env.LP_WALLET_ADDRESS || process.env.USER_WALLET_ADDRESS) ?? '');
+        if (!isDryRun) {
+            try {
+                const { createSmartAccount } = await import('../services/sessionKey.js');
+                const dummyClient = await createSmartAccount(process.env.LP_PRIVATE_KEY, 3);
+                recipient = dummyClient.account.address;
+            }
+            catch (e) {
+                console.warn(`[LPEngine] Failed to evaluate smart account address:`, e);
+            }
+        }
+        const isWeth0 = t0.toLowerCase() === wethAddress.toLowerCase();
+        let wethBalance = 0n;
+        if (!isDryRun) {
+            try {
+                wethBalance = await publicClient.readContract({
+                    address: wethAddress,
+                    abi: ERC20_ABI,
+                    functionName: 'balanceOf',
+                    args: [recipient]
+                });
+            }
+            catch (e) {
+                console.warn(`[LPEngine] Failed to fetch WETH balance: ${e}`);
+            }
+        }
+        let amount0Desired;
+        let amount1Desired;
+        if (wethBalance > 0n && !isDryRun) {
+            const halfOnePercentWeth = wethBalance / 200n; // 0.5% of WETH balance (so 1% total for swap + LP)
+            if (isWeth0) {
+                amount0Desired = halfOnePercentWeth;
+                const wethUsdValue = (Number(amount0Desired) / (10 ** t0Dec)) * token0Price;
+                amount1Desired = this.usdToTokenAmount(wethUsdValue, token1Price, t1Dec);
+            }
+            else {
+                amount1Desired = halfOnePercentWeth;
+                const wethUsdValue = (Number(amount1Desired) / (10 ** t1Dec)) * token1Price;
+                amount0Desired = this.usdToTokenAmount(wethUsdValue, token0Price, t0Dec);
+            }
+            console.log(`[LPEngine] 💰 Dynamic Sizing: Using 1% of Wallet WETH Balance`);
+        }
+        else {
+            amount0Desired = this.usdToTokenAmount(halfUsd, token0Price, t0Dec);
+            amount1Desired = this.usdToTokenAmount(halfUsd, token1Price, t1Dec);
+        }
+        // Apply a 10% reduction buffer to the desired amounts for minting.
+        // This accommodates the Universal Router swap fee (up to 1%) and price impact.
+        // NPM will pull the proportional amounts based on the current pool price,
+        // leaving a tiny amount of unused dust in the Smart Account, preventing
+        // "ERC20: transfer amount exceeds balance" reverts.
+        amount0Desired = amount0Desired * 90n / 100n;
+        amount1Desired = amount1Desired * 90n / 100n;
         const sqrtRatioAX96 = tickToSqrtPriceX96(tickLower);
         const sqrtRatioBX96 = tickToSqrtPriceX96(tickUpper);
         const simulatedLiquidity = getLiquidityForAmounts(sqrtPriceX96, sqrtRatioAX96, sqrtRatioBX96, amount0Desired, amount1Desired);
-        const recipient = ((process.env.LP_WALLET_ADDRESS || process.env.USER_WALLET_ADDRESS) ?? '');
+        // recipient already defined above
         const tier = await getUserTier(recipient);
         const limits = getTierLimits(tier);
         // Enforce Active Positions Limit per mode
@@ -681,6 +763,12 @@ export class LPEngineAgent {
             return;
         }
         const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 10); // 10 min
+        // Apply a 50% buffer reduction to the swapped token amount to account for swap fees and high price impact
+        // This prevents "ERC20: transfer amount exceeds balance" when NPM tries to pull the minted tokens
+        const adjustedAmount0 = amount0Desired * 50n / 100n;
+        const adjustedAmount1 = amount1Desired * 50n / 100n;
+        // Calculate adjusted liquidity for the reduced amounts to satisfy V4 exact liquidity requirements
+        const adjustedLiquidity = getLiquidityForAmounts(sqrtPriceX96, sqrtRatioAX96, sqrtRatioBX96, adjustedAmount0, adjustedAmount1);
         // Build calldata
         const calldata = this.buildMintCalldata({
             token0: t0,
@@ -688,8 +776,11 @@ export class LPEngineAgent {
             fee: feeTier,
             tickLower,
             tickUpper,
-            amount0Desired,
-            amount1Desired,
+            amount0Desired: adjustedAmount0,
+            amount1Desired: adjustedAmount1,
+            liquidity: adjustedLiquidity,
+            tickSpacing: feeToTickSpacing(feeTier),
+            hooks: '0x0000000000000000000000000000000000000000',
             recipient,
             deadline,
         });
@@ -772,11 +863,104 @@ export class LPEngineAgent {
             console.log(`[LPEngine] Mode FULL — Executing automatically via Alchemy Session Key`);
             try {
                 const tier = await getUserTier(recipient);
-                const client = await getSessionKeyClient('FULL', tier);
-                const calls = [{
-                        target: npmAddress,
-                        data: calldata
-                    }];
+                // selfFunded=true: creates client without Alchemy paymaster middleware.
+                // LP UserOps are self-funded from SA's ETH to avoid paymaster policy restrictions.
+                const client = await getSessionKeyClient('FULL', tier, true);
+                // Ensure smart account has enough ETH for gas
+                await ensureSmartAccountFunded(client.account.address);
+                const dexConfig = await getDexConfig('V3');
+                const routerAddress = (dexConfig.routerAddress || process.env.UNIVERSAL_ROUTER || process.env.ROUTER_ADDRESS || '');
+                // Slippage / Swap setup
+                const isWeth0 = t0.toLowerCase() === wethAddress.toLowerCase();
+                const memeTokenAddress = (isWeth0 ? t1 : t0);
+                const wethAmountToSwap = isWeth0 ? amount0Desired : amount1Desired; // WETH is token0, so we need amount0
+                console.log(`[LPEngine Debug] wethAmountToSwap=${wethAmountToSwap}, amount0=${amount0Desired}, amount1=${amount1Desired}, isWeth0=${isWeth0}`);
+                const isUniversalRouter = false;
+                const isAlpsRouter = true;
+                const actualRouterAddress = '0xcaf681a66d020601342297493863e78c959e5cb2'; // ALPS SwapRouter02 (uses same factory as pool)
+                let swapCalldata;
+                let preSwapCalls = [];
+                const PERMIT2_ADDRESS = '0x000000000022D473030F116dDEE9F6B43aC78BA3';
+                const permit2Abi = parseAbi([
+                    'function approve(address token, address spender, uint160 amount, uint48 expiration)'
+                ]);
+                if (actualRouterAddress.toLowerCase() === '0x8876789976decbfcbbbe364623c63652db8c0904') {
+                    // ExactInputSingleParams ABI for Universal Router
+                    const commands = '0x00'; // V3_SWAP_EXACT_IN
+                    const feeHex = feeTier.toString(16).padStart(6, '0');
+                    const path = (wethAddress + feeHex + memeTokenAddress.replace('0x', ''));
+                    const exactInputSingleParamsAbi = [
+                        { type: 'address' },
+                        { type: 'uint256' },
+                        { type: 'uint256' },
+                        { type: 'bytes' },
+                        { type: 'bool' }
+                    ];
+                    const expectedMemeOut = isWeth0 ? amount1Desired : amount0Desired;
+                    const amountOutMin = expectedMemeOut * 90n / 100n; // 10% max slippage
+                    const swapInput = encodeAbiParameters(exactInputSingleParamsAbi, [
+                        recipient, // recipient
+                        wethAmountToSwap,
+                        amountOutMin, // 10% slippage protection
+                        path,
+                        true // payerIsUser = true (requires Permit2)
+                    ]);
+                    const universalRouterAbi = parseAbi([
+                        'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
+                    ]);
+                    const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 20);
+                    swapCalldata = encodeFunctionData({
+                        abi: universalRouterAbi,
+                        functionName: 'execute',
+                        args: [commands, [swapInput], deadline]
+                    });
+                    preSwapCalls = [
+                        { target: wethAddress, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [PERMIT2_ADDRESS, MAX_UINT128] }) },
+                        { target: PERMIT2_ADDRESS, data: encodeFunctionData({ abi: permit2Abi, functionName: 'approve', args: [wethAddress, actualRouterAddress, BigInt(MAX_UINT128), 4000000000] }) }
+                    ];
+                }
+                else {
+                    // Standard SwapRouter02 (ALPS)
+                    const swapRouterAbi = parseAbi([
+                        'struct ExactInputSingleParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }',
+                        'function exactInputSingle(ExactInputSingleParams params) external payable returns (uint256 amountOut)'
+                    ]);
+                    const expectedMemeOut = isWeth0 ? amount1Desired : amount0Desired;
+                    const amountOutMin = expectedMemeOut * 90n / 100n; // 10% max slippage
+                    swapCalldata = encodeFunctionData({
+                        abi: swapRouterAbi,
+                        functionName: 'exactInputSingle',
+                        args: [{
+                                tokenIn: wethAddress,
+                                tokenOut: memeTokenAddress,
+                                fee: feeTier,
+                                recipient: recipient,
+                                amountIn: wethAmountToSwap,
+                                amountOutMinimum: amountOutMin, // 10% slippage protection
+                                sqrtPriceLimitX96: 0n
+                            }]
+                    });
+                    // ALPS Router uses direct ERC20 approval, not Permit2
+                    preSwapCalls = [
+                        { target: wethAddress, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [actualRouterAddress, MAX_UINT128] }) }
+                    ];
+                }
+                console.log(`[LPEngine Debug] Using Router Address: ${actualRouterAddress}`);
+                // Single atomic batch: approve → swap → approve NPM × 2 → mint
+                // State changes from step 1 (approve) are visible to step 2 (swap) in the same UserOp.
+                const calls = [
+                    ...preSwapCalls,
+                    // Swap WETH → Meme Token
+                    { target: actualRouterAddress, data: swapCalldata },
+                    // Approve WETH and Meme Token to Permit2
+                    { target: wethAddress, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [PERMIT2_ADDRESS, MAX_UINT128] }) },
+                    { target: memeTokenAddress, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [PERMIT2_ADDRESS, MAX_UINT128] }) },
+                    // Approve NPM to pull from Permit2
+                    { target: PERMIT2_ADDRESS, data: encodeFunctionData({ abi: permit2Abi, functionName: 'approve', args: [wethAddress, npmAddress, BigInt(MAX_UINT128), 4000000000] }) },
+                    { target: PERMIT2_ADDRESS, data: encodeFunctionData({ abi: permit2Abi, functionName: 'approve', args: [memeTokenAddress, npmAddress, BigInt(MAX_UINT128), 4000000000] }) },
+                    // Mint LP Position
+                    { target: npmAddress, data: calldata }
+                ];
                 const txHash = await buildAndSendLPUserOperation(client, calls);
                 // Save txHash immediately to prevent zombie states if process restarts during wait
                 await prisma.lPPosition.update({
@@ -794,9 +978,9 @@ export class LPEngineAgent {
                                 data: log.data,
                                 topics: log.topics,
                             });
-                            if (decoded.eventName === 'IncreaseLiquidity') {
+                            if (decoded.eventName === 'IncreaseLiquidity' || decoded.eventName === 'Transfer') {
                                 realTokenId = decoded.args.tokenId.toString();
-                                console.log(`[LPEngine] 🎯 Successfully extracted Real TokenID: ${realTokenId}`);
+                                console.log(`[LPEngine] 🎯 Successfully extracted Real TokenID: ${realTokenId} from ${decoded.eventName}`);
                                 break;
                             }
                         }
@@ -819,8 +1003,13 @@ export class LPEngineAgent {
                 return;
             }
             catch (e) {
-                await logEvent('ERROR', `[LP] Auto-Open Failed`, { error: e.message });
-                console.error(`[LPEngine] Failed to auto-open position: ${e.message}`);
+                let errorMsg = e.message;
+                console.log("[LPEngine Detailed Error]:", e.message);
+                if (process.env.ALCHEMY_API_KEY) {
+                    errorMsg = errorMsg.replace(new RegExp(process.env.ALCHEMY_API_KEY, 'g'), '[REDACTED_ALCHEMY_KEY]');
+                }
+                await logEvent('ERROR', `[LP] Auto-Open Failed`, { error: errorMsg });
+                console.error(`[LPEngine] Failed to auto-open position: ${errorMsg}`);
                 await prisma.lPPosition.update({
                     where: { id: dbRecord.id },
                     data: { status: 'FAILED' }
@@ -857,26 +1046,27 @@ export class LPEngineAgent {
         const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 10);
         const recipient = ((process.env.LP_WALLET_ADDRESS || process.env.USER_WALLET_ADDRESS) ?? '');
         // Read current liquidity from NPM (skip if simulated)
+        // V4 uses getPositionLiquidity instead of positions()
         let liquidity = 0n;
         if (!isSim) {
             try {
-                const data = await publicClient.readContract({
+                liquidity = await publicClient.readContract({
                     address: npmAddress,
-                    abi: NPM_ABI,
-                    functionName: 'positions',
+                    abi: parseAbi(['function getPositionLiquidity(uint256 tokenId) external view returns (uint128 liquidity)']),
+                    functionName: 'getPositionLiquidity',
                     args: [tokenId],
                 });
-                liquidity = data[7];
+                console.log(`[LPEngine] Position liquidity: ${liquidity}`);
             }
             catch (e) {
-                console.error(`[LPEngine] NPM positions() failed: ${e.message}`);
+                console.error(`[LPEngine] getPositionLiquidity() failed: ${e.message}`);
             }
         }
         else {
             liquidity = pos.simulatedLiquidity ? BigInt(pos.simulatedLiquidity) : 0n;
         }
-        // Decrease 100% liquidity
-        const decreaseCalldata = this.buildDecreaseLiquidityCalldata(tokenId, liquidity, deadline);
+        // Build V4 BURN_POSITION calldata (atomically closes position + sweeps tokens)
+        const closeCalldata = this.buildDecreaseLiquidityCalldata(tokenId, liquidity, deadline, pos.token0, pos.token1, recipient);
         const description = `🔴 *LP CLOSE Proposal*\n` +
             `Position: \`${pos.id.slice(0, 8)}\`\n` +
             `Pair: ${pos.token0Symbol}/${pos.token1Symbol}\n` +
@@ -900,7 +1090,7 @@ export class LPEngineAgent {
             tickLower: pos.tickLower,
             tickUpper: pos.tickUpper,
             entryValueUsd: pos.entryValue,
-            calldata: decreaseCalldata,
+            calldata: closeCalldata,
             to: npmAddress,
             dayMode: pos.dayMode,
             nightMode: pos.nightMode,
@@ -922,11 +1112,9 @@ export class LPEngineAgent {
             try {
                 const tier = await getUserTier(recipient);
                 const client = await getSessionKeyClient('FULL', tier);
-                const collectCalldata = this.buildCollectCalldata(tokenId, recipient);
-                // Batch: Decrease + Collect
+                // Single atomic V4 call: BURN_POSITION + TAKE_PAIR
                 const calls = [
-                    { target: npmAddress, data: decreaseCalldata },
-                    { target: npmAddress, data: collectCalldata }
+                    { target: npmAddress, data: closeCalldata },
                 ];
                 const txHash = await buildAndSendLPUserOperation(client, calls);
                 await prisma.lPPosition.update({
@@ -940,9 +1128,23 @@ export class LPEngineAgent {
                 return;
             }
             catch (e) {
-                await logEvent('ERROR', `[LP] Auto-Close Failed`, { error: e.message });
+                let errorMsg = e.message;
+                if (errorMsg && errorMsg.length > 200) {
+                    errorMsg = errorMsg.substring(0, 200) + '...';
+                }
+                if (process.env.ALCHEMY_API_KEY) {
+                    errorMsg = errorMsg.replace(new RegExp(process.env.ALCHEMY_API_KEY, 'g'), '[REDACTED]');
+                }
+                // Strip Markdown special chars to avoid Telegram parse errors
+                errorMsg = errorMsg.replace(/[_*[\]()~`>#+=|{}.!-]/g, ' ');
+                // Revert status back to OPEN so it stays in Active LP and can be retried
+                await prisma.lPPosition.update({
+                    where: { id: positionId },
+                    data: { status: 'OPEN' },
+                });
+                await logEvent('ERROR', `[LP] Auto-Close Failed (Reverted to OPEN)`, { error: e.message });
                 console.error(`[LPEngine] Failed to auto-close position: ${e.message}`);
-                proposal.description = `❌ *Auto-Close Failed*\n` + proposal.description + `\nError: ${e.message}`;
+                proposal.description = `❌ Auto-Close Failed\nPair: ${pos.token0Symbol}/${pos.token1Symbol}\nStatus: Reverted to OPEN\nError: ${errorMsg}`;
                 if (this.onProposal)
                     await this.onProposal(proposal);
                 return;
@@ -971,7 +1173,8 @@ export class LPEngineAgent {
             const tokenId = isSim ? 0n : BigInt(pos.tokenId);
             const recipient = ((process.env.LP_WALLET_ADDRESS || process.env.USER_WALLET_ADDRESS) ?? '');
             const npmAddress = pos.managerAddress || (await this.getAddresses()).npmAddress;
-            const calldata = isSim ? '0x' : this.buildCollectCalldata(tokenId, recipient);
+            const harvestDeadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 10);
+            const calldata = isSim ? '0x' : this.buildCollectCalldata(tokenId, recipient, pos.token0, pos.token1, harvestDeadline);
             const proposal = {
                 type: 'HARVEST',
                 positionId: pos.id,
@@ -1024,9 +1227,16 @@ export class LPEngineAgent {
                     continue; // Move to next position
                 }
                 catch (e) {
-                    await logEvent('ERROR', `[LP] Auto-Harvest Failed`, { error: e.message });
-                    console.error(`[LPEngine] Failed to auto-harvest position: ${e.message}`);
-                    proposal.description = `❌ *Auto-Harvest Failed*\n` + proposal.description + `\nError: ${e.message}`;
+                    let errorMsg = e.message;
+                    if (errorMsg && errorMsg.length > 500) {
+                        errorMsg = errorMsg.substring(0, 500) + '... [TRUNCATED]';
+                    }
+                    if (process.env.ALCHEMY_API_KEY) {
+                        errorMsg = errorMsg.replace(new RegExp(process.env.ALCHEMY_API_KEY, 'g'), '[REDACTED_ALCHEMY_KEY]');
+                    }
+                    await logEvent('ERROR', `[LP] Auto-Harvest Failed`, { error: errorMsg });
+                    console.error(`[LPEngine] Failed to auto-harvest position: ${errorMsg}`);
+                    proposal.description = `❌ *Auto-Harvest Failed*\n` + proposal.description + `\nError: ${errorMsg}`;
                     if (this.onProposal)
                         await this.onProposal(proposal);
                     continue;

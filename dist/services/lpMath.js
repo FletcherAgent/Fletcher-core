@@ -151,22 +151,37 @@ export async function getNPMPosition(tokenId, managerAddress) {
     }
     if (!NPM_ADDRESS)
         throw new Error('[lpMath] POSITION_MANAGER not set in DB config');
-    const r = await publicClient.readContract({
-        address: NPM_ADDRESS,
-        abi: NPM_ABI,
-        functionName: 'positions',
-        args: [tokenId],
-    });
-    return {
-        token0: r[2],
-        token1: r[3],
-        fee: Number(r[4]),
-        tickLower: Number(r[5]),
-        tickUpper: Number(r[6]),
-        liquidity: r[7],
-        tokensOwed0: r[10],
-        tokensOwed1: r[11],
-    };
+    try {
+        const r = await publicClient.readContract({
+            address: NPM_ADDRESS,
+            abi: NPM_ABI,
+            functionName: 'positions',
+            args: [tokenId],
+        });
+        return {
+            token0: r[2],
+            token1: r[3],
+            fee: Number(r[4]),
+            tickLower: Number(r[5]),
+            tickUpper: Number(r[6]),
+            liquidity: r[7],
+            tokensOwed0: r[10],
+            tokensOwed1: r[11],
+        };
+    }
+    catch (err) {
+        // Graceful fallback for Uniswap V4 / ALPS which doesn't support the V3 positions() struct
+        return {
+            token0: '',
+            token1: '',
+            fee: 0,
+            tickLower: 0,
+            tickUpper: 0,
+            liquidity: 0n,
+            tokensOwed0: 0n,
+            tokensOwed1: 0n,
+        };
+    }
 }
 /**
  * Fetch current feeGrowthGlobal from the pool.
