@@ -7,6 +7,7 @@
     "dev": "tsx src/bot/index.ts",
     "build": "prisma generate && tsc && npx playwright install --with-deps chromium",
     "start": "node dist/bot/index.js",
+    "mcp": "tsx src/mcp/index.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -16,10 +17,13 @@
     "@alchemy/aa-accounts": "^3.19.0",
     "@alchemy/aa-alchemy": "^3.19.0",
     "@alchemy/aa-core": "^3.19.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
     "capsolver-npm": "^2.1.11",
+    "cors": "^2.8.6",
     "dotenv": "^17.4.2",
+    "express": "^5.2.1",
     "got-scraping": "^4.2.1",
     "grammy": "^1.44.0",
     "input": "^1.0.1",
@@ -34,6 +38,8 @@
     "ws": "^8.21.1"
   },
   "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
     "@types/node": "^26.1.1",
     "@types/pg": "^8.20.0",
     "@types/sinon": "^22.0.0",
