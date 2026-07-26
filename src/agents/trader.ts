@@ -323,7 +323,7 @@ export class TraderAgent {
            if (pos) {
              await prisma.position.update({
                where: { id: posId },
-               data: { status: 'CLOSED', pnl: -1, exitPrice: 0 }
+               data: { status: 'CLOSED', pnl: -1, exitPrice: 0, exitReason: reason }
              }).catch(console.error);
            }
         } else {

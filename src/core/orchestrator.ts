@@ -131,7 +131,7 @@ export class Orchestrator {
 
       if (tokenAmountToSell === 0n) {
         console.warn(`[Orchestrator] Real wallet balance is 0. Closing position in DB without swapping.`);
-        await prisma.position.update({ where: { id: pos.id }, data: { status: 'CLOSED' } });
+        await prisma.position.update({ where: { id: pos.id }, data: { status: 'CLOSED', exitReason: reason } });
         return;
       }
 
