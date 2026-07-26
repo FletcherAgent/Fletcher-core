@@ -153,6 +153,8 @@ model Watchlist {
   tokenAddress    String   @unique
   symbol          String?
   name            String?
+  quoteSymbol     String?  // WETH, USDG, etc.
+  quoteAddress    String?  // The actual 0x address of the quote token
   poolAddress     String?
   addedAt         DateTime @default(now())
   lastCheckedAt   DateTime?

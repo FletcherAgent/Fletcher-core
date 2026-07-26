@@ -54,11 +54,16 @@ async function main() {
   });
   const quoteMap = Object.fromEntries(quoteConfig.map(c => [c.key, c.value]));
   const wethAddress = quoteMap['tokens.quote.weth'] || process.env.WETH_ADDRESS || '';
+  const usdgAddress = quoteMap['tokens.quote.usdg'] || process.env.USDG_ADDRESS || '';
 
-  const isToken0 = token0.toLowerCase() !== wethAddress.toLowerCase();
-  const memeTokenAddress = isToken0 ? token0 : token1;
+  const isWeth0 = token0.toLowerCase() === wethAddress.toLowerCase();
+  const isUsdg0 = token0.toLowerCase() === usdgAddress.toLowerCase();
+  const isQuote0 = isWeth0 || isUsdg0;
+  
+  const quoteAddress = isQuote0 ? token0 : token1;
+  const memeTokenAddress = isQuote0 ? token1 : token0;
 
-  console.log(`[Deploy] Pool is for ${memeTokenAddress} and ${isToken0 ? token1 : token0}`);
+  console.log(`[Deploy] Pool is for ${memeTokenAddress} and ${quoteAddress}`);
   console.log(`[Deploy] Fetching token info for ${memeTokenAddress} from GMGN...`);
 
   const info = await getTokenInfo(memeTokenAddress as Address);
@@ -89,7 +94,8 @@ async function main() {
       feeTier: feeTier,
       factoryAddress: dexV4?.poolManager || '',
       managerAddress: npmAddress,
-      version: 'V4' // Provide 'V4' so LPEngine knows to use ALPS router
+      version: 'V4', // Provide 'V4' so LPEngine knows to use ALPS router
+      quoteAddress: quoteAddress.toLowerCase()
     };
   };
 

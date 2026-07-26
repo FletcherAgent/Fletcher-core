@@ -173,10 +173,11 @@ export class LPEngineAgent {
     const factoryAddress = (dexConfig.factoryAddress || '') as Address;
 
     const quoteConfig = await prisma.systemConfig.findMany({
-      where: { key: { in: ['tokens.quote.weth'] } }
+      where: { key: { in: ['tokens.quote.weth', 'tokens.quote.usdg'] } }
     });
     const quoteMap = Object.fromEntries(quoteConfig.map(c => [c.key, c.value]));
     const wethAddress = (quoteMap['tokens.quote.weth'] || process.env.WETH_ADDRESS || '') as Address;
+    const usdgAddress = (quoteMap['tokens.quote.usdg'] || '') as Address;
 
     if (!npmAddress)     console.warn('[LPEngine] ⚠️ POSITION_MANAGER not set');
     if (!factoryAddress) console.warn('[LPEngine] ⚠️ UNISWAP_V3_FACTORY_ADDRESS not set');
@@ -185,7 +186,8 @@ export class LPEngineAgent {
     return { 
       npmAddress: npmAddress.toLowerCase() as `0x${string}`, 
       factoryAddress: factoryAddress.toLowerCase() as `0x${string}`, 
-      wethAddress: wethAddress.toLowerCase() as `0x${string}` 
+      wethAddress: wethAddress.toLowerCase() as `0x${string}`,
+      usdgAddress: usdgAddress.toLowerCase() as `0x${string}`
     };
   }
 
@@ -250,7 +252,7 @@ export class LPEngineAgent {
     token0: string,
     token1?: string,
     preferredFee = 3000
-  ): Promise<{ poolAddress: string; feeTier: number; factoryAddress: string; managerAddress: string; version: string } | null> {
+  ): Promise<{ poolAddress: string; feeTier: number; factoryAddress: string; managerAddress: string; version: string; quoteAddress: string } | null> {
     const v3ConfigsRaw = await getAllDexConfigs('V3');
     const v4ConfigsRaw = await getAllDexConfigs('V4');
     
@@ -282,7 +284,7 @@ export class LPEngineAgent {
     
     const poolAbi = parseAbi(['function liquidity() view returns (uint128)']);
     
-    let bestPool: { poolAddress: string; feeTier: number; factoryAddress: string; managerAddress: string; liquidity: bigint; version: string } | null = null;
+    let bestPool: { poolAddress: string; feeTier: number; factoryAddress: string; managerAddress: string; liquidity: bigint; version: string; quoteAddress: string } | null = null;
 
     for (const config of allConfigs) {
       if (!config.factoryAddress || !config.positionManager) continue;
@@ -316,7 +318,8 @@ export class LPEngineAgent {
                   factoryAddress: config.factoryAddress,
                   managerAddress: config.positionManager,
                   liquidity: liq,
-                  version: config.version
+                  version: config.version,
+                  quoteAddress: qt
                 };
               }
             }
@@ -334,7 +337,8 @@ export class LPEngineAgent {
         feeTier: bestPool.feeTier, 
         factoryAddress: bestPool.factoryAddress, 
         managerAddress: bestPool.managerAddress,
-        version: bestPool.version
+        version: bestPool.version,
+        quoteAddress: bestPool.quoteAddress
       };
     }
     return null;
@@ -553,12 +557,19 @@ export class LPEngineAgent {
       return;
     }
 
+    const addrs = await this.getAddresses();
+    let qSymbol = 'UNKNOWN';
+    if (selectedCandidate.token.quoteToken?.toLowerCase() === addrs.wethAddress.toLowerCase()) qSymbol = 'WETH';
+    if (selectedCandidate.token.quoteToken?.toLowerCase() === addrs.usdgAddress?.toLowerCase()) qSymbol = 'USDG';
+
     // Push to Watchlist instead of opening directly
     await prisma.watchlist.upsert({
       where: { tokenAddress: selectedCandidate.token.address.toLowerCase() },
       update: {
         symbol: selectedCandidate.token.symbol,
         name: selectedCandidate.token.name,
+        quoteAddress: selectedCandidate.token.quoteToken,
+        quoteSymbol: qSymbol,
         poolAddress: selectedCandidate.pool.address.toLowerCase(),
         sentimentStatus: selectedCandidate.grokLabel,
         tradingMode: (await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } }))?.value === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE',
@@ -568,6 +579,8 @@ export class LPEngineAgent {
         tokenAddress: selectedCandidate.token.address.toLowerCase(),
         symbol: selectedCandidate.token.symbol,
         name: selectedCandidate.token.name,
+        quoteAddress: selectedCandidate.token.quoteToken,
+        quoteSymbol: qSymbol,
         poolAddress: selectedCandidate.pool.address.toLowerCase(),
         sentimentStatus: selectedCandidate.grokLabel,
         tradingMode: (await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } }))?.value === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE',
@@ -649,11 +662,18 @@ export class LPEngineAgent {
     }
 
     for (const candidate of toOpen) {
+      const addrs = await this.getAddresses();
+      let qSymbol = 'UNKNOWN';
+      if (candidate.token.quoteToken?.toLowerCase() === addrs.wethAddress.toLowerCase()) qSymbol = 'WETH';
+      if (candidate.token.quoteToken?.toLowerCase() === addrs.usdgAddress?.toLowerCase()) qSymbol = 'USDG';
+
       await prisma.watchlist.upsert({
         where: { tokenAddress: candidate.token.address.toLowerCase() },
         update: {
           symbol: candidate.token.symbol,
           name: candidate.token.name,
+          quoteAddress: candidate.token.quoteToken,
+          quoteSymbol: qSymbol,
           poolAddress: candidate.pool.address.toLowerCase(),
           sentimentStatus: candidate.grokLabel,
           tradingMode: currentMode,
@@ -663,6 +683,8 @@ export class LPEngineAgent {
           tokenAddress: candidate.token.address.toLowerCase(),
           symbol: candidate.token.symbol,
           name: candidate.token.name,
+          quoteAddress: candidate.token.quoteToken,
+          quoteSymbol: qSymbol,
           poolAddress: candidate.pool.address.toLowerCase(),
           sentimentStatus: candidate.grokLabel,
           tradingMode: currentMode,
@@ -690,11 +712,18 @@ export class LPEngineAgent {
     const isDryRun = (tModeConfig?.value ?? 'LIVE') === 'DRY_RUN';
     const currentMode = isDryRun ? 'DRY_RUN' : 'LIVE';
 
+    const addrs = await this.getAddresses();
+    let qSymbol = 'UNKNOWN';
+    if (token.quoteToken?.toLowerCase() === addrs.wethAddress.toLowerCase()) qSymbol = 'WETH';
+    if (token.quoteToken?.toLowerCase() === addrs.usdgAddress?.toLowerCase()) qSymbol = 'USDG';
+
     await prisma.watchlist.upsert({
       where: { tokenAddress: token.address.toLowerCase() },
       update: {
         symbol: token.symbol,
         name: token.name,
+        quoteAddress: token.quoteToken,
+        quoteSymbol: qSymbol,
         tradingMode: currentMode,
         status: 'WATCHING',
       },
@@ -702,6 +731,8 @@ export class LPEngineAgent {
         tokenAddress: token.address.toLowerCase(),
         symbol: token.symbol,
         name: token.name,
+        quoteAddress: token.quoteToken,
+        quoteSymbol: qSymbol,
         poolAddress: '', // Pool will be discovered later if missing
         tradingMode: currentMode,
       }
@@ -749,30 +780,30 @@ export class LPEngineAgent {
     }
 
     // Resolve pool address via factory
-    const resolved = await this.resolvePool(token.address, wethAddress);
+    const resolved = await this.resolvePool(token.address);
     if (!resolved) {
-      console.warn(`[LPEngine] No V3 pool found for ${token.symbol}/WETH`);
-      await logEvent('WARN', `[LP] No V3 pool found for ${token.symbol}/WETH`);
-      if (this.onNotification) await this.onNotification(`⚠️ *Open Position Canceled*\nActive pool for $${token.symbol}/WETH not found.`);
+      console.warn(`[LPEngine] No active pool found for ${token.symbol}`);
+      await logEvent('WARN', `[LP] No pool found for ${token.symbol}`);
+      if (this.onNotification) await this.onNotification(`⚠️ *Open Position Canceled*\nActive pool for $${token.symbol} not found.`);
       return;
     }
-    const { poolAddress, feeTier, managerAddress, version } = resolved;
+    const { poolAddress, feeTier, managerAddress, version, quoteAddress } = resolved;
     const npmAddress = managerAddress as `0x${string}`;
 
     // Get token meta
-    const [tokenMeta, wethMeta] = await Promise.all([
+    const [tokenMeta, quoteMeta] = await Promise.all([
       this.getTokenMeta(token.address),
-      this.getTokenMeta(wethAddress),
+      this.getTokenMeta(quoteAddress),
     ]);
 
     // Ensure token0 < token1 (Uniswap V3 requirement)
-    const isToken0 = BigInt(token.address) < BigInt(wethAddress);
-    const t0 = isToken0 ? token.address : wethAddress;
-    const t1 = isToken0 ? wethAddress : token.address;
-    const t0Symbol = isToken0 ? tokenMeta.symbol : wethMeta.symbol;
-    const t1Symbol = isToken0 ? wethMeta.symbol  : tokenMeta.symbol;
-    const t0Dec = isToken0 ? tokenMeta.decimals : wethMeta.decimals;
-    const t1Dec = isToken0 ? wethMeta.decimals  : tokenMeta.decimals;
+    const isToken0 = BigInt(token.address) < BigInt(quoteAddress);
+    const t0 = isToken0 ? token.address : quoteAddress;
+    const t1 = isToken0 ? quoteAddress : token.address;
+    const t0Symbol = isToken0 ? tokenMeta.symbol : quoteMeta.symbol;
+    const t1Symbol = isToken0 ? quoteMeta.symbol  : tokenMeta.symbol;
+    const t0Dec = isToken0 ? tokenMeta.decimals : quoteMeta.decimals;
+    const t1Dec = isToken0 ? quoteMeta.decimals  : tokenMeta.decimals;
 
     // Tick range
     let tickLower: number;
@@ -861,7 +892,9 @@ export class LPEngineAgent {
     // Amount calculation: split startSize 50/50 between token0 and token1
     const currentStartSize = finalStartSize;
     const halfUsd = currentStartSize / 2;
-    const poolPriceRaw = Number((BigInt(sqrtPriceX96) * 10000000n) / (2n ** 96n)) / 10000000;
+    // Increase precision to 18 decimals to avoid 0 rounding for low-price pools
+    const precisionMultiplier = 1000000000000000000n; // 1e18
+    const poolPriceRaw = Number((BigInt(sqrtPriceX96) * precisionMultiplier) / (2n ** 96n)) / Number(precisionMultiplier);
     const poolPrice = poolPriceRaw ** 2; 
     const decimalAdjustedPoolPrice = poolPrice * (10 ** (t0Dec - t1Dec));
 
@@ -874,6 +907,8 @@ export class LPEngineAgent {
       token0Price = token1Price * decimalAdjustedPoolPrice;
     }
 
+    console.log(`[LPEngine Debug] token.priceUsd=${token.priceUsd}, poolPriceRaw=${poolPriceRaw}, decimalAdjustedPoolPrice=${decimalAdjustedPoolPrice}, isToken0=${isToken0}, token0Price=${token0Price}, token1Price=${token1Price}`);
+
     // Dynamically evaluate Smart Account address
     let recipient = ((process.env.LP_WALLET_ADDRESS || process.env.USER_WALLET_ADDRESS) ?? '') as Address;
     if (!isDryRun) {
@@ -885,37 +920,67 @@ export class LPEngineAgent {
         console.warn(`[LPEngine] Failed to evaluate smart account address:`, e);
       }
     }
-    const isWeth0 = t0.toLowerCase() === wethAddress.toLowerCase();
+
+    const tier = await getUserTier(recipient);
+    const limits = getTierLimits(tier);
     
-    let wethBalance = 0n;
+    const isQuote0 = t0.toLowerCase() === quoteAddress.toLowerCase();
+    
+    let quoteBalance = 0n;
     if (!isDryRun) {
       try {
-        wethBalance = await publicClient.readContract({
-          address: wethAddress,
+        quoteBalance = await publicClient.readContract({
+          address: quoteAddress as Address,
           abi: ERC20_ABI,
           functionName: 'balanceOf',
           args: [recipient]
         }) as bigint;
       } catch (e) {
-        console.warn(`[LPEngine] Failed to fetch WETH balance: ${e}`);
+        console.warn(`[LPEngine] Failed to fetch quote token balance: ${e}`);
       }
     }
 
     let amount0Desired: bigint;
     let amount1Desired: bigint;
 
-    if (wethBalance > 0n && !isDryRun) {
-      const halfOnePercentWeth = wethBalance / 200n; // 0.5% of WETH balance (so 1% total for swap + LP)
-      if (isWeth0) {
-        amount0Desired = halfOnePercentWeth;
-        const wethUsdValue = (Number(amount0Desired) / (10 ** t0Dec)) * token0Price;
-        amount1Desired = this.usdToTokenAmount(wethUsdValue, token1Price, t1Dec);
-      } else {
-        amount1Desired = halfOnePercentWeth;
-        const wethUsdValue = (Number(amount1Desired) / (10 ** t1Dec)) * token1Price;
-        amount0Desired = this.usdToTokenAmount(wethUsdValue, token0Price, t0Dec);
+    if (!isDryRun) {
+      // Tier-based allocation
+      let allocationPercent = 10n; // Default Tier 3 (10%)
+      if (limits.maxPositions === 1) allocationPercent = 90n; // Tier 1
+      else if (limits.maxPositions === 3) allocationPercent = 30n; // Tier 2
+
+      // Calculate the proposed USD allocation based on quote token balance
+      const quoteDecimals = isQuote0 ? t0Dec : t1Dec;
+      const quotePriceUsd = isQuote0 ? token0Price : token1Price;
+      const quoteBalanceUsd = (Number(quoteBalance) / (10 ** quoteDecimals)) * quotePriceUsd;
+
+      let proposedUsdAllocation = quoteBalanceUsd * Number(allocationPercent) / 100;
+      
+      // Minimum profitability threshold ($10 USD)
+      if (proposedUsdAllocation < 10) {
+        proposedUsdAllocation = 10;
       }
-      console.log(`[LPEngine] 💰 Dynamic Sizing: Using 1% of Wallet WETH Balance`);
+      
+      // Check for insufficient balance
+      if (quoteBalanceUsd < 10) {
+        const msg = `⚠️ Insufficient [WETH/USDG] balance to open position. Minimum required balance is equivalent to $10 USD.`;
+        console.warn(`[LPEngine] ${msg} (Current: $${quoteBalanceUsd.toFixed(2)})`);
+        await logEvent('WARN', `[LP] Insufficient balance for ${token.symbol}`);
+        if (this.onNotification) await this.onNotification(msg);
+        return;
+      }
+
+      // Apply regime multiplier to the allocation
+      if (regime === 'crowded') {
+         proposedUsdAllocation *= regimeMult;
+      }
+      
+      // Calculate half amounts for Token0 and Token1
+      const halfUsdAlloc = proposedUsdAllocation / 2;
+      amount0Desired = this.usdToTokenAmount(halfUsdAlloc, token0Price, t0Dec);
+      amount1Desired = this.usdToTokenAmount(halfUsdAlloc, token1Price, t1Dec);
+      
+      console.log(`[LPEngine] 💰 Dynamic Sizing: Using ${allocationPercent}% of Quote Balance ($${proposedUsdAllocation.toFixed(2)} USD)`);
     } else {
       amount0Desired = this.usdToTokenAmount(halfUsd, token0Price, t0Dec);
       amount1Desired = this.usdToTokenAmount(halfUsd, token1Price, t1Dec);
@@ -938,10 +1003,6 @@ export class LPEngineAgent {
       amount0Desired,
       amount1Desired
     );
-
-    // recipient already defined above
-    const tier = await getUserTier(recipient);
-    const limits = getTierLimits(tier);
 
     // Enforce Active Positions Limit per mode
     const modeStr = isDryRun ? 'DRY_RUN' : 'LIVE';
@@ -1088,10 +1149,11 @@ export class LPEngineAgent {
         const routerAddress = (dexConfig.routerAddress || process.env.UNIVERSAL_ROUTER || process.env.ROUTER_ADDRESS || '') as Address;
         
         // Slippage / Swap setup
-        const isWeth0 = t0.toLowerCase() === wethAddress.toLowerCase();
-        const memeTokenAddress = (isWeth0 ? t1 : t0) as Address;
-        const wethAmountToSwap = isWeth0 ? amount0Desired : amount1Desired; // WETH is token0, so we need amount0
-        console.log(`[LPEngine Debug] wethAmountToSwap=${wethAmountToSwap}, amount0=${amount0Desired}, amount1=${amount1Desired}, isWeth0=${isWeth0}`);
+        const isQuote0 = t0.toLowerCase() === quoteAddress.toLowerCase();
+        const quoteAddressHex = quoteAddress as Address;
+        const memeTokenAddress = (isQuote0 ? t1 : t0) as Address;
+        const quoteAmountToSwap = isQuote0 ? amount0Desired : amount1Desired; // Quote is token0, so we need amount0
+        console.log(`[LPEngine Debug] quoteAmountToSwap=${quoteAmountToSwap}, amount0=${amount0Desired}, amount1=${amount1Desired}, isQuote0=${isQuote0}`);
         
         const isUniversalRouter = version === 'V3';
         const isAlpsRouter = version === 'V4';
@@ -1108,7 +1170,7 @@ export class LPEngineAgent {
           // ExactInputSingleParams ABI for Universal Router
           const commands = '0x00' as `0x${string}`; // V3_SWAP_EXACT_IN
           const feeHex = feeTier.toString(16).padStart(6, '0');
-          const path = (wethAddress + feeHex + memeTokenAddress.replace('0x', '')) as `0x${string}`;
+          const path = (quoteAddress + feeHex + memeTokenAddress.replace('0x', '')) as `0x${string}`;
           
           const exactInputSingleParamsAbi = [
             { type: 'address' },
@@ -1118,12 +1180,12 @@ export class LPEngineAgent {
             { type: 'bool' }
           ];
 
-          const expectedMemeOut = isWeth0 ? amount1Desired : amount0Desired;
+          const expectedMemeOut = isQuote0 ? amount1Desired : amount0Desired;
           const amountOutMin = expectedMemeOut * 90n / 100n; // 10% max slippage
 
           const swapInput = encodeAbiParameters(exactInputSingleParamsAbi, [
             recipient, // recipient
-            wethAmountToSwap,
+            quoteAmountToSwap,
             amountOutMin, // 10% slippage protection
             path,
             true // payerIsUser = true (requires Permit2)
@@ -1142,8 +1204,8 @@ export class LPEngineAgent {
           });
           
           preSwapCalls = [
-            { target: wethAddress, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [PERMIT2_ADDRESS, MAX_UINT128] }) },
-            { target: PERMIT2_ADDRESS, data: encodeFunctionData({ abi: permit2Abi, functionName: 'approve', args: [wethAddress, actualRouterAddress, BigInt(MAX_UINT128), 4000000000] }) }
+            { target: quoteAddressHex, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [PERMIT2_ADDRESS, MAX_UINT128] }) },
+            { target: PERMIT2_ADDRESS, data: encodeFunctionData({ abi: permit2Abi, functionName: 'approve', args: [quoteAddressHex, actualRouterAddress, BigInt(MAX_UINT128), 4000000000] }) }
           ];
         } else {
           // Standard SwapRouter02 (ALPS)
@@ -1152,18 +1214,18 @@ export class LPEngineAgent {
             'function exactInputSingle(ExactInputSingleParams params) external payable returns (uint256 amountOut)'
           ]);
           
-          const expectedMemeOut = isWeth0 ? amount1Desired : amount0Desired;
+          const expectedMemeOut = isQuote0 ? amount1Desired : amount0Desired;
           const amountOutMin = expectedMemeOut * 90n / 100n; // 10% max slippage
 
           swapCalldata = encodeFunctionData({
             abi: swapRouterAbi,
             functionName: 'exactInputSingle',
             args: [{
-              tokenIn: wethAddress as Address,
+              tokenIn: quoteAddress as Address,
               tokenOut: memeTokenAddress as Address,
               fee: feeTier,
               recipient: recipient,
-              amountIn: wethAmountToSwap,
+              amountIn: quoteAmountToSwap,
               amountOutMinimum: amountOutMin, // 10% slippage protection
               sqrtPriceLimitX96: 0n
             }]
@@ -1171,7 +1233,7 @@ export class LPEngineAgent {
           
           // ALPS Router uses direct ERC20 approval, not Permit2
           preSwapCalls = [
-            { target: wethAddress, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [actualRouterAddress, MAX_UINT128] }) }
+            { target: quoteAddressHex, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [actualRouterAddress, MAX_UINT128] }) }
           ];
         }
 
@@ -1181,13 +1243,13 @@ export class LPEngineAgent {
         // State changes from step 1 (approve) are visible to step 2 (swap) in the same UserOp.
         const calls: UserOpCall[] = [
           ...preSwapCalls,
-          // Swap WETH → Meme Token
+          // Swap Quote Token → Meme Token
           { target: actualRouterAddress, data: swapCalldata },
-          // Approve WETH and Meme Token to Permit2
-          { target: wethAddress, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [PERMIT2_ADDRESS, MAX_UINT128] }) },
+          // Approve Quote Token and Meme Token to Permit2
+          { target: quoteAddressHex, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [PERMIT2_ADDRESS, MAX_UINT128] }) },
           { target: memeTokenAddress, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [PERMIT2_ADDRESS, MAX_UINT128] }) },
           // Approve NPM to pull from Permit2
-          { target: PERMIT2_ADDRESS, data: encodeFunctionData({ abi: permit2Abi, functionName: 'approve', args: [wethAddress, npmAddress, BigInt(MAX_UINT128), 4000000000] }) },
+          { target: PERMIT2_ADDRESS, data: encodeFunctionData({ abi: permit2Abi, functionName: 'approve', args: [quoteAddressHex, npmAddress, BigInt(MAX_UINT128), 4000000000] }) },
           { target: PERMIT2_ADDRESS, data: encodeFunctionData({ abi: permit2Abi, functionName: 'approve', args: [memeTokenAddress, npmAddress, BigInt(MAX_UINT128), 4000000000] }) },
           // Mint LP Position
           { target: npmAddress, data: calldata }
