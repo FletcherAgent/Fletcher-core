@@ -1,6 +1,5 @@
 import { Bot } from "grammy";
 import * as dotenv from "dotenv";
-import "../mcp/index.js";
 import { PrismaClient } from '@prisma/client';
 import { Orchestrator } from "../core/orchestrator.js";
 import { connectDb, prisma } from "../core/db.js";

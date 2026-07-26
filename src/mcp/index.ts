@@ -1,21 +1,16 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { z } from 'zod';
-import express from 'express';
-import cors from 'cors';
 import { recommendTopPools, buildLpTransaction } from './tools.js';
 import { Address } from 'viem';
 
-const app = express();
-app.use(cors());
-
-const server = new McpServer({
+export const mcpServer = new McpServer({
   name: "fletcher-mcp",
   version: "1.0.0"
 });
 
 // Tool 1: recommend_top_pools
-server.tool(
+mcpServer.tool(
   "recommend_top_pools",
   "Get the top 5 trending LP pools on Robinhood chain with highest APR/Volume",
   {},
@@ -28,7 +23,7 @@ server.tool(
 );
 
 // Tool 2: build_lp_transaction
-server.tool(
+mcpServer.tool(
   "build_lp_transaction",
   "Build an unsigned transaction payload for the user to open an LP position. The result contains an executeUrl that the AI should provide to the user as a clickable link.",
   {
@@ -53,25 +48,3 @@ server.tool(
     };
   }
 );
-
-// SSE Transport setup
-let transport: SSEServerTransport;
-
-app.get("/mcp/sse", async (req, res) => {
-  transport = new SSEServerTransport("/mcp/message", res);
-  await server.connect(transport);
-  console.log('[MCP] Client connected via SSE');
-});
-
-app.post("/mcp/message", async (req, res) => {
-  if (transport) {
-    await transport.handlePostMessage(req, res);
-  } else {
-    res.status(503).send("SSE transport not active");
-  }
-});
-
-const PORT = process.env.PORT || process.env.MCP_PORT || 3005;
-app.listen(PORT, () => {
-  console.log(`[MCP] Fletcher MCP Server running on SSE: https://fletcher-core-production-d4b8.up.railway.app/mcp/sse (Internal Port: ${PORT})`);
-});
