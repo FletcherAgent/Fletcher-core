@@ -6,6 +6,15 @@ datasource db {
   provider = "postgresql"
 }
 
+model User {
+  id            String       @id @default(uuid())
+  walletAddress String       @unique
+  createdAt     DateTime     @default(now())
+
+  lpPositions   LPPosition[]
+  positions     Position[]
+}
+
 model Position {
   id           String   @id @default(uuid())
   tokenAddress String
@@ -26,6 +35,9 @@ model Position {
   exitTxHash   String?
   tradingMode  String   @default("LIVE")
   exitReason   String?
+
+  userId       String?
+  user         User?    @relation(fields: [userId], references: [id])
 }
 
 model Signal {
@@ -134,6 +146,9 @@ model LPPosition {
   source          String   @default("SYSTEM")
   managerAddress  String?
   sentimentStatus String?
+
+  userId          String?
+  user            User?    @relation(fields: [userId], references: [id])
 }
 
 model SessionKey {

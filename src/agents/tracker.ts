@@ -73,21 +73,33 @@ export class TrackerAgent {
         }
       }
 
-      if (req.method === 'GET' && req.url === '/api/dashboard') {
+      const reqUrl = new URL(req.url || '', `http://${req.headers.host || 'localhost'}`);
+      
+      if (req.method === 'GET' && reqUrl.pathname === '/api/dashboard') {
         try {
+          const walletParam = reqUrl.searchParams.get('wallet') || req.headers['x-wallet-address'] as string;
+          let userFilter = {};
+          if (walletParam) {
+            // Fetch positions belonging to this specific user wallet
+            userFilter = { user: { walletAddress: { equals: walletParam, mode: 'insensitive' } } };
+          } else {
+            // Public dashboard: fetch only positions where userId is null (system/flagship)
+            userFilter = { userId: null };
+          }
+
           const [wallets, signals, positions, lpPositions, logs, totalSignals, openPositionsCount, tradingModeConfig, maxPosConfig, autonomyConfig, liveAgg, dryRunAgg] = await Promise.all([
             prisma.trackedWallet.findMany({ orderBy: { createdAt: 'desc' } }),
             prisma.signal.findMany({ orderBy: { createdAt: 'desc' }, take: 20 }),
-            prisma.position.findMany({ orderBy: { createdAt: 'desc' }, take: 20 }),
-            prisma.lPPosition.findMany({ orderBy: { createdAt: 'desc' }, take: 20 }),
+            prisma.position.findMany({ where: userFilter, orderBy: { createdAt: 'desc' }, take: 20 }),
+            prisma.lPPosition.findMany({ where: userFilter, orderBy: { createdAt: 'desc' }, take: 20 }),
             prisma.log.findMany({ orderBy: { createdAt: 'desc' }, take: 50 }),
             prisma.signal.count(),
-            prisma.position.count({ where: { status: 'OPEN' } }),
+            prisma.position.count({ where: { status: 'OPEN', ...userFilter } }),
             prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } }),
             prisma.systemConfig.findUnique({ where: { key: 'MAX_POSITION_SIZE' } }),
             prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } }),
-            prisma.lPPosition.aggregate({ where: { tradingMode: 'LIVE' }, _sum: { feesCollected: true } }),
-            prisma.lPPosition.aggregate({ where: { tradingMode: 'DRY_RUN' }, _sum: { feesCollected: true } })
+            prisma.lPPosition.aggregate({ where: { tradingMode: 'LIVE', ...userFilter }, _sum: { feesCollected: true } }),
+            prisma.lPPosition.aggregate({ where: { tradingMode: 'DRY_RUN', ...userFilter }, _sum: { feesCollected: true } })
           ]);
           
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -112,7 +124,7 @@ export class TrackerAgent {
           res.writeHead(500);
           res.end();
         }
-      } else if (req.method === 'POST' && req.url === '/webhook/alchemy') {
+      } else if (req.method === 'POST' && reqUrl.pathname === '/webhook/alchemy') {
         let body = '';
         req.on('data', chunk => {
           body += chunk.toString();
