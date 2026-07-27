@@ -518,7 +518,7 @@ bot.command("lp", async (ctx) => {
 
   const tier = await getUserTier(wallet);
   if (tier === 0 && sub !== 'status') {
-    return ctx.reply("❌ **Access Denied**\nYou need at least Tier 1 (10,000 $FLETCH) to use LP features.", { parse_mode: 'Markdown' });
+    return ctx.reply("❌ **Access Denied**\nYou need at least Tier 1 (1,000,000 $FLETCH) to use LP features.", { parse_mode: 'Markdown' });
   }
 
   const lpEngine = orchestrator.getLPEngine();

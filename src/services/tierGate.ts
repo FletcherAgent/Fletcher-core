@@ -11,10 +11,10 @@ const tierCache = new Map<string, { tier: number; timestamp: number }>();
 /**
  * Get user tier based on their $FLETCH balance.
  * Tiers:
- * 3 (VIP) >= 100,000 $FLETCH
- * 2 (Pro) >= 50,000 $FLETCH
- * 1 (Base) >= 10,000 $FLETCH
- * 0 (None) < 10,000 $FLETCH
+ * 3 (VIP) >= 5,000,000 $FLETCH
+ * 2 (Pro) >= 2,500,000 $FLETCH
+ * 1 (Base) >= 1,000,000 $FLETCH
+ * 0 (None) < 1,000,000 $FLETCH
  */
 export async function getUserTier(walletAddress: string): Promise<number> {
   if (!walletAddress) return 0;
@@ -46,11 +46,11 @@ export async function getUserTier(walletAddress: string): Promise<number> {
     const balance = Number(balanceWei) / 1e18; // Assuming 18 decimals
     let tier = 0;
 
-    if (balance >= 100000) {
+    if (balance >= 5000000) {
       tier = 3;
-    } else if (balance >= 50000) {
+    } else if (balance >= 2500000) {
       tier = 2;
-    } else if (balance >= 10000) {
+    } else if (balance >= 1000000) {
       tier = 1;
     }
 

@@ -131,7 +131,7 @@ export class TrackerAgent {
           const tier = await getUserTier(wallet);
           if (tier === 0) { // Standard tier (No FLETCH)
             res.writeHead(403); 
-            return res.end(JSON.stringify({ error: 'Insufficient $FLETCH balance. Minimum 2.5M required.' }));
+            return res.end(JSON.stringify({ error: 'Insufficient $FLETCH balance. Minimum 1M required.' }));
           }
 
           const body = await getJsonBody(req);
