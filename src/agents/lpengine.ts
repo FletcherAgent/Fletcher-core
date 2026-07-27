@@ -1115,7 +1115,7 @@ export class LPEngineAgent {
       },
     });
 
-    dbLogger.info(`[LPEngine] 📝 LPPosition created in DB: ${dbRecord.id} (PENDING)`, { source: 'LPEngine' });
+    dbLogger.info(`[LPEngine] 📝 LPPosition created in DB: ${dbRecord.id} (PENDING)`, { source: 'LPEngine', wallet: options.wallet });
     await logEvent('INFO', `[LP] OPEN Proposal created for ${t0Symbol}/${t1Symbol}`, { positionId: dbRecord.id, mode: currentMode });
 
     const proposal: LPProposal = {
@@ -1144,7 +1144,7 @@ export class LPEngineAgent {
         if (this.onProposal) await this.onProposal(proposal);
         return;
       }
-      dbLogger.info(`[LPEngine] Mode FULL — Executing automatically via Alchemy Session Key`, { source: 'LPEngine' });
+      dbLogger.info(`[LPEngine] Mode FULL — Executing automatically via Alchemy Session Key`, { source: 'LPEngine', wallet: options.wallet });
       try {
         const tier = await getUserTier(recipient);
         // selfFunded=true: creates client without Alchemy paymaster middleware.
@@ -1279,7 +1279,7 @@ export class LPEngineAgent {
           data: { txHash }
         });
 
-        dbLogger.info(`[LPEngine] 📜 Waiting for receipt to extract TokenID...`, { source: 'LPEngine' });
+        dbLogger.info(`[LPEngine] 📜 Waiting for receipt to extract TokenID...`, { source: 'LPEngine', wallet: options.wallet });
         const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash as Hex });
 
         let realTokenId = dbRecord.tokenId; // Fallback to PENDING-...
@@ -1293,7 +1293,7 @@ export class LPEngineAgent {
               });
               if (decoded.eventName === 'IncreaseLiquidity' || decoded.eventName === 'Transfer') {
                 realTokenId = (decoded.args as any).tokenId.toString();
-                dbLogger.info(`[LPEngine] 🎯 Successfully extracted Real TokenID: ${realTokenId} from ${decoded.eventName}`, { source: 'LPEngine' });
+                dbLogger.info(`[LPEngine] 🎯 Successfully extracted Real TokenID: ${realTokenId} from ${decoded.eventName}`, { source: 'LPEngine', wallet: options.wallet });
                 break;
               }
             } catch (e) {
@@ -1320,7 +1320,7 @@ export class LPEngineAgent {
           errorMsg = errorMsg.replace(new RegExp(process.env.ALCHEMY_API_KEY, 'g'), '[REDACTED_ALCHEMY_KEY]');
         }
         await logEvent('ERROR', `[LP] Auto-Open Failed`, { error: errorMsg });
-        dbLogger.error(`[LPEngine] Failed to auto-open position: ${errorMsg}`, { source: 'LPEngine' });
+        dbLogger.error(`[LPEngine] Failed to auto-open position: ${errorMsg}`, { source: 'LPEngine', wallet: options.wallet });
 
         await prisma.lPPosition.update({
           where: { id: dbRecord.id },
@@ -1358,7 +1358,8 @@ export class LPEngineAgent {
    * Called by Guardian (LPCloseSignal) or user via /lp close <id>.
    */
   async proposeClosePosition(positionId: string, reason: string): Promise<void> {
-    const pos = await prisma.lPPosition.findUnique({ where: { id: positionId } });
+    const pos = await prisma.lPPosition.findUnique({ where: { id: positionId }, include: { user: true } });
+    const userWallet = pos?.user?.walletAddress;
     if (!pos || pos.status !== 'OPEN') {
       console.warn(`[LPEngine] proposeClosePosition: position ${positionId} not found or not OPEN`);
       await logEvent('WARN', `[LP] proposeClosePosition: position ${positionId} not found or not OPEN`);
@@ -1383,9 +1384,9 @@ export class LPEngineAgent {
           functionName: 'getPositionLiquidity',
           args: [tokenId],
         }) as bigint;
-        dbLogger.info(`[LPEngine] Position liquidity: ${liquidity}`, { source: 'LPEngine' });
+        dbLogger.info(`[LPEngine] Position liquidity: ${liquidity}`, { source: 'LPEngine', wallet: userWallet });
       } catch (e: any) {
-        dbLogger.error(`[LPEngine] getPositionLiquidity() failed: ${e.message}`, { source: 'LPEngine' });
+        dbLogger.error(`[LPEngine] getPositionLiquidity() failed: ${e.message}`, { source: 'LPEngine', wallet: userWallet });
       }
     } else {
       liquidity = pos.simulatedLiquidity ? BigInt(pos.simulatedLiquidity) : 0n;
@@ -1439,7 +1440,7 @@ export class LPEngineAgent {
         if (this.onProposal) await this.onProposal(proposal);
         return;
       }
-      dbLogger.info(`[LPEngine] Mode FULL — Auto-closing position via Alchemy Session Key`, { source: 'LPEngine' });
+      dbLogger.info(`[LPEngine] Mode FULL — Auto-closing position via Alchemy Session Key`, { source: 'LPEngine', wallet: userWallet });
       try {
         const tier = await getUserTier(recipient);
         const client = await getSessionKeyClient('FULL', tier);
@@ -1478,7 +1479,7 @@ export class LPEngineAgent {
         });
 
         await logEvent('ERROR', `[LP] Auto-Close Failed (Reverted to OPEN)`, { error: e.message });
-        dbLogger.error(`[LPEngine] Failed to auto-close position: ${e.message}`, { source: 'LPEngine' });
+        dbLogger.error(`[LPEngine] Failed to auto-close position: ${e.message}`, { source: 'LPEngine', wallet: userWallet });
         proposal.description = `❌ Auto-Close Failed\nPair: ${pos.token0Symbol}/${pos.token1Symbol}\nStatus: Reverted to OPEN\nError: ${errorMsg}`;
         if (this.onProposal) await this.onProposal(proposal);
         return;
@@ -1499,13 +1500,14 @@ export class LPEngineAgent {
       ? { id: positionId, status: 'OPEN' }
       : { status: 'OPEN' };
 
-    const positions = await prisma.lPPosition.findMany({ where });
+    const positions = await prisma.lPPosition.findMany({ where, include: { user: true } });
     const recipient = ((process.env.LP_WALLET_ADDRESS || process.env.USER_WALLET_ADDRESS) ?? '') as Address;
     const tier = await getUserTier(recipient);
     const { npmAddress: defaultNpm } = await this.getAddresses();
 
     for (const pos of positions) {
       if (pos.tokenId.startsWith('PENDING')) continue;
+      const userWallet = (pos as any).user?.walletAddress;
       const isSim = pos.tokenId.startsWith('SIM-') || pos.tradingMode === 'DRY_RUN';
 
       const tokenId = isSim ? 0n : BigInt(pos.tokenId);
@@ -1551,7 +1553,7 @@ export class LPEngineAgent {
           if (this.onProposal) await this.onProposal(proposal);
           continue;
         }
-        dbLogger.info(`[LPEngine] Mode ${pos.mode} — Auto-harvesting via Alchemy Session Key`, { source: 'LPEngine' });
+        dbLogger.info(`[LPEngine] Mode ${pos.mode} — Auto-harvesting via Alchemy Session Key`, { source: 'LPEngine', wallet: userWallet });
         try {
           const client = await getSessionKeyClient(pos.mode as 'SEMI' | 'FULL', tier);
           const calls: UserOpCall[] = [
@@ -1578,7 +1580,7 @@ export class LPEngineAgent {
             errorMsg = errorMsg.replace(new RegExp(process.env.ALCHEMY_API_KEY, 'g'), '[REDACTED_ALCHEMY_KEY]');
           }
           await logEvent('ERROR', `[LP] Auto-Harvest Failed`, { error: errorMsg });
-          dbLogger.error(`[LPEngine] Failed to auto-harvest position: ${errorMsg}`, { source: 'LPEngine' });
+          dbLogger.error(`[LPEngine] Failed to auto-harvest position: ${errorMsg}`, { source: 'LPEngine', wallet: userWallet });
           proposal.description = `❌ *Auto-Harvest Failed*\n` + proposal.description + `\nError: ${errorMsg}`;
           if (this.onProposal) await this.onProposal(proposal);
           continue;
@@ -1601,7 +1603,7 @@ export class LPEngineAgent {
       data: { status: 'OPEN', tokenId: realTokenId, txHash } as any,
     });
     await logEvent('INFO', `[LP] Position Opened (Confirmed) - TokenID: ${realTokenId}`, { positionId, txHash });
-    dbLogger.info(`[LPEngine] ✅ Position ${positionId} confirmed — tokenId: ${realTokenId}`, { source: 'LPEngine' });
+    dbLogger.info(`[LPEngine] ✅ Position ${positionId} confirmed — tokenId: ${realTokenId}`, { source: 'LPEngine' }); // We could fetch wallet here, but omitting for now or fetching it
   }
 
   async onCloseConfirmed(positionId: string, feesCollectedUsd: number, txHash?: string): Promise<void> {
@@ -1613,7 +1615,7 @@ export class LPEngineAgent {
         feesCollected: { increment: feesCollectedUsd },
       },
     });
-    dbLogger.info(`[LPEngine] ✅ Position ${positionId} closed — fees: $${feesCollectedUsd}`, { source: 'LPEngine' });
+    dbLogger.info(`[LPEngine] ✅ Position ${positionId} closed — fees: $${feesCollectedUsd}`, { source: 'LPEngine' }); // Same here
   }
 
   // ─── Status Summary ─────────────────────────────────────────────────────────

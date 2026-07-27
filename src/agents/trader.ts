@@ -242,7 +242,8 @@ export class TraderAgent {
       await prisma.position.update({ where: { id: posId }, data: { status: 'EXIT_FAILED' } }).catch(console.error);
       return;
     }
-    
+    const posRecord = await prisma.position.findUnique({ where: { id: posId }, include: { user: true } });
+    const walletAddress = posRecord?.user?.walletAddress;
     const calldataResult = await this.constructUnsignedSellTx(tokenAddress, amountInToken, txHash);
     if (!calldataResult) {
       console.error(`[Trader] ❌ Failed to construct SELL calldata for ${tokenAddress}.`);
@@ -305,7 +306,7 @@ export class TraderAgent {
 
         if (receiptStatus === 'success') {
           console.log(`[Trader] 🎯 SELL TX Confirmed in block ${blockNumber}`);
-          dbLogger.info(`SELL TX Confirmed`, { txHash: txHashFinal, token: tokenAddress, block: blockNumber.toString(), reason, mode });
+          dbLogger.info(`SELL TX Confirmed`, { txHash: txHashFinal, token: tokenAddress, block: blockNumber.toString(), reason, mode, wallet: walletAddress });
           this.emitToSigningBoundary(tokenAddress, txHashFinal, `SELL EXECUTED [${reason}]`);
 
           await this.updatePositionStatus(posId, tokenAddress, estimatedExitPrice, reason, txHashFinal);
@@ -314,7 +315,7 @@ export class TraderAgent {
         }
       } catch (error) {
         console.error(`[Trader] ❌ SELL TX Failed:`, error);
-        dbLogger.error(`SELL TX Failed`, { token: tokenAddress, error: String(error) });
+        dbLogger.error(`SELL TX Failed`, { token: tokenAddress, error: String(error), wallet: walletAddress });
         this.emitToSigningBoundary(tokenAddress, "FAILED", 'SELL REJECTED');
         
         if (reason === 'UNSUPPORTED_OR_RUG_NO_QUOTES') {

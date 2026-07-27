@@ -141,10 +141,23 @@ export class TrackerAgent {
             user = await prisma.user.create({ data: { walletAddress: wallet } });
           }
 
-          // 2. Predict Smart Account (Counterfactual CREATE2 Mock)
-          // In production, we'd use Alchemy/Biconomy SDK here
-          const salt = crypto.createHash('sha256').update(wallet + Date.now().toString()).digest('hex');
-          const predictedAddress = `0x${salt.slice(0, 40)}`; 
+          // 2. Predict Smart Account (Real Counterfactual CREATE2 via SimpleAccountFactory)
+          const factoryAddress = '0x9406Cc6185a346906296840746125a0E44976454';
+          const predictedAddress = await publicClient.readContract({
+            address: factoryAddress,
+            abi: [{
+              inputs: [
+                { name: 'owner', type: 'address' },
+                { name: 'salt', type: 'uint256' }
+              ],
+              name: 'getAddress',
+              outputs: [{ type: 'address' }],
+              stateMutability: 'view',
+              type: 'function',
+            }],
+            functionName: 'getAddress',
+            args: [wallet as `0x${string}`, 0n]
+          }) as string;
 
           // 3. Create Agent
           const agentName = body.name || generateAgentName();
