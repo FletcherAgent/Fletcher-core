@@ -23,6 +23,7 @@ import { getSessionKeyClient, buildAndSendLPUserOperation, ensureSmartAccountFun
 import { getUserTier, getTierLimits } from '../services/tierGate.js';
 import { prisma } from '../core/db.js';
 import { logEvent } from '../utils/logger.js';
+import { dbLogger } from '../services/logger.js';
 import { getDexConfig, getAllDexConfigs } from '../core/dexConfig.js';
 import { IntelligenceLayer } from '../services/intelligence.js';
 import {
@@ -210,7 +211,7 @@ export class LPEngineAgent {
         }
       });
       if (zombies.length > 0) {
-        console.log(`[LPEngine] 🧟 Found ${zombies.length} zombie PENDING positions. Marking as FAILED...`);
+        dbLogger.info(`[LPEngine] 🧟 Found ${zombies.length} zombie PENDING positions. Marking as FAILED...`, { source: 'LPEngine' });
         for (const zombie of zombies) {
           await prisma.lPPosition.update({
             where: { id: zombie.id },
@@ -220,7 +221,7 @@ export class LPEngineAgent {
         }
       }
     } catch (e: any) {
-      console.error(`[LPEngine] Failed to cleanup zombie positions: ${e.message}`);
+      dbLogger.error(`[LPEngine] Failed to cleanup zombie positions: ${e.message}`, { source: 'LPEngine' });
     }
   }
 
@@ -310,7 +311,7 @@ export class LPEngineAgent {
                 }) as bigint;
               } catch (err) { }
 
-              console.log(`[LPEngine] 🔎 Found pool candidate: ${poolAddr} on ${config.factoryAddress} (fee: ${fee}, liq: ${liq})`);
+              dbLogger.info(`[LPEngine] 🔎 Found pool candidate: ${poolAddr} on ${config.factoryAddress} (fee: ${fee}, liq: ${liq})`, { source: 'LPEngine' });
 
               if (!bestPool || liq > bestPool.liquidity) {
                 bestPool = {
@@ -332,7 +333,7 @@ export class LPEngineAgent {
     }
 
     if (bestPool) {
-      console.log(`[LPEngine] ✅ Best Pool Selected: ${bestPool.poolAddress} (fee: ${bestPool.feeTier}, liq: ${bestPool.liquidity})`);
+      dbLogger.info(`[LPEngine] ✅ Best Pool Selected: ${bestPool.poolAddress} (fee: ${bestPool.feeTier}, liq: ${bestPool.liquidity})`, { source: 'LPEngine' });
       return {
         poolAddress: bestPool.poolAddress,
         feeTier: bestPool.feeTier,
@@ -497,7 +498,7 @@ export class LPEngineAgent {
    * Full range = MIN_TICK/MAX_TICK -> minimal IL, fee from volume.
    */
   async runDayMode(): Promise<void> {
-    console.log('[LPEngine] ☀️ DAY mode started...');
+    dbLogger.info('[LPEngine] ☀️ DAY mode started...', { source: 'LPEngine' });
     if (this.onNotification) await this.onNotification('☀️ *LP DAY mode started* — screening pairs...');
 
     const config = await loadLPConfig();
@@ -523,26 +524,26 @@ export class LPEngineAgent {
 
     // Evaluate candidates with Grok
     for (const candidate of candidates) {
-      console.log(`[LPEngine] 🧠 Asking Grok to analyze sentiment for ${candidate.token.symbol}...`);
+      dbLogger.info(`[LPEngine] 🧠 Asking Grok to analyze sentiment for ${candidate.token.symbol}...`, { source: 'LPEngine' });
 
       const sentiment = await IntelligenceLayer.analyzeSentiment(candidate.token.symbol, candidate.token.address);
       if (sentiment.label === 'SKIPPED') {
-        console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: SKIPPED - ${sentiment.reasoning}`);
+        dbLogger.info(`[LPEngine] Grok Result for ${candidate.token.symbol}: SKIPPED - ${sentiment.reasoning}`, { source: 'LPEngine' });
         candidate.grokScore = undefined;
         candidate.grokLabel = 'SKIPPED';
       } else if (sentiment.label === 'BEARISH' || (sentiment.score !== null && sentiment.score < config.minGrokScore)) {
-        console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
+        dbLogger.info(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`, { source: 'LPEngine' });
         if (grokMode === 'ANNOTATION') {
-          console.log(`[LPEngine] 📝 Grok flagged ${candidate.token.symbol} as BEARISH, but grok.mode is ANNOTATION. Proceeding.`);
+          dbLogger.info(`[LPEngine] 📝 Grok flagged ${candidate.token.symbol} as BEARISH, but grok.mode is ANNOTATION. Proceeding.`, { source: 'LPEngine' });
           candidate.grokScore = sentiment.score ?? undefined;
           candidate.grokLabel = sentiment.label;
         } else {
-          console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < ${config.minGrokScore}`);
+          dbLogger.info(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < ${config.minGrokScore}`, { source: 'LPEngine' });
           continue;
         }
       } else {
-        console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
-        console.log(`[LPEngine] ✅ Grok APPROVED ${candidate.token.symbol}`);
+        dbLogger.info(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`, { source: 'LPEngine' });
+        dbLogger.info(`[LPEngine] ✅ Grok APPROVED ${candidate.token.symbol}`, { source: 'LPEngine' });
         if (this.onNotification) await this.onNotification(`✅ *Grok APPROVED $${candidate.token.symbol}*\nScore: ${sentiment.score}\n_Wait for V3 pool..._`);
         candidate.grokScore = sentiment.score ?? undefined;
         candidate.grokLabel = sentiment.label;
@@ -588,7 +589,7 @@ export class LPEngineAgent {
       }
     });
 
-    console.log(`[LPEngine] 📋 Added $${selectedCandidate.token.symbol} to Watchlist (Awaiting TA Signal)`);
+    dbLogger.info(`[LPEngine] 📋 Added $${selectedCandidate.token.symbol} to Watchlist (Awaiting TA Signal)`, { source: 'LPEngine' });
     if (this.onNotification) await this.onNotification(`📋 *Added to Watchlist:* $${selectedCandidate.token.symbol}\n_Awaiting Supertrend/ATH breakout_`);
   }
 
@@ -599,7 +600,7 @@ export class LPEngineAgent {
    * Deploy sebelum tidur, collect pagi.
    */
   async runNightMode(): Promise<void> {
-    console.log('[LPEngine] 🌙 NIGHT mode started — screening up to 3 pairs...');
+    dbLogger.info('[LPEngine] 🌙 NIGHT mode started — screening up to 3 pairs...', { source: 'LPEngine' });
     if (this.onNotification) await this.onNotification('🌙 *LP NIGHT mode started* — screening up to 3 pairs...');
 
     const config = await loadLPConfig();
@@ -634,26 +635,26 @@ export class LPEngineAgent {
     for (const candidate of candidates) {
       if (toOpen.length >= Math.min(slotsLeft, 3)) break;
 
-      console.log(`[LPEngine] 🧠 Asking Grok to analyze sentiment for ${candidate.token.symbol}...`);
+      dbLogger.info(`[LPEngine] 🧠 Asking Grok to analyze sentiment for ${candidate.token.symbol}...`, { source: 'LPEngine' });
 
       const sentiment = await IntelligenceLayer.analyzeSentiment(candidate.token.symbol, candidate.token.address);
       if (sentiment.label === 'SKIPPED') {
-        console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: SKIPPED - ${sentiment.reasoning}`);
+        dbLogger.info(`[LPEngine] Grok Result for ${candidate.token.symbol}: SKIPPED - ${sentiment.reasoning}`, { source: 'LPEngine' });
         candidate.grokScore = undefined;
         candidate.grokLabel = 'SKIPPED';
       } else if (sentiment.label === 'BEARISH' || (sentiment.score !== null && sentiment.score < config.minGrokScore)) {
-        console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
+        dbLogger.info(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`, { source: 'LPEngine' });
         if (grokMode === 'ANNOTATION') {
-          console.log(`[LPEngine] 📝 Grok flagged ${candidate.token.symbol} as BEARISH, but grok.mode is ANNOTATION. Proceeding.`);
+          dbLogger.info(`[LPEngine] 📝 Grok flagged ${candidate.token.symbol} as BEARISH, but grok.mode is ANNOTATION. Proceeding.`, { source: 'LPEngine' });
           candidate.grokScore = sentiment.score ?? undefined;
           candidate.grokLabel = sentiment.label;
         } else {
-          console.log(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < ${config.minGrokScore}`);
+          dbLogger.info(`[LPEngine] ❌ Grok REJECTED ${candidate.token.symbol}: Bearish or score < ${config.minGrokScore}`, { source: 'LPEngine' });
           continue;
         }
       } else {
-        console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`);
-        console.log(`[LPEngine] ✅ Grok APPROVED ${candidate.token.symbol}`);
+        dbLogger.info(`[LPEngine] Grok Result for ${candidate.token.symbol}: ${sentiment.label} (Score: ${sentiment.score}) - ${sentiment.reasoning}`, { source: 'LPEngine' });
+        dbLogger.info(`[LPEngine] ✅ Grok APPROVED ${candidate.token.symbol}`, { source: 'LPEngine' });
         if (this.onNotification) await this.onNotification(`✅ *Grok APPROVED $${candidate.token.symbol}*\nScore: ${sentiment.score}\n_Wait for V3 pool..._`);
         candidate.grokScore = sentiment.score ?? undefined;
         candidate.grokLabel = sentiment.label;
@@ -691,7 +692,7 @@ export class LPEngineAgent {
           tradingMode: currentMode,
         }
       });
-      console.log(`[LPEngine] 📋 Added $${candidate.token.symbol} to Watchlist (NIGHT)`);
+      dbLogger.info(`[LPEngine] 📋 Added $${candidate.token.symbol} to Watchlist (NIGHT)`, { source: 'LPEngine' });
       if (this.onNotification) await this.onNotification(`📋 *Added to Watchlist:* $${candidate.token.symbol}\n_Awaiting Supertrend/ATH breakout_`);
     }
   }
@@ -739,7 +740,7 @@ export class LPEngineAgent {
       }
     });
 
-    console.log(`[LPEngine] 📋 Added $${token.symbol} from Alpha Signal to Watchlist`);
+    dbLogger.info(`[LPEngine] 📋 Added $${token.symbol} from Alpha Signal to Watchlist`, { source: 'LPEngine' });
     if (this.onNotification) await this.onNotification(`📋 *Alpha Signal Added to Watchlist:* $${token.symbol}\n_Awaiting Supertrend/ATH breakout_`);
   }
 
@@ -747,7 +748,7 @@ export class LPEngineAgent {
 
   public async proposeOpenPosition(
     candidate: { token: GMGNToken; score: number; grokScore?: number; grokLabel?: string; sentimentStatus?: string },
-    options: { dayMode: boolean; nightMode: boolean; nightRange?: number; strategyMode?: boolean; lowerPct?: number; upperPct?: number; source?: string }
+    options: { dayMode: boolean; nightMode: boolean; nightRange?: number; strategyMode?: boolean; lowerPct?: number; upperPct?: number; source?: string; agentId?: string; wallet?: string }
   ): Promise<void> {
     const config = await loadLPConfig();
     const token = candidate.token;
@@ -755,7 +756,7 @@ export class LPEngineAgent {
     const isDryRun = (modeCfg?.value || 'LIVE') === 'DRY_RUN';
     const { wethAddress } = await this.getAddresses();
 
-    console.log(`[LPEngine] 📋 Proposing position: ${token.symbol} | dayMode=${options.dayMode} | dryRun=${isDryRun}`);
+    dbLogger.info(`[LPEngine] 📋 Proposing position: ${token.symbol} | dayMode=${options.dayMode} | dryRun=${isDryRun}`, { source: 'LPEngine', wallet: options.wallet, agentId: options.agentId });
     await logEvent('INFO', `[LP] Proposing position: ${token.symbol} | dayMode=${options.dayMode} | dryRun=${isDryRun}`);
 
     const currentTradingMode = isDryRun ? 'DRY_RUN' : 'LIVE';
@@ -887,7 +888,7 @@ export class LPEngineAgent {
     }
 
     if (sizingLog.length > 0) {
-      console.log(`[LPEngine] ⚖️ Sizing adjustments for $${token.symbol}: ${sizingLog.join(', ')}. Base: $${baseStartSize} -> Final: $${finalStartSize}`);
+      dbLogger.info(`[LPEngine] ⚖️ Sizing adjustments for $${token.symbol}: ${sizingLog.join(', ')}. Base: $${baseStartSize} -> Final: $${finalStartSize}`, { source: 'LPEngine' });
     }
 
     // Amount calculation: split startSize 50/50 between token0 and token1
@@ -981,7 +982,7 @@ export class LPEngineAgent {
       amount0Desired = this.usdToTokenAmount(halfUsdAlloc, token0Price, t0Dec);
       amount1Desired = this.usdToTokenAmount(halfUsdAlloc, token1Price, t1Dec);
 
-      console.log(`[LPEngine] 💰 Dynamic Sizing: Using ${allocationPercent}% of Quote Balance ($${proposedUsdAllocation.toFixed(2)} USD)`);
+      dbLogger.info(`[LPEngine] 💰 Dynamic Sizing: Using ${allocationPercent}% of Quote Balance ($${proposedUsdAllocation.toFixed(2)} USD)`, { source: 'LPEngine' });
     } else {
       amount0Desired = this.usdToTokenAmount(halfUsd, token0Price, t0Dec);
       amount1Desired = this.usdToTokenAmount(halfUsd, token1Price, t1Dec);
@@ -1114,7 +1115,7 @@ export class LPEngineAgent {
       },
     });
 
-    console.log(`[LPEngine] 📝 LPPosition created in DB: ${dbRecord.id} (PENDING)`);
+    dbLogger.info(`[LPEngine] 📝 LPPosition created in DB: ${dbRecord.id} (PENDING)`, { source: 'LPEngine' });
     await logEvent('INFO', `[LP] OPEN Proposal created for ${t0Symbol}/${t1Symbol}`, { positionId: dbRecord.id, mode: currentMode });
 
     const proposal: LPProposal = {
@@ -1143,7 +1144,7 @@ export class LPEngineAgent {
         if (this.onProposal) await this.onProposal(proposal);
         return;
       }
-      console.log(`[LPEngine] Mode FULL — Executing automatically via Alchemy Session Key`);
+      dbLogger.info(`[LPEngine] Mode FULL — Executing automatically via Alchemy Session Key`, { source: 'LPEngine' });
       try {
         const tier = await getUserTier(recipient);
         // selfFunded=true: creates client without Alchemy paymaster middleware.
@@ -1278,7 +1279,7 @@ export class LPEngineAgent {
           data: { txHash }
         });
 
-        console.log(`[LPEngine] 📜 Waiting for receipt to extract TokenID...`);
+        dbLogger.info(`[LPEngine] 📜 Waiting for receipt to extract TokenID...`, { source: 'LPEngine' });
         const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash as Hex });
 
         let realTokenId = dbRecord.tokenId; // Fallback to PENDING-...
@@ -1292,7 +1293,7 @@ export class LPEngineAgent {
               });
               if (decoded.eventName === 'IncreaseLiquidity' || decoded.eventName === 'Transfer') {
                 realTokenId = (decoded.args as any).tokenId.toString();
-                console.log(`[LPEngine] 🎯 Successfully extracted Real TokenID: ${realTokenId} from ${decoded.eventName}`);
+                dbLogger.info(`[LPEngine] 🎯 Successfully extracted Real TokenID: ${realTokenId} from ${decoded.eventName}`, { source: 'LPEngine' });
                 break;
               }
             } catch (e) {
@@ -1319,7 +1320,7 @@ export class LPEngineAgent {
           errorMsg = errorMsg.replace(new RegExp(process.env.ALCHEMY_API_KEY, 'g'), '[REDACTED_ALCHEMY_KEY]');
         }
         await logEvent('ERROR', `[LP] Auto-Open Failed`, { error: errorMsg });
-        console.error(`[LPEngine] Failed to auto-open position: ${errorMsg}`);
+        dbLogger.error(`[LPEngine] Failed to auto-open position: ${errorMsg}`, { source: 'LPEngine' });
 
         await prisma.lPPosition.update({
           where: { id: dbRecord.id },
@@ -1382,9 +1383,9 @@ export class LPEngineAgent {
           functionName: 'getPositionLiquidity',
           args: [tokenId],
         }) as bigint;
-        console.log(`[LPEngine] Position liquidity: ${liquidity}`);
+        dbLogger.info(`[LPEngine] Position liquidity: ${liquidity}`, { source: 'LPEngine' });
       } catch (e: any) {
-        console.error(`[LPEngine] getPositionLiquidity() failed: ${e.message}`);
+        dbLogger.error(`[LPEngine] getPositionLiquidity() failed: ${e.message}`, { source: 'LPEngine' });
       }
     } else {
       liquidity = pos.simulatedLiquidity ? BigInt(pos.simulatedLiquidity) : 0n;
@@ -1438,7 +1439,7 @@ export class LPEngineAgent {
         if (this.onProposal) await this.onProposal(proposal);
         return;
       }
-      console.log(`[LPEngine] Mode FULL — Auto-closing position via Alchemy Session Key`);
+      dbLogger.info(`[LPEngine] Mode FULL — Auto-closing position via Alchemy Session Key`, { source: 'LPEngine' });
       try {
         const tier = await getUserTier(recipient);
         const client = await getSessionKeyClient('FULL', tier);
@@ -1477,7 +1478,7 @@ export class LPEngineAgent {
         });
 
         await logEvent('ERROR', `[LP] Auto-Close Failed (Reverted to OPEN)`, { error: e.message });
-        console.error(`[LPEngine] Failed to auto-close position: ${e.message}`);
+        dbLogger.error(`[LPEngine] Failed to auto-close position: ${e.message}`, { source: 'LPEngine' });
         proposal.description = `❌ Auto-Close Failed\nPair: ${pos.token0Symbol}/${pos.token1Symbol}\nStatus: Reverted to OPEN\nError: ${errorMsg}`;
         if (this.onProposal) await this.onProposal(proposal);
         return;
@@ -1550,7 +1551,7 @@ export class LPEngineAgent {
           if (this.onProposal) await this.onProposal(proposal);
           continue;
         }
-        console.log(`[LPEngine] Mode ${pos.mode} — Auto-harvesting via Alchemy Session Key`);
+        dbLogger.info(`[LPEngine] Mode ${pos.mode} — Auto-harvesting via Alchemy Session Key`, { source: 'LPEngine' });
         try {
           const client = await getSessionKeyClient(pos.mode as 'SEMI' | 'FULL', tier);
           const calls: UserOpCall[] = [
@@ -1577,7 +1578,7 @@ export class LPEngineAgent {
             errorMsg = errorMsg.replace(new RegExp(process.env.ALCHEMY_API_KEY, 'g'), '[REDACTED_ALCHEMY_KEY]');
           }
           await logEvent('ERROR', `[LP] Auto-Harvest Failed`, { error: errorMsg });
-          console.error(`[LPEngine] Failed to auto-harvest position: ${errorMsg}`);
+          dbLogger.error(`[LPEngine] Failed to auto-harvest position: ${errorMsg}`, { source: 'LPEngine' });
           proposal.description = `❌ *Auto-Harvest Failed*\n` + proposal.description + `\nError: ${errorMsg}`;
           if (this.onProposal) await this.onProposal(proposal);
           continue;
@@ -1600,7 +1601,7 @@ export class LPEngineAgent {
       data: { status: 'OPEN', tokenId: realTokenId, txHash } as any,
     });
     await logEvent('INFO', `[LP] Position Opened (Confirmed) - TokenID: ${realTokenId}`, { positionId, txHash });
-    console.log(`[LPEngine] ✅ Position ${positionId} confirmed — tokenId: ${realTokenId}`);
+    dbLogger.info(`[LPEngine] ✅ Position ${positionId} confirmed — tokenId: ${realTokenId}`, { source: 'LPEngine' });
   }
 
   async onCloseConfirmed(positionId: string, feesCollectedUsd: number, txHash?: string): Promise<void> {
@@ -1612,7 +1613,7 @@ export class LPEngineAgent {
         feesCollected: { increment: feesCollectedUsd },
       },
     });
-    console.log(`[LPEngine] ✅ Position ${positionId} closed — fees: $${feesCollectedUsd}`);
+    dbLogger.info(`[LPEngine] ✅ Position ${positionId} closed — fees: $${feesCollectedUsd}`, { source: 'LPEngine' });
   }
 
   // ─── Status Summary ─────────────────────────────────────────────────────────

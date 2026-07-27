@@ -248,7 +248,7 @@ export class TrackerAgent {
             prisma.signal.findMany({ orderBy: { createdAt: 'desc' }, take: 20 }),
             prisma.position.findMany({ where: userFilter, orderBy: { createdAt: 'desc' }, take: 20 }),
             prisma.lPPosition.findMany({ where: userFilter, orderBy: { createdAt: 'desc' }, take: 20 }),
-            prisma.log.findMany({ orderBy: { createdAt: 'desc' }, take: 50 }),
+            prisma.log.findMany({ orderBy: { createdAt: 'desc' }, take: 200 }),
             prisma.signal.count(),
             prisma.position.count({ where: { status: 'OPEN', ...userFilter } }),
             prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } }),
@@ -257,14 +257,22 @@ export class TrackerAgent {
             prisma.lPPosition.aggregate({ where: { tradingMode: 'LIVE', ...userFilter }, _sum: { feesCollected: true } }),
             prisma.lPPosition.aggregate({ where: { tradingMode: 'DRY_RUN', ...userFilter }, _sum: { feesCollected: true } })
           ]);
-          
+          // Filter logs in memory
+          let filteredLogs = logs;
+          if (walletParam) {
+            filteredLogs = logs.filter(l => (l.meta as any)?.wallet === walletParam).slice(0, 50);
+          } else {
+            // Public dashboard: exclude logs tied to a specific user wallet
+            filteredLogs = logs.filter(l => !(l.meta as any)?.wallet).slice(0, 50);
+          }
+
           res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
           res.end(JSON.stringify({ 
             wallets, 
             signals, 
             positions, 
             lpPositions,
-            logs, 
+            logs: filteredLogs, 
             user: userRecord,
             agents: userRecord?.agents || [],
             metrics: {
