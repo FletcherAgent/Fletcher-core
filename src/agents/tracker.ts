@@ -12,6 +12,20 @@ import { getPoolSlot0 } from '../services/lpMath.js';
 
 const TRANSFER_EVENT = parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)');
 
+const getJsonBody = (req: IncomingMessage): Promise<any> => {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', chunk => { body += chunk.toString(); });
+    req.on('end', () => {
+      try { resolve(JSON.parse(body || '{}')); }
+      catch (e) { resolve({}); }
+    });
+  });
+};
+
+const CODENAMES = ["Orion", "Sentinel", "Apollo", "Nova", "Cipher", "Vortex", "Apex", "Echo"];
+const generateAgentName = () => `Agent ${CODENAMES[Math.floor(Math.random() * CODENAMES.length)]} ${Math.floor(Math.random() * 999)}`;
+
 export class TrackerAgent {
   public onCopyBuySignal?: (wallet: string, token: string, amount: bigint, tier: number, bundleId: string | null, timestamp: number, txHash: string) => void;
   public onCopySellSignal?: (wallet: string, token: string, amount: bigint, tier: number, bundleId: string | null, timestamp: number, txHash: string) => void;
@@ -74,6 +88,143 @@ export class TrackerAgent {
       }
 
       const reqUrl = new URL(req.url || '', `http://${req.headers.host || 'localhost'}`);
+      
+      // --- USER AGENT ENDPOINTS ---
+      if (req.method === 'POST' && reqUrl.pathname === '/api/user/link-telegram') {
+        try {
+          const wallet = req.headers['x-wallet-address'] as string;
+          if (!wallet) {
+            res.writeHead(400); return res.end(JSON.stringify({ error: 'Missing wallet header' }));
+          }
+          
+          let user = await prisma.user.findUnique({ where: { walletAddress: wallet } });
+          if (!user) {
+            user = await prisma.user.create({ data: { walletAddress: wallet } });
+          }
+
+          // Generate 6-digit code
+          const code = Math.floor(100000 + Math.random() * 900000).toString();
+          const expiry = new Date(Date.now() + 15 * 60 * 1000); // 15 mins
+
+          await prisma.user.update({
+            where: { id: user.id },
+            data: { linkCode: code, linkCodeExpiry: expiry }
+          });
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ code, expiresAt: expiry }));
+        } catch (e) {
+          console.error(e);
+          res.writeHead(500); return res.end();
+        }
+      }
+
+      if (req.method === 'POST' && reqUrl.pathname === '/api/agents/deploy') {
+        try {
+          const wallet = req.headers['x-wallet-address'] as string;
+          if (!wallet) {
+            res.writeHead(400); return res.end(JSON.stringify({ error: 'Missing wallet header' }));
+          }
+
+          // 1. Tier Gating Check
+          const { getUserTier } = await import('../services/tierGate.js');
+          const tier = await getUserTier(wallet);
+          if (tier === 0) { // Standard tier (No FLETCH)
+            res.writeHead(403); 
+            return res.end(JSON.stringify({ error: 'Insufficient $FLETCH balance. Minimum 2.5M required.' }));
+          }
+
+          const body = await getJsonBody(req);
+          
+          let user = await prisma.user.findUnique({ where: { walletAddress: wallet } });
+          if (!user) {
+            user = await prisma.user.create({ data: { walletAddress: wallet } });
+          }
+
+          // 2. Predict Smart Account (Counterfactual CREATE2 Mock)
+          // In production, we'd use Alchemy/Biconomy SDK here
+          const salt = crypto.createHash('sha256').update(wallet + Date.now().toString()).digest('hex');
+          const predictedAddress = `0x${salt.slice(0, 40)}`; 
+
+          // 3. Create Agent
+          const agentName = body.name || generateAgentName();
+          const agent = await prisma.agent.create({
+            data: {
+              userId: user.id,
+              name: agentName,
+              smartAccountAddress: predictedAddress,
+              strategy: body.strategy || 'FULL_RANGE',
+              mode: body.mode || 'SEMI',
+              capital: parseFloat(body.capital) || 0,
+              status: 'PENDING_FUNDING'
+            }
+          });
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ success: true, agent }));
+        } catch (e) {
+          console.error(e);
+          res.writeHead(500); return res.end();
+        }
+      }
+
+      if (req.method === 'GET' && reqUrl.pathname === '/api/agents/pending-actions') {
+        try {
+          const wallet = reqUrl.searchParams.get('wallet') || req.headers['x-wallet-address'] as string;
+          if (!wallet) {
+            res.writeHead(400); return res.end(JSON.stringify({ error: 'Missing wallet header' }));
+          }
+
+          const user = await prisma.user.findUnique({ 
+            where: { walletAddress: wallet },
+            include: { agents: true } 
+          });
+
+          if (!user) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ actions: [] }));
+          }
+
+          const agentIds = user.agents.map(a => a.id);
+          const actions = await prisma.pendingAction.findMany({
+            where: {
+              agentId: { in: agentIds },
+              status: 'PENDING'
+            },
+            include: { agent: true },
+            orderBy: { createdAt: 'desc' }
+          });
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ actions }));
+        } catch (e) {
+          console.error(e);
+          res.writeHead(500); return res.end();
+        }
+      }
+
+      if (req.method === 'POST' && reqUrl.pathname === '/api/agents/execute-action') {
+        try {
+          const body = await getJsonBody(req);
+          const { actionId, txHash } = body;
+          
+          if (!actionId || !txHash) {
+            res.writeHead(400); return res.end(JSON.stringify({ error: 'Missing actionId or txHash' }));
+          }
+
+          const action = await prisma.pendingAction.update({
+            where: { id: actionId },
+            data: { status: 'EXECUTED', payload: { ...(body.payload || {}), txHash } }
+          });
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ success: true, action }));
+        } catch (e) {
+          console.error(e);
+          res.writeHead(500); return res.end();
+        }
+      }
+      // ----------------------------
       
       if (req.method === 'GET' && reqUrl.pathname === '/api/dashboard') {
         try {

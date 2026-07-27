@@ -35,6 +35,31 @@ export class Orchestrator {
 
     // ─── LP Engine proposal handler ────────────────────────────────────────
     this.lpEngine.onProposal = async (proposal: LPProposal) => {
+      // 1. User Agent Flow (Dual Approval via PendingAction)
+      if (proposal.agentId) {
+        const agent = await prisma.agent.findUnique({ where: { id: proposal.agentId }, include: { user: true } });
+        if (!agent) return;
+        
+        // Ensure no bigints are present (LPProposal doesn't use bigints currently)
+        const safePayload = { ...proposal };
+        
+        const pendingAction = await prisma.pendingAction.create({
+          data: {
+            agentId: agent.id,
+            type: proposal.type,
+            payload: safePayload as any,
+            status: 'PENDING'
+          }
+        });
+
+        if (agent.user.telegramChatId) {
+           const msg = `🔔 <b>Agent Action Pending</b>\n\nAgent: <b>${agent.name}</b>\nAction: <b>${proposal.type}</b>\nToken: <b>${proposal.token0Symbol}/${proposal.token1Symbol}</b>\n\n${proposal.description.replace(/\*/g, '')}\n\n👉 <a href="https://fletcher.app/dashboard/pending-actions">Approve via Dashboard</a>`;
+           this.bot.api.sendMessage(agent.user.telegramChatId, msg, { parse_mode: 'HTML' }).catch(console.error);
+        }
+        return; // Stop here, do not execute flagship logic
+      }
+
+      // 2. Flagship Agent Flow (Global Group Approval)
       const chatId = process.env.TELEGRAM_CHAT_ID;
       if (!chatId) {
         console.warn('[Orchestrator] TELEGRAM_CHAT_ID not set — LP proposal dropped');

@@ -167,14 +167,66 @@ setInterval(() => {
   }
 }, 10000);
 // -----------------------
+const ADMIN_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
+// Helper to check if it's admin
+const isAdmin = (ctx: any) => {
+  return ctx.chat?.id.toString() === ADMIN_CHAT_ID;
+};
+
+// Middleware to block non-admins
+const adminOnly = async (ctx: any, next: () => Promise<void>) => {
+  if (isAdmin(ctx)) {
+    await next();
+  } else {
+    await ctx.reply("⛔ Unauthorized. This command is restricted to Fletcher Admins.");
+  }
+};
+
+// --- PUBLIC COMMANDS ---
 bot.command("start", (ctx) => {
-  ctx.reply("🟢 Fletcher Agent Core is online.\nRobinhood Chain Active Range Manager.\n\nType /help to see the list of commands.");
+  ctx.reply("🟢 Fletcher Agent is online.\n\nType /link <code> to bind your web dashboard account.");
 });
+
+bot.command("link", async (ctx) => {
+  const code = ctx.match?.trim();
+  if (!code) {
+    return ctx.reply("❌ Invalid format! Usage: /link <code>");
+  }
+
+  // Attempt to find user with this link code
+  const user = await prisma.user.findFirst({
+    where: { 
+      linkCode: code,
+      linkCodeExpiry: { gt: new Date() } // Must not be expired
+    }
+  });
+
+  if (!user) {
+    return ctx.reply("❌ Link code is invalid or has expired. Please generate a new one from the dashboard.");
+  }
+
+  // Update user with telegram details
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      telegramChatId: ctx.chat.id.toString(),
+      telegramUsername: ctx.from?.username || "",
+      linkCode: null, // Consume code
+      linkCodeExpiry: null
+    }
+  });
+
+  ctx.reply("✅ Successfully linked your Telegram to your Fletcher Dashboard! You will now receive agent notifications here.");
+});
+
+// --- ADMIN COMMANDS ---
+// Apply adminOnly middleware to everything below this line
+bot.use(adminOnly);
 
 bot.command("help", (ctx) => {
   const helpText = `
-🤖 <b>Fletcher Bot Commands</b> 🤖
+🤖 <b>Fletcher Admin Bot Commands</b> 🤖
 
 🚀 <b>Core System</b>
 /start - Start the bot and show initial status.

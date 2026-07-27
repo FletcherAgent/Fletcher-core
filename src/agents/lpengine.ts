@@ -88,6 +88,7 @@ const MAX_UINT128 = 340282366920938463463374607431768211455n;
 export interface LPProposal {
   type: 'OPEN' | 'CLOSE' | 'COMPOUND' | 'REBALANCE' | 'HARVEST';
   positionId?: string;   // LPPosition.id (if existing)
+  agentId?: string;      // User Agent ID (if applicable)
   pool: string;
   token0: string;
   token1: string;
@@ -1333,6 +1334,17 @@ export class LPEngineAgent {
 
     if (this.onProposal) {
       await this.onProposal(proposal);
+      
+      // Multi-Agent Expansion: Also emit proposal for all active User Agents
+      try {
+        const activeAgents = await prisma.agent.findMany({ where: { status: 'ACTIVE' } });
+        for (const agent of activeAgents) {
+          const userProposal = { ...proposal, agentId: agent.id };
+          await this.onProposal(userProposal);
+        }
+      } catch (err) {
+        console.error('[LPEngine] Failed to emit proposals for User Agents:', err);
+      }
     } else {
       console.warn('[LPEngine] onProposal callback not set — proposal dropped');
     }

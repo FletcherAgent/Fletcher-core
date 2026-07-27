@@ -7,12 +7,49 @@ datasource db {
 }
 
 model User {
-  id            String       @id @default(uuid())
-  walletAddress String       @unique
-  createdAt     DateTime     @default(now())
+  id               String       @id @default(uuid())
+  walletAddress    String       @unique
+  telegramChatId   String?      @unique
+  telegramUsername String?
+  linkCode         String?
+  linkCodeExpiry   DateTime?
+  createdAt        DateTime     @default(now())
 
-  lpPositions   LPPosition[]
-  positions     Position[]
+  agents           Agent[]
+  lpPositions      LPPosition[]
+  positions        Position[]
+}
+
+model Agent {
+  id                  String   @id @default(uuid())
+  userId              String
+  user                User     @relation(fields: [userId], references: [id])
+  
+  name                String
+  smartAccountAddress String?  @unique
+  
+  status              String   @default("PENDING_FUNDING") // PENDING_FUNDING, ACTIVE, PAUSED_TIER, STOPPED
+  strategy            String   
+  mode                String   @default("SEMI") // MANUAL, SEMI
+  capital             Float    @default(0)
+  
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  lpPositions         LPPosition[] 
+  positions           Position[]
+  pendingActions      PendingAction[]
+}
+
+model PendingAction {
+  id          String   @id @default(uuid())
+  agentId     String
+  agent       Agent    @relation(fields: [agentId], references: [id])
+  
+  type        String   // "OPEN_POSITION", "CLOSE_POSITION"
+  payload     Json     
+  status      String   @default("PENDING") // PENDING, APPROVED, REJECTED, EXECUTED
+  createdAt   DateTime @default(now())
 }
 
 model Position {
@@ -38,6 +75,8 @@ model Position {
 
   userId       String?
   user         User?    @relation(fields: [userId], references: [id])
+  agentId      String?
+  agent        Agent?   @relation(fields: [agentId], references: [id])
 }
 
 model Signal {
@@ -149,6 +188,8 @@ model LPPosition {
 
   userId          String?
   user            User?    @relation(fields: [userId], references: [id])
+  agentId         String?
+  agent           Agent?   @relation(fields: [agentId], references: [id])
 }
 
 model SessionKey {
