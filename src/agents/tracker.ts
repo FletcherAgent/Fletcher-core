@@ -8,6 +8,7 @@ import { WalletProfiler } from '../services/walletProfiler.js';
 import { publicClient } from '../services/viem.js';
 import { mcpServer } from '../mcp/index.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { getPoolSlot0 } from '../services/lpMath.js';
 
 const TRANSFER_EVENT = parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)');
 
@@ -185,6 +186,12 @@ export class TrackerAgent {
           const edgeBufferConfig = await prisma.systemConfig.findUnique({ where: { key: 'lp.rebalance.edgeBufferPct' } });
           const edgeBufferPct = edgeBufferConfig ? parseInt(edgeBufferConfig.value, 10) : 15;
           
+          let currentTick: number | null = null;
+          try {
+            const slot0 = await getPoolSlot0(position.pool);
+            currentTick = slot0.currentTick;
+          } catch(e) { console.error('Failed to get currentTick in tracker', e); }
+          
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({
             id: position.id,
@@ -194,7 +201,8 @@ export class TrackerAgent {
             feesCollected: position.feesCollected,
             ilRunning: position.ilRunning,
             status: position.status,
-            edgeBufferPct
+            edgeBufferPct,
+            currentTick
           }));
         } catch (e) {
           console.error(`[Tracker] API Error:`, e);
