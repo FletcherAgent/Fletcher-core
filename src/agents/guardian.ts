@@ -198,7 +198,9 @@ export class GuardianAgent {
             // Since feesUsd represents TOTAL fees, we don't update lastFeeGrowth here,
             // we just keep measuring from the entry values!
             
-            console.log(`[Guardian] 🔍 SIM fee debug | token=${tokenAddress.slice(0,10)} fee0=${fee0Eth.toFixed(6)} fee1=${fee1Eth.toFixed(6)} → fees=$${feesUsd.toFixed(4)}`);
+            const isSim = pos.tokenId.startsWith('SIM-') || pos.tradingMode === 'DRY_RUN';
+            const logPrefix = isSim ? 'SIM' : 'V4 LIVE';
+            console.log(`[Guardian] 🔍 ${logPrefix} fee debug | token=${tokenAddress.slice(0,10)} fee0=${fee0Eth.toFixed(6)} fee1=${fee1Eth.toFixed(6)} → fees=$${feesUsd.toFixed(4)}`);
           } else {
              // Fallback to old math if missing DB records (legacy positions)
              const tokenAddress = pos.token0.toLowerCase() === globalWethAddr ? pos.token1 : pos.token0;

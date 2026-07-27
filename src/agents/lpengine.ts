@@ -86,22 +86,22 @@ const MAX_UINT128 = 340282366920938463463374607431768211455n;
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface LPProposal {
-  type:        'OPEN' | 'CLOSE' | 'COMPOUND' | 'REBALANCE' | 'HARVEST';
+  type: 'OPEN' | 'CLOSE' | 'COMPOUND' | 'REBALANCE' | 'HARVEST';
   positionId?: string;   // LPPosition.id (if existing)
-  pool:        string;
-  token0:      string;
-  token1:      string;
+  pool: string;
+  token0: string;
+  token1: string;
   token0Symbol: string;
   token1Symbol: string;
-  feeTier:     number;
-  tickLower:   number;
-  tickUpper:   number;
+  feeTier: number;
+  tickLower: number;
+  tickUpper: number;
   entryValueUsd: number;
-  calldata:    Hex;      // encoded tx data for NPM
-  to:          Address;  // NPM address
-  dayMode:     boolean;
-  nightMode:   boolean;
-  mode:        'MANUAL' | 'SEMI' | 'FULL';
+  calldata: Hex;      // encoded tx data for NPM
+  to: Address;  // NPM address
+  dayMode: boolean;
+  nightMode: boolean;
+  mode: 'MANUAL' | 'SEMI' | 'FULL';
   description: string;   // human-readable for Telegram
 }
 
@@ -109,10 +109,10 @@ export interface LPProposal {
 
 interface LPConfig {
   maxPositions: number;
-  positionCap:  number;
+  positionCap: number;
   startSizeLive: number;
   startSizeDryRun: number;
-  nightRange:   number;
+  nightRange: number;
   dayCloseTime: string;
   ilHourThreshold: number;
   minGrokScore: number;
@@ -127,10 +127,10 @@ interface LPConfig {
  * Smaller MCap = wider range needed (more volatile).
  */
 function calcDynamicNightRange(marketCapUsd: number): number {
-  if (marketCapUsd < 50_000)       return 20;  // < $50K  → ±40% range (ultra meme)
-  if (marketCapUsd < 200_000)      return 15;  // < $200K → ±30% range
-  if (marketCapUsd < 1_000_000)    return 10;  // < $1M   → ±20% range
-  if (marketCapUsd < 5_000_000)    return 7;   // < $5M   → ±14% range
+  if (marketCapUsd < 50_000) return 20;  // < $50K  → ±40% range (ultra meme)
+  if (marketCapUsd < 200_000) return 15;  // < $200K → ±30% range
+  if (marketCapUsd < 1_000_000) return 10;  // < $1M   → ±20% range
+  if (marketCapUsd < 5_000_000) return 7;   // < $5M   → ±14% range
   return 5;                                    // > $5M   → ±10% range (more stable)
 }
 
@@ -144,16 +144,16 @@ async function loadLPConfig(): Promise<LPConfig> {
   const map = Object.fromEntries(configs.map(c => [c.key, c.value]));
 
   return {
-    maxPositions:           parseInt(map['lp.maxPositions']    ?? '3'),
-    positionCap:            parseFloat(map['lp.positionCap']   ?? '2000'),
-    startSizeLive:          parseFloat(map['lp.startSize.live'] ?? '10'),
-    startSizeDryRun:        parseFloat(map['lp.startSize.dryrun'] ?? '500'),
-    nightRange:             parseFloat(map['lp.nightRange']    ?? '15'),
-    dayCloseTime:           map['lp.dayCloseTime'] ?? '23:00',
-    ilHourThreshold:        parseInt(map['lp.ilHourThreshold'] ?? '4'),
-    minGrokScore:           parseInt(map['lp.minGrokScore'] ?? '60'),
+    maxPositions: parseInt(map['lp.maxPositions'] ?? '3'),
+    positionCap: parseFloat(map['lp.positionCap'] ?? '2000'),
+    startSizeLive: parseFloat(map['lp.startSize.live'] ?? '10'),
+    startSizeDryRun: parseFloat(map['lp.startSize.dryrun'] ?? '500'),
+    nightRange: parseFloat(map['lp.nightRange'] ?? '15'),
+    dayCloseTime: map['lp.dayCloseTime'] ?? '23:00',
+    ilHourThreshold: parseInt(map['lp.ilHourThreshold'] ?? '4'),
+    minGrokScore: parseInt(map['lp.minGrokScore'] ?? '60'),
     outOfRangeGraceMinutes: parseInt(map['lp.outOfRangeGraceMinutes'] ?? '15'),
-    dynamicRange:           (map['lp.dynamicRange'] ?? 'true') === 'true',
+    dynamicRange: (map['lp.dynamicRange'] ?? 'true') === 'true',
   };
 }
 
@@ -165,7 +165,7 @@ export class LPEngineAgent {
   public onProposal?: (proposal: LPProposal) => Promise<void>;
   public onNotification?: (message: string) => Promise<void>;
 
-  constructor() {}
+  constructor() { }
 
   public async getAddresses() {
     const dexConfig = await getDexConfig('V3');
@@ -179,13 +179,13 @@ export class LPEngineAgent {
     const wethAddress = (quoteMap['tokens.quote.weth'] || process.env.WETH_ADDRESS || '') as Address;
     const usdgAddress = (quoteMap['tokens.quote.usdg'] || '') as Address;
 
-    if (!npmAddress)     console.warn('[LPEngine] ⚠️ POSITION_MANAGER not set');
+    if (!npmAddress) console.warn('[LPEngine] ⚠️ POSITION_MANAGER not set');
     if (!factoryAddress) console.warn('[LPEngine] ⚠️ UNISWAP_V3_FACTORY_ADDRESS not set');
-    if (!wethAddress)    console.warn('[LPEngine] ⚠️ WETH_ADDRESS not set (DB nor env)');
+    if (!wethAddress) console.warn('[LPEngine] ⚠️ WETH_ADDRESS not set (DB nor env)');
 
-    return { 
-      npmAddress: npmAddress.toLowerCase() as `0x${string}`, 
-      factoryAddress: factoryAddress.toLowerCase() as `0x${string}`, 
+    return {
+      npmAddress: npmAddress.toLowerCase() as `0x${string}`,
+      factoryAddress: factoryAddress.toLowerCase() as `0x${string}`,
       wethAddress: wethAddress.toLowerCase() as `0x${string}`,
       usdgAddress: usdgAddress.toLowerCase() as `0x${string}`
     };
@@ -231,13 +231,13 @@ export class LPEngineAgent {
 
     const config = await loadLPConfig();
     const modeCfg = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
-    const isDryRun  = (modeCfg?.value || 'LIVE') === 'DRY_RUN';
+    const isDryRun = (modeCfg?.value || 'LIVE') === 'DRY_RUN';
     const currentMode = isDryRun ? 'DRY_RUN' : 'LIVE';
 
     const openCount = await prisma.lPPosition.count({
-      where: { 
+      where: {
         status: { in: ['OPEN', 'PENDING'] },
-        tradingMode: currentMode 
+        tradingMode: currentMode
       },
     });
     if (openCount >= config.maxPositions) {
@@ -255,14 +255,14 @@ export class LPEngineAgent {
   ): Promise<{ poolAddress: string; feeTier: number; factoryAddress: string; managerAddress: string; version: string; quoteAddress: string } | null> {
     const v3ConfigsRaw = await getAllDexConfigs('V3');
     const v4ConfigsRaw = await getAllDexConfigs('V4');
-    
+
     // Map V4's poolManager to factoryAddress so getPool works
     const v4ConfigsMapped = v4ConfigsRaw.map(c => ({
       ...c,
       factoryAddress: c.poolManager || c.factoryAddress,
       version: 'V4'
     }));
-    
+
     const v3Configs = v3ConfigsRaw.map(c => ({ ...c, version: 'V3' }));
     const allConfigs = [...v3Configs, ...v4ConfigsMapped];
 
@@ -281,9 +281,9 @@ export class LPEngineAgent {
       wethAddress,
     ].filter(Boolean) as string[];
     const uniqueQuotes = Array.from(new Set(quotesToTry.map(a => a.toLowerCase())));
-    
+
     const poolAbi = parseAbi(['function liquidity() view returns (uint128)']);
-    
+
     let bestPool: { poolAddress: string; feeTier: number; factoryAddress: string; managerAddress: string; liquidity: bigint; version: string; quoteAddress: string } | null = null;
 
     for (const config of allConfigs) {
@@ -307,10 +307,10 @@ export class LPEngineAgent {
                   abi: poolAbi,
                   functionName: 'liquidity'
                 }) as bigint;
-              } catch (err) {}
-              
+              } catch (err) { }
+
               console.log(`[LPEngine] 🔎 Found pool candidate: ${poolAddr} on ${config.factoryAddress} (fee: ${fee}, liq: ${liq})`);
-              
+
               if (!bestPool || liq > bestPool.liquidity) {
                 bestPool = {
                   poolAddress: poolAddr,
@@ -329,13 +329,13 @@ export class LPEngineAgent {
         }
       }
     }
-    
+
     if (bestPool) {
       console.log(`[LPEngine] ✅ Best Pool Selected: ${bestPool.poolAddress} (fee: ${bestPool.feeTier}, liq: ${bestPool.liquidity})`);
-      return { 
-        poolAddress: bestPool.poolAddress, 
-        feeTier: bestPool.feeTier, 
-        factoryAddress: bestPool.factoryAddress, 
+      return {
+        poolAddress: bestPool.poolAddress,
+        feeTier: bestPool.feeTier,
+        factoryAddress: bestPool.factoryAddress,
         managerAddress: bestPool.managerAddress,
         version: bestPool.version,
         quoteAddress: bestPool.quoteAddress
@@ -380,7 +380,7 @@ export class LPEngineAgent {
       parseAbiParameters('address currency0, address currency1, uint24 fee, int24 tickSpacing, address hooks, int24 tickLower, int24 tickUpper, uint256 liquidity, uint128 amount0Max, uint128 amount1Max, address owner, bytes hookData'),
       [
         params.token0, params.token1, params.fee, params.tickSpacing, params.hooks,
-        params.tickLower, params.tickUpper, params.liquidity, 
+        params.tickLower, params.tickUpper, params.liquidity,
         MAX_UINT128, MAX_UINT128, params.recipient, '0x'
       ]
     );
@@ -516,14 +516,14 @@ export class LPEngineAgent {
     }
 
     let selectedCandidate: PoolCandidate | null = null;
-    
+
     const grokModeConfig = await prisma.systemConfig.findUnique({ where: { key: 'grok.mode' } });
     const grokMode = grokModeConfig?.value || 'VETO';
 
     // Evaluate candidates with Grok
     for (const candidate of candidates) {
       console.log(`[LPEngine] 🧠 Asking Grok to analyze sentiment for ${candidate.token.symbol}...`);
-      
+
       const sentiment = await IntelligenceLayer.analyzeSentiment(candidate.token.symbol, candidate.token.address);
       if (sentiment.label === 'SKIPPED') {
         console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: SKIPPED - ${sentiment.reasoning}`);
@@ -546,7 +546,7 @@ export class LPEngineAgent {
         candidate.grokScore = sentiment.score ?? undefined;
         candidate.grokLabel = sentiment.label;
       }
-      
+
       selectedCandidate = candidate;
       break; // Found the top candidate that passed Grok
     }
@@ -601,8 +601,8 @@ export class LPEngineAgent {
     console.log('[LPEngine] 🌙 NIGHT mode started — screening up to 3 pairs...');
     if (this.onNotification) await this.onNotification('🌙 *LP NIGHT mode started* — screening up to 3 pairs...');
 
-    const config    = await loadLPConfig();
-    const canOpen   = await this.canOpenNewPosition();
+    const config = await loadLPConfig();
+    const canOpen = await this.canOpenNewPosition();
     if (!canOpen.ok) {
       console.warn(`[LPEngine] ⛔ NIGHT mode blocked: ${canOpen.reason}`);
       await logEvent('WARN', `[LP] NIGHT mode blocked: ${canOpen.reason}`);
@@ -615,9 +615,9 @@ export class LPEngineAgent {
     const currentMode = (tModeConfig?.value ?? 'LIVE') === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE';
 
     const openCount = await prisma.lPPosition.count({
-      where: { 
+      where: {
         status: { in: ['OPEN', 'PENDING'] },
-        tradingMode: currentMode 
+        tradingMode: currentMode
       },
     });
     const slotsLeft = config.maxPositions - openCount;
@@ -625,16 +625,16 @@ export class LPEngineAgent {
 
     const candidates = await screenPairs();
     const toOpen: PoolCandidate[] = [];
-    
+
     const grokModeConfig = await prisma.systemConfig.findUnique({ where: { key: 'grok.mode' } });
     const grokMode = grokModeConfig?.value || 'VETO';
 
     // Evaluate candidates with Grok until we fill the slots
     for (const candidate of candidates) {
       if (toOpen.length >= Math.min(slotsLeft, 3)) break;
-      
+
       console.log(`[LPEngine] 🧠 Asking Grok to analyze sentiment for ${candidate.token.symbol}...`);
-      
+
       const sentiment = await IntelligenceLayer.analyzeSentiment(candidate.token.symbol, candidate.token.address);
       if (sentiment.label === 'SKIPPED') {
         console.log(`[LPEngine] Grok Result for ${candidate.token.symbol}: SKIPPED - ${sentiment.reasoning}`);
@@ -657,7 +657,7 @@ export class LPEngineAgent {
         candidate.grokScore = sentiment.score ?? undefined;
         candidate.grokLabel = sentiment.label;
       }
-      
+
       toOpen.push(candidate);
     }
 
@@ -699,7 +699,7 @@ export class LPEngineAgent {
 
   /** Called by Userbot when a signal passes Grok sentiment verification */
   async processAlphaSignal(token: GMGNToken, sentimentScore: number): Promise<void> {
-    const config  = await loadLPConfig();
+    const config = await loadLPConfig();
     const canOpen = await this.canOpenNewPosition();
     if (!canOpen.ok) {
       console.warn(`[LPEngine] ⛔ Alpha Signal blocked: ${canOpen.reason}`);
@@ -748,10 +748,10 @@ export class LPEngineAgent {
     candidate: { token: GMGNToken; score: number; grokScore?: number; grokLabel?: string; sentimentStatus?: string },
     options: { dayMode: boolean; nightMode: boolean; nightRange?: number; strategyMode?: boolean; lowerPct?: number; upperPct?: number; source?: string }
   ): Promise<void> {
-    const config    = await loadLPConfig();
-    const token     = candidate.token;
-    const modeCfg   = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
-    const isDryRun  = (modeCfg?.value || 'LIVE') === 'DRY_RUN';
+    const config = await loadLPConfig();
+    const token = candidate.token;
+    const modeCfg = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
+    const isDryRun = (modeCfg?.value || 'LIVE') === 'DRY_RUN';
     const { wethAddress } = await this.getAddresses();
 
     console.log(`[LPEngine] 📋 Proposing position: ${token.symbol} | dayMode=${options.dayMode} | dryRun=${isDryRun}`);
@@ -801,9 +801,9 @@ export class LPEngineAgent {
     const t0 = isToken0 ? token.address : quoteAddress;
     const t1 = isToken0 ? quoteAddress : token.address;
     const t0Symbol = isToken0 ? tokenMeta.symbol : quoteMeta.symbol;
-    const t1Symbol = isToken0 ? quoteMeta.symbol  : tokenMeta.symbol;
+    const t1Symbol = isToken0 ? quoteMeta.symbol : tokenMeta.symbol;
     const t0Dec = isToken0 ? tokenMeta.decimals : quoteMeta.decimals;
-    const t1Dec = isToken0 ? quoteMeta.decimals  : tokenMeta.decimals;
+    const t1Dec = isToken0 ? quoteMeta.decimals : tokenMeta.decimals;
 
     // Tick range
     let tickLower: number;
@@ -818,7 +818,7 @@ export class LPEngineAgent {
       // 91% - 105% of MEME price
       const lowerPct = options.lowerPct ?? 0.91;
       const upperPct = options.upperPct ?? 1.05;
-      
+
       const tickSpacing = feeToTickSpacing(feeTier);
       const lowerOffset = Math.round(Math.log(lowerPct) / Math.log(1.0001)); // e.g. -943
       const upperOffset = Math.round(Math.log(upperPct) / Math.log(1.0001)); // e.g. +487
@@ -834,7 +834,7 @@ export class LPEngineAgent {
         rawLower = entryTick - upperOffset; // upper price (1.05x) means lower tick
         rawUpper = entryTick - lowerOffset; // lower price (0.91x) means higher tick
       }
-      
+
       tickLower = Math.max(MIN_TICK, Math.floor(rawLower / tickSpacing) * tickSpacing);
       tickUpper = Math.min(MAX_TICK, Math.ceil(rawUpper / tickSpacing) * tickSpacing);
     } else {
@@ -853,30 +853,30 @@ export class LPEngineAgent {
     const regime = regimeCfg?.value || 'normal';
     const regimeMultCfg = await prisma.systemConfig.findUnique({ where: { key: 'lp.portfolio.crowdedSizeMult' } });
     const regimeMult = parseFloat(regimeMultCfg?.value || '0.6');
-    
+
     const windowMultCfg = await prisma.systemConfig.findUnique({ where: { key: 'lp.entryWindows.outsideSizeMult' } });
     const windowMult = parseFloat(windowMultCfg?.value || '0.5');
-    
+
     const now = new Date();
-    const jakartaTime = new Date(now.toLocaleString("en-US", {timeZone: "Asia/Jakarta"}));
+    const jakartaTime = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Jakarta" }));
     const currentMins = jakartaTime.getHours() * 60 + jakartaTime.getMinutes();
-    
+
     const windows = [
       { start: 9 * 60, end: 10 * 60 + 30 },
       { start: 18 * 60, end: 19 * 60 + 30 },
       { start: 22 * 60, end: 23 * 60 + 30 }
     ];
     const isInsideWindow = windows.some(w => currentMins >= w.start && currentMins <= w.end);
-    
+
     let baseStartSize = isDryRun ? config.startSizeDryRun : config.startSizeLive;
     let finalStartSize = baseStartSize;
     let sizingLog = [];
-    
+
     if (regime === 'crowded') {
       finalStartSize *= regimeMult;
       sizingLog.push(`Regime=Crowded (${regimeMult}x)`);
     }
-    
+
     // Shadow logging window state
     if (!isInsideWindow) {
       sizingLog.push(`Out-of-Window (Would size ${windowMult}x)`);
@@ -884,7 +884,7 @@ export class LPEngineAgent {
     } else {
       sizingLog.push(`In-Window`);
     }
-    
+
     if (sizingLog.length > 0) {
       console.log(`[LPEngine] ⚖️ Sizing adjustments for $${token.symbol}: ${sizingLog.join(', ')}. Base: $${baseStartSize} -> Final: $${finalStartSize}`);
     }
@@ -895,7 +895,7 @@ export class LPEngineAgent {
     // Increase precision to 18 decimals to avoid 0 rounding for low-price pools
     const precisionMultiplier = 1000000000000000000n; // 1e18
     const poolPriceRaw = Number((BigInt(sqrtPriceX96) * precisionMultiplier) / (2n ** 96n)) / Number(precisionMultiplier);
-    const poolPrice = poolPriceRaw ** 2; 
+    const poolPrice = poolPriceRaw ** 2;
     const decimalAdjustedPoolPrice = poolPrice * (10 ** (t0Dec - t1Dec));
 
     let token0Price: number, token1Price: number;
@@ -916,16 +916,16 @@ export class LPEngineAgent {
         const { createSmartAccount } = await import('../services/sessionKey.js');
         const dummyClient = await createSmartAccount(process.env.LP_PRIVATE_KEY as `0x${string}`, 3);
         recipient = dummyClient.account.address as Address;
-      } catch(e) {
+      } catch (e) {
         console.warn(`[LPEngine] Failed to evaluate smart account address:`, e);
       }
     }
 
     const tier = await getUserTier(recipient);
     const limits = getTierLimits(tier);
-    
+
     const isQuote0 = t0.toLowerCase() === quoteAddress.toLowerCase();
-    
+
     let quoteBalance = 0n;
     if (!isDryRun) {
       try {
@@ -955,12 +955,12 @@ export class LPEngineAgent {
       const quoteBalanceUsd = (Number(quoteBalance) / (10 ** quoteDecimals)) * quotePriceUsd;
 
       let proposedUsdAllocation = quoteBalanceUsd * Number(allocationPercent) / 100;
-      
+
       // Minimum profitability threshold ($10 USD)
       if (proposedUsdAllocation < 10) {
         proposedUsdAllocation = 10;
       }
-      
+
       // Check for insufficient balance
       if (quoteBalanceUsd < 10) {
         const msg = `⚠️ Insufficient [WETH/USDG] balance to open position. Minimum required balance is equivalent to $10 USD.`;
@@ -972,20 +972,20 @@ export class LPEngineAgent {
 
       // Apply regime multiplier to the allocation
       if (regime === 'crowded') {
-         proposedUsdAllocation *= regimeMult;
+        proposedUsdAllocation *= regimeMult;
       }
-      
+
       // Calculate half amounts for Token0 and Token1
       const halfUsdAlloc = proposedUsdAllocation / 2;
       amount0Desired = this.usdToTokenAmount(halfUsdAlloc, token0Price, t0Dec);
       amount1Desired = this.usdToTokenAmount(halfUsdAlloc, token1Price, t1Dec);
-      
+
       console.log(`[LPEngine] 💰 Dynamic Sizing: Using ${allocationPercent}% of Quote Balance ($${proposedUsdAllocation.toFixed(2)} USD)`);
     } else {
       amount0Desired = this.usdToTokenAmount(halfUsd, token0Price, t0Dec);
       amount1Desired = this.usdToTokenAmount(halfUsd, token1Price, t1Dec);
     }
-    
+
     // Apply a 10% reduction buffer to the desired amounts for minting.
     // This accommodates the Universal Router swap fee (up to 1%) and price impact.
     // NPM will pull the proportional amounts based on the current pool price,
@@ -1021,7 +1021,7 @@ export class LPEngineAgent {
       return;
     }
 
-    const deadline  = BigInt(Math.floor(Date.now() / 1000) + 60 * 10); // 10 min
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + 60 * 10); // 10 min
 
     // Apply a 50% buffer reduction to the swapped token amount to account for swap fees and high price impact
     // This prevents "ERC20: transfer amount exceeds balance" when NPM tries to pull the minted tokens
@@ -1073,7 +1073,7 @@ export class LPEngineAgent {
 
     let lastFeeGrowth0 = null;
     let lastFeeGrowth1 = null;
-    
+
     // Always fetch fee growth for ALPS V4 PositionManager so we can simulate/track fees properly
     if (isDryRun || npmAddress.toLowerCase() === '0x58daec3116aae6d93017baaea7749052e8a04fa7') {
       try {
@@ -1088,23 +1088,23 @@ export class LPEngineAgent {
     // Save PENDING record to DB (or OPEN if DRY RUN simulation)
     const dbRecord = await prisma.lPPosition.create({
       data: {
-        tokenId:     isDryRun ? `SIM-${Date.now()}` : `PENDING-${Date.now()}`,
-        pool:        poolAddress,
-        token0:      t0,
-        token1:      t1,
+        tokenId: isDryRun ? `SIM-${Date.now()}` : `PENDING-${Date.now()}`,
+        pool: poolAddress,
+        token0: t0,
+        token1: t1,
         managerAddress: npmAddress,
         token0Symbol: t0Symbol,
         token1Symbol: t1Symbol,
         feeTier,
         tickLower,
         tickUpper,
-        entryValue:  isDryRun ? config.startSizeDryRun : config.startSizeLive,
+        entryValue: isDryRun ? config.startSizeDryRun : config.startSizeLive,
         entryTick,
-        mode:        currentMode,
-        status:      isDryRun ? 'OPEN' : 'PENDING',
-        dayMode:     options.dayMode,
-        nightMode:   options.nightMode,
-        source:      options.source ?? 'SYSTEM',
+        mode: currentMode,
+        status: isDryRun ? 'OPEN' : 'PENDING',
+        dayMode: options.dayMode,
+        nightMode: options.nightMode,
+        source: options.source ?? 'SYSTEM',
         tradingMode: isDryRun ? 'DRY_RUN' : 'LIVE',
         sentimentStatus: candidate.sentimentStatus || candidate.grokLabel,
         simulatedLiquidity: simulatedLiquidity ? simulatedLiquidity.toString() : null,
@@ -1148,12 +1148,12 @@ export class LPEngineAgent {
         // selfFunded=true: creates client without Alchemy paymaster middleware.
         // LP UserOps are self-funded from SA's ETH to avoid paymaster policy restrictions.
         const client = await getSessionKeyClient('FULL', tier, true);
-        
+
         // Ensure smart account has enough ETH for gas
         await ensureSmartAccountFunded(client.account.address);
         const dexConfig = await getDexConfig(version as 'V3' | 'V4');
         const routerAddress = (dexConfig.routerAddress || process.env.UNIVERSAL_ROUTER || process.env.ROUTER_ADDRESS || '') as Address;
-        
+
         // Slippage / Swap setup
         const isQuote0 = t0.toLowerCase() === quoteAddress.toLowerCase();
         const quoteAddressHex = quoteAddress as Address;
@@ -1164,13 +1164,13 @@ export class LPEngineAgent {
         // where the price shift requires more Meme tokens than expected.
         const quoteAmountToSwap = (isQuote0 ? amount0Desired : amount1Desired) * 200n / 100n;
         console.log(`[LPEngine Debug] quoteAmountToSwap=${quoteAmountToSwap}, amount0=${amount0Desired}, amount1=${amount1Desired}, isQuote0=${isQuote0}`);
-        
+
         const isUniversalRouter = version === 'V3';
         const isAlpsRouter = version === 'V4';
         // ALWAYS use ALPS Router for swapping! It has deep liquidity across all tokens and doesn't throw SliceOutOfBounds.
         const actualRouterAddress = '0xcaf681a66d020601342297493863e78c959e5cb2' as Address;
         let swapCalldata: Hex;
-        
+
         let preSwapCalls: UserOpCall[] = [];
         const PERMIT2_ADDRESS = '0x000000000022D473030F116dDEE9F6B43aC78BA3' as Address;
         const permit2Abi = parseAbi([
@@ -1182,7 +1182,7 @@ export class LPEngineAgent {
           const commands = '0x00' as `0x${string}`; // V3_SWAP_EXACT_IN
           const feeHex = feeTier.toString(16).padStart(6, '0');
           const path = (quoteAddress + feeHex + memeTokenAddress.replace('0x', '')) as `0x${string}`;
-          
+
           const exactInputSingleParamsAbi = [
             { type: 'address' },
             { type: 'uint256' },
@@ -1213,7 +1213,7 @@ export class LPEngineAgent {
             functionName: 'execute',
             args: [commands, [swapInput], deadline]
           });
-          
+
           preSwapCalls = [
             { target: quoteAddressHex, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [PERMIT2_ADDRESS, MAX_UINT128] }) },
             { target: PERMIT2_ADDRESS, data: encodeFunctionData({ abi: permit2Abi, functionName: 'approve', args: [quoteAddressHex, actualRouterAddress, BigInt(MAX_UINT128), 4000000000] }) }
@@ -1224,7 +1224,7 @@ export class LPEngineAgent {
             'struct ExactInputSingleParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }',
             'function exactInputSingle(ExactInputSingleParams params) external payable returns (uint256 amountOut)'
           ]);
-          
+
           const expectedMemeOut = isQuote0 ? amount1Desired : amount0Desired;
           const amountOutMin = expectedMemeOut * 90n / 100n; // 10% max slippage
 
@@ -1241,7 +1241,7 @@ export class LPEngineAgent {
               sqrtPriceLimitX96: 0n
             }]
           });
-          
+
           // ALPS Router uses direct ERC20 approval, not Permit2
           preSwapCalls = [
             { target: quoteAddressHex, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [actualRouterAddress, MAX_UINT128] }) }
@@ -1256,15 +1256,15 @@ export class LPEngineAgent {
           ...preSwapCalls,
           // Swap Quote Token → Meme Token
           { target: actualRouterAddress, data: swapCalldata },
-          
+
           // Approve Permit2 via ERC20 to pull Quote and Meme tokens
           { target: quoteAddressHex, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [PERMIT2_ADDRESS, MAX_UINT128] }) },
           { target: memeTokenAddress, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [PERMIT2_ADDRESS, MAX_UINT128] }) },
-          
+
           // Approve NPM via Permit2 to pull Quote and Meme tokens
           { target: PERMIT2_ADDRESS, data: encodeFunctionData({ abi: permit2Abi, functionName: 'approve', args: [quoteAddressHex, npmAddress, BigInt(MAX_UINT128), 4000000000] }) },
           { target: PERMIT2_ADDRESS, data: encodeFunctionData({ abi: permit2Abi, functionName: 'approve', args: [memeTokenAddress, npmAddress, BigInt(MAX_UINT128), 4000000000] }) },
-          
+
           // Mint LP Position
           { target: npmAddress, data: calldata }
         ];
@@ -1276,10 +1276,10 @@ export class LPEngineAgent {
           where: { id: dbRecord.id },
           data: { txHash }
         });
-        
+
         console.log(`[LPEngine] 📜 Waiting for receipt to extract TokenID...`);
         const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash as Hex });
-        
+
         let realTokenId = dbRecord.tokenId; // Fallback to PENDING-...
         try {
           for (const log of receipt.logs) {
@@ -1301,7 +1301,7 @@ export class LPEngineAgent {
         } catch (err) {
           console.warn(`[LPEngine] Could not decode logs for TokenID extraction`);
         }
-        
+
         await prisma.lPPosition.update({
           where: { id: dbRecord.id },
           data: { status: 'OPEN', tokenId: realTokenId, txHash }
@@ -1319,7 +1319,7 @@ export class LPEngineAgent {
         }
         await logEvent('ERROR', `[LP] Auto-Open Failed`, { error: errorMsg });
         console.error(`[LPEngine] Failed to auto-open position: ${errorMsg}`);
-        
+
         await prisma.lPPosition.update({
           where: { id: dbRecord.id },
           data: { status: 'FAILED' }
@@ -1436,7 +1436,7 @@ export class LPEngineAgent {
         ];
 
         const txHash = await buildAndSendLPUserOperation(client, calls);
-        
+
         await prisma.lPPosition.update({
           where: { id: positionId },
           data: { status: 'CLOSED', exitTxHash: txHash } as any,
@@ -1457,7 +1457,7 @@ export class LPEngineAgent {
         }
         // Strip Markdown special chars to avoid Telegram parse errors
         errorMsg = errorMsg.replace(/[_*[\]()~`>#+=|{}.!-]/g, ' ');
-        
+
         // Revert status back to OPEN so it stays in Active LP and can be retried
         await prisma.lPPosition.update({
           where: { id: positionId },
@@ -1621,7 +1621,7 @@ export class LPEngineAgent {
     for (const pos of positions) {
       const statusEmoji = pos.status === 'OPEN'
         ? '🟢' : pos.status === 'PENDING'
-        ? '🟡' : '🟠';
+          ? '🟡' : '🟠';
 
       const modeEmoji = pos.dayMode ? '☀️' : pos.nightMode ? '🌙' : '⚙️';
 
