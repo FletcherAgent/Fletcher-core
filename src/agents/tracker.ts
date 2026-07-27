@@ -52,7 +52,7 @@ export class TrackerAgent {
         res.writeHead(200, {
           'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-alchemy-signature'
+          'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-alchemy-signature, x-wallet-address'
         });
         res.end();
         return;
