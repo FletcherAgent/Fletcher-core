@@ -2,6 +2,9 @@ import { Bot } from "grammy";
 import * as dotenv from "dotenv";
 import { PrismaClient } from '@prisma/client';
 import { Orchestrator } from "../core/orchestrator.js";
+import { exec } from 'child_process';
+import util from 'util';
+const execPromise = util.promisify(exec);
 import { connectDb, prisma } from "../core/db.js";
 import { screenPairs } from "../services/gmgn.js";
 import { getUserTier, clearTierCache } from "../services/tierGate.js";
@@ -757,6 +760,42 @@ bot.command('sessionkey', async (ctx) => {
       { parse_mode: 'Markdown' });
   } catch (e: any) {
     ctx.reply(`❌ Failed to generate Session Key: ${e?.message}`);
+  }
+});
+
+bot.command('deploy_live', async (ctx) => {
+  if (!ctx.message || !('text' in ctx.message)) return;
+  const args = ctx.message.text.split(' ');
+  if (args.length < 2) {
+    return ctx.reply('Usage: `/deploy_live <poolAddress>`\nExample: `/deploy_live 0x10cc6bd38112cac182db90b6a71d8bb5939526ba`', { parse_mode: 'Markdown' });
+  }
+  const poolAddress = args[1].trim();
+
+  // Basic validation of Ethereum address
+  if (!/^0x[a-fA-F0-9]{40}$/.test(poolAddress)) {
+    return ctx.reply('❌ Invalid Ethereum address format for pool.');
+  }
+
+  const msg = await ctx.reply(`🚀 *Starting Live LP Deployment for Pool:*\n\`${poolAddress}\`\n\n⏳ Executing script, please wait...`, { parse_mode: 'Markdown' });
+
+  try {
+    const { stdout, stderr } = await execPromise(`npx tsx scripts/deploy-live-lp.ts ${poolAddress}`);
+    
+    // Telegram message length limit is 4096, so we truncate stdout if it's too long
+    const outStr = stdout.trim();
+    const truncated = outStr.length > 3500 ? outStr.substring(outStr.length - 3500) : outStr;
+    
+    await ctx.reply(`✅ *Deployment Script Completed*\n\n*Logs (Tail):*\n\`\`\`\n${truncated}\n\`\`\``, { parse_mode: 'Markdown', reply_to_message_id: msg.message_id });
+    
+    if (stderr && stderr.trim().length > 0) {
+      const errStr = stderr.trim();
+      const errTruncated = errStr.length > 500 ? errStr.substring(errStr.length - 500) : errStr;
+      await ctx.reply(`⚠️ *Warnings/Errors:*\n\`\`\`\n${errTruncated}\n\`\`\``, { parse_mode: 'Markdown' });
+    }
+  } catch (e: any) {
+    const errorStr = (e.stdout || e.message || String(e)).trim();
+    const errTruncated = errorStr.length > 3500 ? errorStr.substring(errorStr.length - 3500) : errorStr;
+    await ctx.reply(`❌ *Deployment Script Failed!*\n\n\`\`\`\n${errTruncated}\n\`\`\``, { parse_mode: 'Markdown', reply_to_message_id: msg.message_id });
   }
 });
 
