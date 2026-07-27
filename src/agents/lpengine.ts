@@ -1073,10 +1073,16 @@ export class LPEngineAgent {
 
     let lastFeeGrowth0 = null;
     let lastFeeGrowth1 = null;
-    if (isDryRun) {
-      const { feeGrowthGlobal0, feeGrowthGlobal1 } = await getFeeGrowthGlobal(poolAddress);
-      lastFeeGrowth0 = feeGrowthGlobal0.toString();
-      lastFeeGrowth1 = feeGrowthGlobal1.toString();
+    
+    // Always fetch fee growth for ALPS V4 PositionManager so we can simulate/track fees properly
+    if (isDryRun || npmAddress.toLowerCase() === '0x58daec3116aae6d93017baaea7749052e8a04fa7') {
+      try {
+        const { feeGrowthGlobal0, feeGrowthGlobal1 } = await getFeeGrowthGlobal(poolAddress);
+        lastFeeGrowth0 = feeGrowthGlobal0.toString();
+        lastFeeGrowth1 = feeGrowthGlobal1.toString();
+      } catch (e) {
+        console.warn(`[LPEngine] Failed to fetch initial feeGrowthGlobal for ${poolAddress}:`, e);
+      }
     }
 
     // Save PENDING record to DB (or OPEN if DRY RUN simulation)
