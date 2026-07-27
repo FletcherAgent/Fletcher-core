@@ -1152,12 +1152,17 @@ export class LPEngineAgent {
         const isQuote0 = t0.toLowerCase() === quoteAddress.toLowerCase();
         const quoteAddressHex = quoteAddress as Address;
         const memeTokenAddress = (isQuote0 ? t1 : t0) as Address;
-        const quoteAmountToSwap = isQuote0 ? amount0Desired : amount1Desired; // Quote is token0, so we need amount0
+        // We multiply the swap amount by 2.0 (200% buffer) because the desired amounts were previously reduced by 10%.
+        // Swapping significantly more Quote token guarantees we receive enough Meme token to satisfy the exact proportional LP mint requirements,
+        // leaving any excess Meme token as dust in the Smart Account, preventing TRANSFER_FROM_FAILED reverts during NPM minting
+        // where the price shift requires more Meme tokens than expected.
+        const quoteAmountToSwap = (isQuote0 ? amount0Desired : amount1Desired) * 200n / 100n;
         console.log(`[LPEngine Debug] quoteAmountToSwap=${quoteAmountToSwap}, amount0=${amount0Desired}, amount1=${amount1Desired}, isQuote0=${isQuote0}`);
         
         const isUniversalRouter = version === 'V3';
         const isAlpsRouter = version === 'V4';
-        const actualRouterAddress = isAlpsRouter ? '0xcaf681a66d020601342297493863e78c959e5cb2' as Address : routerAddress;
+        // ALWAYS use ALPS Router for swapping! It has deep liquidity across all tokens and doesn't throw SliceOutOfBounds.
+        const actualRouterAddress = '0xcaf681a66d020601342297493863e78c959e5cb2' as Address;
         let swapCalldata: Hex;
         
         let preSwapCalls: UserOpCall[] = [];
@@ -1239,18 +1244,21 @@ export class LPEngineAgent {
 
         console.log(`[LPEngine Debug] Using Router Address: ${actualRouterAddress}`);
 
-        // Single atomic batch: approve → swap → approve NPM × 2 → mint
+        // Single atomic batch: approve → swap → approve Permit2 & NPM × 2 → mint
         // State changes from step 1 (approve) are visible to step 2 (swap) in the same UserOp.
         const calls: UserOpCall[] = [
           ...preSwapCalls,
           // Swap Quote Token → Meme Token
           { target: actualRouterAddress, data: swapCalldata },
-          // Approve Quote Token and Meme Token to Permit2
+          
+          // Approve Permit2 via ERC20 to pull Quote and Meme tokens
           { target: quoteAddressHex, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [PERMIT2_ADDRESS, MAX_UINT128] }) },
           { target: memeTokenAddress, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [PERMIT2_ADDRESS, MAX_UINT128] }) },
-          // Approve NPM to pull from Permit2
+          
+          // Approve NPM via Permit2 to pull Quote and Meme tokens
           { target: PERMIT2_ADDRESS, data: encodeFunctionData({ abi: permit2Abi, functionName: 'approve', args: [quoteAddressHex, npmAddress, BigInt(MAX_UINT128), 4000000000] }) },
           { target: PERMIT2_ADDRESS, data: encodeFunctionData({ abi: permit2Abi, functionName: 'approve', args: [memeTokenAddress, npmAddress, BigInt(MAX_UINT128), 4000000000] }) },
+          
           // Mint LP Position
           { target: npmAddress, data: calldata }
         ];
