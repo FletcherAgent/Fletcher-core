@@ -1101,7 +1101,7 @@ export class LPEngineAgent {
         source:      options.source ?? 'SYSTEM',
         tradingMode: isDryRun ? 'DRY_RUN' : 'LIVE',
         sentimentStatus: candidate.sentimentStatus || candidate.grokLabel,
-        simulatedLiquidity: isDryRun ? simulatedLiquidity.toString() : null,
+        simulatedLiquidity: simulatedLiquidity ? simulatedLiquidity.toString() : null,
         lastFeeGrowth0,
         lastFeeGrowth1,
       },
