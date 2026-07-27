@@ -141,23 +141,24 @@ export class TrackerAgent {
             user = await prisma.user.create({ data: { walletAddress: wallet } });
           }
 
-          // 2. Predict Smart Account (Real Counterfactual CREATE2 via SimpleAccountFactory)
-          const factoryAddress = '0x9406Cc6185a346906296840746125a0E44976454';
-          const predictedAddress = await publicClient.readContract({
-            address: factoryAddress,
-            abi: [{
-              inputs: [
-                { name: 'owner', type: 'address' },
-                { name: 'salt', type: 'uint256' }
-              ],
-              name: 'getAddress',
-              outputs: [{ type: 'address' }],
-              stateMutability: 'view',
-              type: 'function',
-            }],
-            functionName: 'getAddress',
-            args: [wallet as `0x${string}`, 0n]
-          }) as string;
+          // 2. Predict Smart Account (Real Counterfactual CREATE2 via LightAccount)
+          const { createSmartAccount } = await import('../services/sessionKey.js');
+          const { privateKeyToAccount } = await import('viem/accounts');
+          const pk = (process.env.LP_PRIVATE_KEY || process.env.PRIVATE_KEY) as `0x${string}`;
+          if (!pk) throw new Error("No admin private key found for Smart Account generation.");
+          const adminAddress = privateKeyToAccount(pk).address;
+          
+          // MultiOwnerLightAccount gives co-ownership to both User and Admin.
+          // Using User's wallet as the CREATE2 salt guarantees a unique address per user.
+          const client = await createSmartAccount(
+            pk, 
+            tier, 
+            undefined, 
+            false, 
+            [wallet as `0x${string}`, adminAddress], 
+            BigInt(wallet as string)
+          );
+          const predictedAddress = client.account.address;
 
           // 3. Create Agent
           const agentName = body.name || generateAgentName();

@@ -1149,7 +1149,7 @@ export class LPEngineAgent {
         const tier = await getUserTier(recipient);
         // selfFunded=true: creates client without Alchemy paymaster middleware.
         // LP UserOps are self-funded from SA's ETH to avoid paymaster policy restrictions.
-        const client = await getSessionKeyClient('FULL', tier, true);
+        const client = await getSessionKeyClient('FULL', tier, true, options.wallet);
 
         // Ensure smart account has enough ETH for gas
         await ensureSmartAccountFunded(client.account.address);
@@ -1443,7 +1443,7 @@ export class LPEngineAgent {
       dbLogger.info(`[LPEngine] Mode FULL — Auto-closing position via Alchemy Session Key`, { source: 'LPEngine', wallet: userWallet });
       try {
         const tier = await getUserTier(recipient);
-        const client = await getSessionKeyClient('FULL', tier);
+        const client = await getSessionKeyClient('FULL', tier, false, userWallet);
         // Single atomic V4 call: BURN_POSITION + TAKE_PAIR
         const calls: UserOpCall[] = [
           { target: npmAddress, data: closeCalldata },
@@ -1555,7 +1555,7 @@ export class LPEngineAgent {
         }
         dbLogger.info(`[LPEngine] Mode ${pos.mode} — Auto-harvesting via Alchemy Session Key`, { source: 'LPEngine', wallet: userWallet });
         try {
-          const client = await getSessionKeyClient(pos.mode as 'SEMI' | 'FULL', tier);
+          const client = await getSessionKeyClient(pos.mode as 'SEMI' | 'FULL', tier, false, userWallet);
           const calls: UserOpCall[] = [
             { target: npmAddress, data: calldata }
           ];
