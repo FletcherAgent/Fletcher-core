@@ -196,7 +196,7 @@ export class TrackerAgent {
           });
 
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify({ actions }));
+          return res.end(JSON.stringify({ actions, agents: user.agents, user }));
         } catch (e) {
           console.error(e);
           res.writeHead(500); return res.end();
@@ -229,10 +229,15 @@ export class TrackerAgent {
       if (req.method === 'GET' && reqUrl.pathname === '/api/dashboard') {
         try {
           const walletParam = reqUrl.searchParams.get('wallet') || req.headers['x-wallet-address'] as string;
-          let userFilter = {};
+          let userFilter: any = {};
+          let userRecord = null;
           if (walletParam) {
             // Fetch positions belonging to this specific user wallet
             userFilter = { user: { walletAddress: { equals: walletParam, mode: 'insensitive' } } };
+            userRecord = await prisma.user.findFirst({ 
+              where: { walletAddress: { equals: walletParam, mode: 'insensitive' } },
+              include: { agents: true }
+            });
           } else {
             // Public dashboard: fetch only positions where userId is null (system/flagship)
             userFilter = { userId: null };
@@ -253,13 +258,15 @@ export class TrackerAgent {
             prisma.lPPosition.aggregate({ where: { tradingMode: 'DRY_RUN', ...userFilter }, _sum: { feesCollected: true } })
           ]);
           
-          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
           res.end(JSON.stringify({ 
             wallets, 
             signals, 
             positions, 
             lpPositions,
             logs, 
+            user: userRecord,
+            agents: userRecord?.agents || [],
             metrics: {
               totalSignals,
               openPositionsCount,
