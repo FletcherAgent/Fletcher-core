@@ -34,6 +34,7 @@ export async function createSmartAccount(privateKeyHex: Hex, tier: number, accou
     transport: transport as any,
     chain: robinhoodChain,
     signer,
+    factoryAddress: '0x000000000019d2Ee9F2729A65AfE20bb0020AefC' as `0x${string}`, // Default MultiOwnerLightAccount v2.0.0 factory
   };
   if (accountAddress) {
     accountParams.accountAddress = accountAddress;

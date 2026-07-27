@@ -182,6 +182,87 @@ export class TrackerAgent {
         }
       }
 
+      if (req.method === 'POST' && reqUrl.pathname === '/api/agents/withdraw') {
+        try {
+          const wallet = req.headers['x-wallet-address'] as string;
+          if (!wallet) {
+            res.writeHead(400); return res.end(JSON.stringify({ error: 'Missing wallet header' }));
+          }
+
+          const body = await getJsonBody(req);
+          const { signature, amount } = body;
+          
+          if (!signature) {
+            res.writeHead(400); return res.end(JSON.stringify({ error: 'Missing signature' }));
+          }
+
+          const { verifyMessage } = await import('viem');
+          const isValid = await verifyMessage({
+            address: wallet as `0x${string}`,
+            message: "Withdraw Fletcher Agent Capital for my address: " + wallet,
+            signature: signature as `0x${string}`
+          });
+
+          if (!isValid) {
+            res.writeHead(401); return res.end(JSON.stringify({ error: 'Invalid signature' }));
+          }
+
+          const user = await prisma.user.findUnique({
+            where: { walletAddress: wallet },
+            include: { agents: true }
+          });
+
+          const agent = user?.agents?.[0];
+          if (!agent) {
+            res.writeHead(404); return res.end(JSON.stringify({ error: 'Agent not found' }));
+          }
+
+          const { getUserTier } = await import('../services/tierGate.js');
+          const tier = await getUserTier(wallet);
+
+          const { getSessionKeyClient, buildAndSendLPUserOperation } = await import('../services/sessionKey.js');
+          const client = await getSessionKeyClient('FULL', tier, false, wallet); 
+
+          const { createPublicClient, http, parseAbi, encodeFunctionData } = await import('viem');
+          const rpcUrl = `https://robinhood-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}`;
+          const publicClient = createPublicClient({ transport: http(rpcUrl) });
+          const wethAddress = (process.env.WETH_ADDRESS || '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2') as `0x${string}`;
+
+          const wethBalance = await publicClient.readContract({
+            address: wethAddress,
+            abi: parseAbi(['function balanceOf(address owner) view returns (uint256)']),
+            functionName: 'balanceOf',
+            args: [agent.smartAccountAddress as `0x${string}`]
+          }) as bigint;
+
+          if (wethBalance === 0n) {
+            res.writeHead(400); return res.end(JSON.stringify({ error: 'No idle WETH available to withdraw.' }));
+          }
+
+          const calldata = encodeFunctionData({
+            abi: parseAbi(['function transfer(address to, uint256 amount) returns (bool)']),
+            functionName: 'transfer',
+            args: [wallet as `0x${string}`, wethBalance]
+          });
+
+          const txHash = await buildAndSendLPUserOperation(client, [
+            { target: wethAddress, data: calldata }
+          ]);
+
+          await prisma.agent.update({
+            where: { id: agent.id },
+            data: { capital: 0 }
+          });
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ success: true, txHash }));
+
+        } catch (e: any) {
+          console.error("[Withdraw API Error]", e);
+          res.writeHead(500); return res.end(JSON.stringify({ error: e.message }));
+        }
+      }
+
       if (req.method === 'GET' && reqUrl.pathname === '/api/agents/pending-actions') {
         try {
           const wallet = reqUrl.searchParams.get('wallet') || req.headers['x-wallet-address'] as string;
