@@ -198,11 +198,11 @@ export class TrackerAgent {
                     const dummyTokenId = Math.floor(Math.random() * 10000) + 1; // Simulated tokenId
                     await prisma.agent.update({
                         where: { id: agentId },
-                        data: { status: 'ACTIVE' }
-                    });
-                    await prisma.lPPosition.updateMany({
-                        where: { agentId: agentId },
-                        data: { erc8004Id: dummyTokenId.toString(), identityTxHash: txHash }
+                        data: {
+                            status: 'ACTIVE',
+                            erc8004Id: dummyTokenId.toString(),
+                            identityTxHash: txHash
+                        }
                     });
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     return res.end(JSON.stringify({ success: true, tokenId: dummyTokenId }));
