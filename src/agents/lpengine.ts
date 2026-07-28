@@ -1362,8 +1362,9 @@ export class LPEngineAgent {
   async proposeClosePosition(positionId: string, reason: string, forceExecute: boolean = false): Promise<void> {
     const pos = await prisma.lPPosition.findUnique({ where: { id: positionId }, include: { user: true } });
     const userWallet = pos?.user?.walletAddress;
-    if (!pos || pos.status !== 'OPEN') {
-      console.warn(`[LPEngine] proposeClosePosition: position ${positionId} not found or not OPEN`);
+    const isAllowedStatus = pos?.status === 'OPEN' || (forceExecute && pos?.status === 'EXITING');
+    if (!pos || !isAllowedStatus) {
+      console.warn(`[LPEngine] proposeClosePosition: position ${positionId} not found or not OPEN/EXITING (status: ${pos?.status})`);
       await logEvent('WARN', `[LP] proposeClosePosition: position ${positionId} not found or not OPEN`);
       return;
     }
