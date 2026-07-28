@@ -958,14 +958,14 @@ export class LPEngineAgent {
 
       let proposedUsdAllocation = quoteBalanceUsd * Number(allocationPercent) / 100;
 
-      // Minimum profitability threshold ($10 USD)
-      if (proposedUsdAllocation < 10) {
-        proposedUsdAllocation = 10;
+      // Minimum profitability threshold
+      if (proposedUsdAllocation < config.startSizeLive) {
+        proposedUsdAllocation = config.startSizeLive;
       }
 
       // Check for insufficient balance
-      if (quoteBalanceUsd < 10) {
-        const msg = `⚠️ Insufficient [WETH/USDG] balance to open position. Minimum required balance is equivalent to $10 USD.`;
+      if (quoteBalanceUsd < config.startSizeLive) {
+        const msg = `⚠️ Insufficient [WETH/USDG] balance to open position. Minimum required balance is equivalent to $${config.startSizeLive} USD.`;
         console.warn(`[LPEngine] ${msg} (Current: $${quoteBalanceUsd.toFixed(2)})`);
         await logEvent('WARN', `[LP] Insufficient balance for ${token.symbol}`);
         if (this.onNotification) await this.onNotification(msg);
