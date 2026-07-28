@@ -1,8 +1,8 @@
 import { type Address, type Hex, parseAbi, createWalletClient } from 'viem';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { prisma } from '../core/db.js';
-import { createMultiOwnerLightAccount } from "@alchemy/aa-accounts";
-import { LocalAccountSigner, createSmartAccountClient } from "@alchemy/aa-core";
+// import { createMultiOwnerLightAccount } from "@alchemy/aa-accounts"; // Unsupported on Robinhood
+import { LocalAccountSigner, createSmartAccountClient, createSimpleSmartAccount } from "@alchemy/aa-core";
 import { alchemyGasManagerMiddleware } from "@alchemy/aa-alchemy";
 import { http, createPublicClient, parseEther } from "viem";
 import { privateKeyToAccount as ethPrivToAccount } from 'viem/accounts';
@@ -34,16 +34,17 @@ export async function createSmartAccount(privateKeyHex: Hex, tier: number, accou
     transport: transport as any,
     chain: robinhoodChain,
     signer,
-    factoryAddress: '0x000000000019d2Ee9F2729A65AfE20bb0020AefC' as `0x${string}`, // Default MultiOwnerLightAccount v2.0.0 factory
+    factoryAddress: '0x9406Cc6185a346906296840746125a0E44976454' as `0x${string}`, // SimpleAccount factory on Robinhood
   };
   if (accountAddress) {
     accountParams.accountAddress = accountAddress;
-  } else if (owners) {
-    accountParams.owners = owners;
-    if (salt !== undefined) accountParams.salt = salt;
+  } else {
+    // SimpleAccount uses `index` instead of `salt` and only supports one owner (the signer).
+    // We can still segregate accounts by index.
+    if (salt !== undefined) accountParams.index = salt;
   }
 
-  const account = await createMultiOwnerLightAccount(accountParams);
+  const account = await createSimpleSmartAccount(accountParams);
   
   const limits = getTierLimits(tier);
 
@@ -130,7 +131,7 @@ export type UserOpCall = {
  */
 export async function ensureSmartAccountFunded(
   accountAddress: Address,
-  minEth: bigint = parseEther('0.005')
+  minEth: bigint = parseEther('0.001') // ~$3 buffer (not fully spent, just required by Bundler precheck for high gasLimit)
 ): Promise<void> {
   const rpcUrl = `https://robinhood-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}`;
   const chain = {
@@ -239,10 +240,10 @@ export async function buildAndSendLPUserOperation(client: any, calls: UserOpCall
   const initCode: Hex = isDeployed ? '0x' : (await client.account.getInitCode() as Hex);
 
   // Empirically-validated gas limits for LP operations (approve+swap+approveNPM+approveToken+mint)
-  // Measured from successful on-chain execution. Using 2× headroom for safety.
-  const callGasLimit    = 0x150000n; // ~1.37M (plenty for swap)
-  const verifGasLimit   = 0x1B000n;  // ~110k (forces efficiency ratio to ~0.44, above the 0.4 requirement)
-  const preVerifGas     = 0x20000n;  // ~131k
+  // Measured from successful on-chain execution.
+  const callGasLimit    = 0x200000n; // ~2.1M (plenty for complex swap + mint batch)
+  const verifGasLimit   = isDeployed ? 0xC350n : 0x90000n;  // ~50k if deployed (to satisfy Alchemy >0.4 efficiency rule), ~589k if deploying
+  const preVerifGas     = 0x15000n;  // ~86k
 
   const userOp = {
     sender:                 client.account.address as `0x${string}`,
@@ -269,7 +270,24 @@ export async function buildAndSendLPUserOperation(client: any, calls: UserOpCall
     body: JSON.stringify({ jsonrpc: '2.0', method: 'eth_sendUserOperation', params: [signedUO, ENTRY_POINT], id: 1 })
   });
   const sendJson = await sendResp.json();
-  if (sendJson.error) throw new Error(`[Alchemy] UserOp send failed: ${JSON.stringify(sendJson.error)}`);
+
+  if (sendJson.error) {
+    if (sendJson.error.message.includes('AA13')) {
+      console.log(`[SessionKey] AA13 error detected. RPC sync issue likely (account already deployed). Retrying without initCode...`);
+      userOp.initCode = '0x';
+      const signedUORetry = await client.signUserOperation({ uoStruct: userOp });
+      const sendRespRetry = await fetch(rpcUrl, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', method: 'eth_sendUserOperation', params: [signedUORetry, ENTRY_POINT], id: 2 })
+      });
+      const sendJsonRetry = await sendRespRetry.json();
+      if (sendJsonRetry.error) {
+        throw new Error(`[Alchemy] UserOp send failed after AA13 retry: ${JSON.stringify(sendJsonRetry.error)}`);
+      }
+      return sendJsonRetry.result as Hex;
+    }
+    throw new Error(`[Alchemy] UserOp send failed: ${JSON.stringify(sendJson.error)}`);
+  }
 
   const uoHash: Hex = sendJson.result;
   console.log(`[Alchemy] UserOp submitted. Hash: ${uoHash}`);

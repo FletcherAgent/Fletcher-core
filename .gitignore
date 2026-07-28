@@ -3,3 +3,5 @@ node_modules
 .env
 /test
 /scratch
+scripts/withdraw-new-account.ts
+scripts/withdraw-stuck-funds.ts

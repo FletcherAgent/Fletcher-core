@@ -748,7 +748,7 @@ export class LPEngineAgent {
 
   public async proposeOpenPosition(
     candidate: { token: GMGNToken; score: number; grokScore?: number; grokLabel?: string; sentimentStatus?: string },
-    options: { dayMode: boolean; nightMode: boolean; nightRange?: number; strategyMode?: boolean; lowerPct?: number; upperPct?: number; source?: string; agentId?: string; wallet?: string }
+    options: { dayMode: boolean; nightMode: boolean; nightRange?: number; strategyMode?: boolean; lowerPct?: number; upperPct?: number; source?: string; agentId?: string; wallet?: string; mode?: 'MANUAL' | 'SEMI' | 'FULL' }
   ): Promise<void> {
     const config = await loadLPConfig();
     const token = candidate.token;
@@ -1072,7 +1072,7 @@ export class LPEngineAgent {
       `MCap: $${(token.marketCap / 1000).toFixed(0)}K | Vol24h: $${(token.volume24h / 1000).toFixed(0)}K`;
 
     const defaultModeRecord = await prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } });
-    const currentMode = (defaultModeRecord?.value as 'MANUAL' | 'SEMI' | 'FULL') || 'MANUAL';
+    const currentMode = options.mode || (defaultModeRecord?.value as 'MANUAL' | 'SEMI' | 'FULL') || 'MANUAL';
 
     let lastFeeGrowth0 = null;
     let lastFeeGrowth1 = null;
@@ -1198,7 +1198,7 @@ export class LPEngineAgent {
           const amountOutMin = expectedMemeOut * 90n / 100n; // 10% max slippage
 
           const swapInput = encodeAbiParameters(exactInputSingleParamsAbi, [
-            recipient, // recipient
+            client.account.address, // recipient must be the Smart Account so it holds the tokens for NPM mint
             quoteAmountToSwap,
             amountOutMin, // 10% slippage protection
             path,
@@ -1238,16 +1238,18 @@ export class LPEngineAgent {
               tokenIn: quoteAddress as Address,
               tokenOut: memeTokenAddress as Address,
               fee: feeTier,
-              recipient: recipient,
+              recipient: client.account.address as Address, // Must be Smart Account so it can pay for NPM mint
               amountIn: quoteAmountToSwap,
               amountOutMinimum: amountOutMin, // 10% slippage protection
               sqrtPriceLimitX96: 0n
             }]
           });
 
-          // ALPS Router uses direct ERC20 approval, not Permit2
+          // ALPS Router uses Permit2 under the hood, so we must approve Permit2 and the router on Permit2
           preSwapCalls = [
-            { target: quoteAddressHex, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [actualRouterAddress, MAX_UINT128] }) }
+            { target: quoteAddressHex, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [actualRouterAddress, MAX_UINT128] }) },
+            { target: quoteAddressHex, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [PERMIT2_ADDRESS, MAX_UINT128] }) },
+            { target: PERMIT2_ADDRESS, data: encodeFunctionData({ abi: permit2Abi, functionName: 'approve', args: [quoteAddressHex, actualRouterAddress, BigInt(MAX_UINT128), 4000000000] }) }
           ];
         }
 
@@ -1260,11 +1262,10 @@ export class LPEngineAgent {
           // Swap Quote Token → Meme Token
           { target: actualRouterAddress, data: swapCalldata },
 
-          // Approve Permit2 via ERC20 to pull Quote and Meme tokens
+          // NPM on Robinhood uses Permit2 for minting, so we must approve Permit2 and NPM on Permit2
           { target: quoteAddressHex, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [PERMIT2_ADDRESS, MAX_UINT128] }) },
           { target: memeTokenAddress, data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [PERMIT2_ADDRESS, MAX_UINT128] }) },
 
-          // Approve NPM via Permit2 to pull Quote and Meme tokens
           { target: PERMIT2_ADDRESS, data: encodeFunctionData({ abi: permit2Abi, functionName: 'approve', args: [quoteAddressHex, npmAddress, BigInt(MAX_UINT128), 4000000000] }) },
           { target: PERMIT2_ADDRESS, data: encodeFunctionData({ abi: permit2Abi, functionName: 'approve', args: [memeTokenAddress, npmAddress, BigInt(MAX_UINT128), 4000000000] }) },
 
