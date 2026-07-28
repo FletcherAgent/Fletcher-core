@@ -367,22 +367,27 @@ export class GuardianAgent {
       });
 
       if (exitReason) {
-        console.log(`[Guardian] 🚨 LP ${pos.id.slice(0,8)} EXIT TRIGGERED: ${exitReason}`);
-        await logEvent('WARN', `[LP] Guardian triggered EXIT: ${exitReason}`, { positionId: pos.id });
-        
-        // Add to TokenBlacklist
-        if (ta && ta.windowHighClose) {
-          const wethAddr = (process.env.WETH_ADDRESS ?? '').toLowerCase();
-          const tAddress = pos.token0.toLowerCase() === wethAddr ? pos.token1 : pos.token0;
-          await prisma.tokenBlacklist.upsert({
-            where: { tokenAddress: tAddress },
-            update: { athPriceAtExit: ta.windowHighClose, reason: exitRule || 'MANUAL' },
-            create: { tokenAddress: tAddress, athPriceAtExit: ta.windowHighClose, reason: exitRule || 'MANUAL' }
-          });
-          console.log(`[Guardian] 🚫 Added ${tAddress} to Blacklist (ATH: ${ta.windowHighClose})`);
-        }
+        if (pos.mode === 'SEMI' || pos.mode === 'MANUAL') {
+          // Do not trigger exit or proposal for SEMI/MANUAL modes. User wants full control.
+          console.log(`[Guardian] 🚨 LP ${pos.id.slice(0,8)} EXIT condition met: ${exitReason}, but ignored due to ${pos.mode} mode.`);
+        } else {
+          console.log(`[Guardian] 🚨 LP ${pos.id.slice(0,8)} EXIT TRIGGERED: ${exitReason}`);
+          await logEvent('WARN', `[LP] Guardian triggered EXIT: ${exitReason}`, { positionId: pos.id });
+          
+          // Add to TokenBlacklist
+          if (ta && ta.windowHighClose) {
+            const wethAddr = (process.env.WETH_ADDRESS ?? '').toLowerCase();
+            const tAddress = pos.token0.toLowerCase() === wethAddr ? pos.token1 : pos.token0;
+            await prisma.tokenBlacklist.upsert({
+              where: { tokenAddress: tAddress },
+              update: { athPriceAtExit: ta.windowHighClose, reason: exitRule || 'MANUAL' },
+              create: { tokenAddress: tAddress, athPriceAtExit: ta.windowHighClose, reason: exitRule || 'MANUAL' }
+            });
+            console.log(`[Guardian] 🚫 Added ${tAddress} to Blacklist (ATH: ${ta.windowHighClose})`);
+          }
 
-        if (this.onLPCloseSignal) this.onLPCloseSignal(pos, exitReason);
+          if (this.onLPCloseSignal) this.onLPCloseSignal(pos, exitReason);
+        }
       }
 
       // 6. DAY Mode fallback close
