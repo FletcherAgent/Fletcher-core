@@ -35,6 +35,9 @@ model Agent {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  
+  erc8004Id          String?
+  identityTxHash     String?
 
   lpPositions    LPPosition[]
   positions      Position[]
@@ -152,8 +155,6 @@ model DexProtocol {
 model LPPosition {
   id                 String   @id @default(uuid())
   tokenId            String   @unique
-  erc8004Id          String?
-  identityTxHash     String?
   txHash             String?
   exitTxHash         String?
   pool               String
