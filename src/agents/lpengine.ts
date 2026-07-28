@@ -912,11 +912,12 @@ export class LPEngineAgent {
     console.log(`[LPEngine Debug] token.priceUsd=${token.priceUsd}, poolPriceRaw=${poolPriceRaw}, decimalAdjustedPoolPrice=${decimalAdjustedPoolPrice}, isToken0=${isToken0}, token0Price=${token0Price}, token1Price=${token1Price}`);
 
     // Dynamically evaluate Smart Account address
-    let recipient = ((process.env.LP_WALLET_ADDRESS || process.env.USER_WALLET_ADDRESS) ?? '') as Address;
+    let recipient = ((process.env.SMART_ACCOUNT_ADDRESS || process.env.LP_WALLET_ADDRESS || process.env.USER_WALLET_ADDRESS) ?? '') as Address;
     if (!isDryRun) {
       try {
         const { createSmartAccount } = await import('../services/sessionKey.js');
-        const dummyClient = await createSmartAccount(process.env.LP_PRIVATE_KEY as `0x${string}`, 3);
+        const smartAccEnv = process.env.SMART_ACCOUNT_ADDRESS as Address | undefined;
+        const dummyClient = await createSmartAccount(process.env.LP_PRIVATE_KEY as `0x${string}`, 3, smartAccEnv);
         recipient = dummyClient.account.address as Address;
       } catch (e) {
         console.warn(`[LPEngine] Failed to evaluate smart account address:`, e);

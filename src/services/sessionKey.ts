@@ -300,15 +300,17 @@ export async function buildAndSendLPUserOperation(client: any, calls: UserOpCall
 export async function getMainAccountClient(tier: number, selfFunded = false) {
   const pk = process.env.LP_PRIVATE_KEY;
   if (!pk) throw new Error("LP_PRIVATE_KEY not set");
-  return await createSmartAccount(pk as `0x${string}`, tier, undefined, selfFunded);
+  const envAcc = process.env.SMART_ACCOUNT_ADDRESS as `0x${string}` | undefined;
+  return await createSmartAccount(pk as `0x${string}`, tier, envAcc, selfFunded);
 }
 
 export async function getSessionKeyClient(modeRequired: 'SEMI' | 'FULL', tier: number, selfFunded = false, userWalletAddress?: string) {
   const pk = process.env.LP_PRIVATE_KEY;
   if (!pk) throw new Error("LP_PRIVATE_KEY not set");
   
-  let accountAddress: `0x${string}` | undefined;
-  if (userWalletAddress) {
+  let accountAddress = process.env.SMART_ACCOUNT_ADDRESS as `0x${string}` | undefined;
+
+  if (userWalletAddress && !accountAddress) {
     const agent = await prisma.agent.findFirst({ 
       where: { user: { walletAddress: userWalletAddress } } 
     });
