@@ -29,6 +29,7 @@ function normalizeToken(d) {
         buyTax: parseFloat(d?.buy_tax ?? '0') * 100, // normalize to percentage if decimal
         sellTax: parseFloat(d?.sell_tax ?? '0') * 100,
         isVerified: Boolean(d?.is_open_source ?? d?.verified ?? true),
+        quoteToken: d?.pool?.quote_address ?? d?.quote_address ?? undefined,
         pairCreatedAt: d?.pool?.created_at ? parseInt(d.pool.created_at) * 1000 : undefined,
         vol1h: parseFloat(d?.price?.volume_1h || '0'),
         vol6h: parseFloat(d?.price?.volume_6h || '0'),
@@ -175,7 +176,7 @@ export async function getTokenInfo(tokenAddress) {
         if (!response || !response.address)
             throw new Error('No data');
         const token = normalizeToken(response);
-        token.quoteToken = response.quote_address || process.env.WETH_ADDRESS || '';
+        token.quoteToken = token.quoteToken || response.pool?.quote_address || response.quote_address || process.env.WETH_ADDRESS || '';
         GMGNCache.set(cacheKey, token, 30);
         return token;
     }

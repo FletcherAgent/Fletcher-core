@@ -8,7 +8,24 @@ import { WalletProfiler } from '../services/walletProfiler.js';
 import { publicClient } from '../services/viem.js';
 import { mcpServer } from '../mcp/index.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { getPoolSlot0 } from '../services/lpMath.js';
 const TRANSFER_EVENT = parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)');
+const getJsonBody = (req) => {
+    return new Promise((resolve, reject) => {
+        let body = '';
+        req.on('data', chunk => { body += chunk.toString(); });
+        req.on('end', () => {
+            try {
+                resolve(JSON.parse(body || '{}'));
+            }
+            catch (e) {
+                resolve({});
+            }
+        });
+    });
+};
+const CODENAMES = ["Orion", "Sentinel", "Apollo", "Nova", "Cipher", "Vortex", "Apex", "Echo"];
+const generateAgentName = () => `Agent ${CODENAMES[Math.floor(Math.random() * CODENAMES.length)]} ${Math.floor(Math.random() * 999)}`;
 export class TrackerAgent {
     onCopyBuySignal;
     onCopySellSignal;
@@ -30,7 +47,7 @@ export class TrackerAgent {
                 res.writeHead(200, {
                     'Access-Control-Allow-Origin': '*',
                     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-                    'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-alchemy-signature'
+                    'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-alchemy-signature, x-wallet-address'
                 });
                 res.end();
                 return;
@@ -62,29 +79,285 @@ export class TrackerAgent {
                     return;
                 }
             }
-            if (req.method === 'GET' && req.url === '/api/dashboard') {
+            const reqUrl = new URL(req.url || '', `http://${req.headers.host || 'localhost'}`);
+            // --- USER AGENT ENDPOINTS ---
+            if (req.method === 'POST' && reqUrl.pathname === '/api/user/link-telegram') {
                 try {
+                    const wallet = req.headers['x-wallet-address'];
+                    if (!wallet) {
+                        res.writeHead(400);
+                        return res.end(JSON.stringify({ error: 'Missing wallet header' }));
+                    }
+                    let user = await prisma.user.findUnique({ where: { walletAddress: wallet } });
+                    if (!user) {
+                        user = await prisma.user.create({ data: { walletAddress: wallet } });
+                    }
+                    // Generate 6-digit code
+                    const code = Math.floor(100000 + Math.random() * 900000).toString();
+                    const expiry = new Date(Date.now() + 15 * 60 * 1000); // 15 mins
+                    await prisma.user.update({
+                        where: { id: user.id },
+                        data: { linkCode: code, linkCodeExpiry: expiry }
+                    });
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    return res.end(JSON.stringify({ code, expiresAt: expiry }));
+                }
+                catch (e) {
+                    console.error(e);
+                    res.writeHead(500);
+                    return res.end();
+                }
+            }
+            if (req.method === 'POST' && reqUrl.pathname === '/api/agents/deploy') {
+                try {
+                    const wallet = req.headers['x-wallet-address'];
+                    if (!wallet) {
+                        res.writeHead(400);
+                        return res.end(JSON.stringify({ error: 'Missing wallet header' }));
+                    }
+                    // 1. Tier Gating Check
+                    const { getUserTier } = await import('../services/tierGate.js');
+                    const tier = await getUserTier(wallet);
+                    if (tier === 0) { // Standard tier (No FLETCH)
+                        res.writeHead(403);
+                        return res.end(JSON.stringify({ error: 'Insufficient $FLETCH balance. Minimum 1M required.' }));
+                    }
+                    const body = await getJsonBody(req);
+                    let user = await prisma.user.findUnique({ where: { walletAddress: wallet } });
+                    if (!user) {
+                        user = await prisma.user.create({ data: { walletAddress: wallet } });
+                    }
+                    // 2. Predict Smart Account (Real Counterfactual CREATE2 via LightAccount)
+                    const { createSmartAccount } = await import('../services/sessionKey.js');
+                    const { privateKeyToAccount } = await import('viem/accounts');
+                    const pk = (process.env.LP_PRIVATE_KEY || process.env.PRIVATE_KEY);
+                    if (!pk)
+                        throw new Error("No admin private key found for Smart Account generation.");
+                    const adminAddress = privateKeyToAccount(pk).address;
+                    // MultiOwnerLightAccount gives co-ownership to both User and Admin.
+                    // Using User's wallet as the CREATE2 salt guarantees a unique address per user.
+                    const client = await createSmartAccount(pk, tier, undefined, false, [wallet, adminAddress], BigInt(wallet));
+                    const predictedAddress = client.account.address;
+                    // 3. Create Agent
+                    const agentName = body.name || generateAgentName();
+                    const agent = await prisma.agent.create({
+                        data: {
+                            userId: user.id,
+                            name: agentName,
+                            smartAccountAddress: predictedAddress,
+                            strategy: body.strategy || 'FULL_RANGE',
+                            mode: body.mode || 'SEMI',
+                            capital: parseFloat(body.capital) || 0,
+                            status: 'PENDING_IDENTITY' // Changed from PENDING_FUNDING
+                        }
+                    });
+                    // 4. Generate & Upload ERC-8004 Registration Metadata
+                    let metadataUrl = "";
+                    try {
+                        const { uploadAgentMetadata } = await import('../services/supabase.js');
+                        const metadata = {
+                            agentId: agent.id,
+                            owner: wallet,
+                            chain: "4663",
+                            capability: agent.strategy,
+                            version: "v2.0"
+                        };
+                        metadataUrl = await uploadAgentMetadata(agent.id, metadata);
+                    }
+                    catch (err) {
+                        console.error("Failed to upload metadata to Supabase:", err);
+                    }
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    return res.end(JSON.stringify({
+                        success: true,
+                        agent,
+                        mintInstruction: {
+                            contract: "0x8004000000000000000000000000000000008004",
+                            tokenURI: metadataUrl
+                        }
+                    }));
+                }
+                catch (e) {
+                    console.error(e);
+                    res.writeHead(500);
+                    return res.end();
+                }
+            }
+            if (req.method === 'POST' && reqUrl.pathname === '/api/agents/withdraw') {
+                try {
+                    const wallet = req.headers['x-wallet-address'];
+                    if (!wallet) {
+                        res.writeHead(400);
+                        return res.end(JSON.stringify({ error: 'Missing wallet header' }));
+                    }
+                    const body = await getJsonBody(req);
+                    const { signature, amount } = body;
+                    if (!signature) {
+                        res.writeHead(400);
+                        return res.end(JSON.stringify({ error: 'Missing signature' }));
+                    }
+                    const { verifyMessage } = await import('viem');
+                    const isValid = await verifyMessage({
+                        address: wallet,
+                        message: "Withdraw Fletcher Agent Capital for my address: " + wallet,
+                        signature: signature
+                    });
+                    if (!isValid) {
+                        res.writeHead(401);
+                        return res.end(JSON.stringify({ error: 'Invalid signature' }));
+                    }
+                    const user = await prisma.user.findUnique({
+                        where: { walletAddress: wallet },
+                        include: { agents: true }
+                    });
+                    const agent = user?.agents?.[0];
+                    if (!agent) {
+                        res.writeHead(404);
+                        return res.end(JSON.stringify({ error: 'Agent not found' }));
+                    }
+                    const { getUserTier } = await import('../services/tierGate.js');
+                    const tier = await getUserTier(wallet);
+                    const { getSessionKeyClient, buildAndSendLPUserOperation } = await import('../services/sessionKey.js');
+                    const client = await getSessionKeyClient('FULL', tier, false, wallet);
+                    const { createPublicClient, http, parseAbi, encodeFunctionData } = await import('viem');
+                    const rpcUrl = `https://robinhood-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}`;
+                    const publicClient = createPublicClient({ transport: http(rpcUrl) });
+                    const wethAddress = (process.env.WETH_ADDRESS || '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2');
+                    const wethBalance = await publicClient.readContract({
+                        address: wethAddress,
+                        abi: parseAbi(['function balanceOf(address owner) view returns (uint256)']),
+                        functionName: 'balanceOf',
+                        args: [agent.smartAccountAddress]
+                    });
+                    if (wethBalance === 0n) {
+                        res.writeHead(400);
+                        return res.end(JSON.stringify({ error: 'No idle WETH available to withdraw.' }));
+                    }
+                    const calldata = encodeFunctionData({
+                        abi: parseAbi(['function transfer(address to, uint256 amount) returns (bool)']),
+                        functionName: 'transfer',
+                        args: [wallet, wethBalance]
+                    });
+                    const txHash = await buildAndSendLPUserOperation(client, [
+                        { target: wethAddress, data: calldata }
+                    ]);
+                    await prisma.agent.update({
+                        where: { id: agent.id },
+                        data: { capital: 0 }
+                    });
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    return res.end(JSON.stringify({ success: true, txHash }));
+                }
+                catch (e) {
+                    console.error("[Withdraw API Error]", e);
+                    res.writeHead(500);
+                    return res.end(JSON.stringify({ error: e.message }));
+                }
+            }
+            if (req.method === 'GET' && reqUrl.pathname === '/api/agents/pending-actions') {
+                try {
+                    const wallet = reqUrl.searchParams.get('wallet') || req.headers['x-wallet-address'];
+                    if (!wallet) {
+                        res.writeHead(400);
+                        return res.end(JSON.stringify({ error: 'Missing wallet header' }));
+                    }
+                    const user = await prisma.user.findUnique({
+                        where: { walletAddress: wallet },
+                        include: { agents: true }
+                    });
+                    if (!user) {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        return res.end(JSON.stringify({ actions: [] }));
+                    }
+                    const agentIds = user.agents.map(a => a.id);
+                    const actions = await prisma.pendingAction.findMany({
+                        where: {
+                            agentId: { in: agentIds },
+                            status: 'PENDING'
+                        },
+                        include: { agent: true },
+                        orderBy: { createdAt: 'desc' }
+                    });
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    return res.end(JSON.stringify({ actions, agents: user.agents, user }));
+                }
+                catch (e) {
+                    console.error(e);
+                    res.writeHead(500);
+                    return res.end();
+                }
+            }
+            if (req.method === 'POST' && reqUrl.pathname === '/api/agents/execute-action') {
+                try {
+                    const body = await getJsonBody(req);
+                    const { actionId, txHash } = body;
+                    if (!actionId || !txHash) {
+                        res.writeHead(400);
+                        return res.end(JSON.stringify({ error: 'Missing actionId or txHash' }));
+                    }
+                    const action = await prisma.pendingAction.update({
+                        where: { id: actionId },
+                        data: { status: 'EXECUTED', payload: { ...(body.payload || {}), txHash } }
+                    });
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    return res.end(JSON.stringify({ success: true, action }));
+                }
+                catch (e) {
+                    console.error(e);
+                    res.writeHead(500);
+                    return res.end();
+                }
+            }
+            // ----------------------------
+            if (req.method === 'GET' && reqUrl.pathname === '/api/dashboard') {
+                try {
+                    const walletParam = reqUrl.searchParams.get('wallet') || req.headers['x-wallet-address'];
+                    let userFilter = {};
+                    let userRecord = null;
+                    if (walletParam) {
+                        // Fetch positions belonging to this specific user wallet
+                        userFilter = { user: { walletAddress: { equals: walletParam, mode: 'insensitive' } } };
+                        userRecord = await prisma.user.findFirst({
+                            where: { walletAddress: { equals: walletParam, mode: 'insensitive' } },
+                            include: { agents: true }
+                        });
+                    }
+                    else {
+                        // Public dashboard: fetch only positions where userId is null (system/flagship)
+                        userFilter = { userId: null };
+                    }
                     const [wallets, signals, positions, lpPositions, logs, totalSignals, openPositionsCount, tradingModeConfig, maxPosConfig, autonomyConfig, liveAgg, dryRunAgg] = await Promise.all([
                         prisma.trackedWallet.findMany({ orderBy: { createdAt: 'desc' } }),
                         prisma.signal.findMany({ orderBy: { createdAt: 'desc' }, take: 20 }),
-                        prisma.position.findMany({ orderBy: { createdAt: 'desc' }, take: 20 }),
-                        prisma.lPPosition.findMany({ orderBy: { createdAt: 'desc' }, take: 20 }),
-                        prisma.log.findMany({ orderBy: { createdAt: 'desc' }, take: 50 }),
+                        prisma.position.findMany({ where: userFilter, orderBy: { createdAt: 'desc' }, take: 20 }),
+                        prisma.lPPosition.findMany({ where: userFilter, orderBy: { createdAt: 'desc' }, take: 20 }),
+                        prisma.log.findMany({ orderBy: { createdAt: 'desc' }, take: 200 }),
                         prisma.signal.count(),
-                        prisma.position.count({ where: { status: 'OPEN' } }),
+                        prisma.position.count({ where: { status: 'OPEN', ...userFilter } }),
                         prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } }),
                         prisma.systemConfig.findUnique({ where: { key: 'MAX_POSITION_SIZE' } }),
                         prisma.systemConfig.findUnique({ where: { key: 'lp.defaultMode' } }),
-                        prisma.lPPosition.aggregate({ where: { tradingMode: 'LIVE' }, _sum: { feesCollected: true } }),
-                        prisma.lPPosition.aggregate({ where: { tradingMode: 'DRY_RUN' }, _sum: { feesCollected: true } })
+                        prisma.lPPosition.aggregate({ where: { tradingMode: 'LIVE', ...userFilter }, _sum: { feesCollected: true } }),
+                        prisma.lPPosition.aggregate({ where: { tradingMode: 'DRY_RUN', ...userFilter }, _sum: { feesCollected: true } })
                     ]);
-                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    // Filter logs in memory
+                    let filteredLogs = logs;
+                    if (walletParam) {
+                        filteredLogs = logs.filter(l => l.meta?.wallet === walletParam).slice(0, 50);
+                    }
+                    else {
+                        // Public dashboard: exclude logs tied to a specific user wallet
+                        filteredLogs = logs.filter(l => !l.meta?.wallet).slice(0, 50);
+                    }
+                    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
                     res.end(JSON.stringify({
                         wallets,
                         signals,
                         positions,
                         lpPositions,
-                        logs,
+                        logs: filteredLogs,
+                        user: userRecord,
+                        agents: userRecord?.agents || [],
                         metrics: {
                             totalSignals,
                             openPositionsCount,
@@ -102,7 +375,7 @@ export class TrackerAgent {
                     res.end();
                 }
             }
-            else if (req.method === 'POST' && req.url === '/webhook/alchemy') {
+            else if (req.method === 'POST' && reqUrl.pathname === '/webhook/alchemy') {
                 let body = '';
                 req.on('data', chunk => {
                     body += chunk.toString();
@@ -176,6 +449,14 @@ export class TrackerAgent {
                     }
                     const edgeBufferConfig = await prisma.systemConfig.findUnique({ where: { key: 'lp.rebalance.edgeBufferPct' } });
                     const edgeBufferPct = edgeBufferConfig ? parseInt(edgeBufferConfig.value, 10) : 15;
+                    let currentTick = null;
+                    try {
+                        const slot0 = await getPoolSlot0(position.pool);
+                        currentTick = slot0.currentTick;
+                    }
+                    catch (e) {
+                        console.error('Failed to get currentTick in tracker', e);
+                    }
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({
                         id: position.id,
@@ -185,7 +466,8 @@ export class TrackerAgent {
                         feesCollected: position.feesCollected,
                         ilRunning: position.ilRunning,
                         status: position.status,
-                        edgeBufferPct
+                        edgeBufferPct,
+                        currentTick
                     }));
                 }
                 catch (e) {

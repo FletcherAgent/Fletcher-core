@@ -55,7 +55,7 @@ export class GuardianAgent {
             catch (e) {
                 console.error(`[Guardian] LP monitor loop error:`, e);
             }
-        }, 60 * 1000); // 1 minute (for responsive dashboard PnL updates)
+        }, 15 * 1000); // 15 seconds (for responsive dashboard PnL updates)
     }
     async evaluateLPPosition(pos) {
         if (pos.tokenId.startsWith('PENDING'))
@@ -172,7 +172,9 @@ export class GuardianAgent {
                         // the result is the total fees earned since opening.
                         // Since feesUsd represents TOTAL fees, we don't update lastFeeGrowth here,
                         // we just keep measuring from the entry values!
-                        console.log(`[Guardian] 🔍 SIM fee debug | token=${tokenAddress.slice(0, 10)} fee0=${fee0Eth.toFixed(6)} fee1=${fee1Eth.toFixed(6)} → fees=$${feesUsd.toFixed(4)}`);
+                        const isSim = pos.tokenId.startsWith('SIM-') || pos.tradingMode === 'DRY_RUN';
+                        const logPrefix = isSim ? 'SIM' : 'V4 LIVE';
+                        console.log(`[Guardian] 🔍 ${logPrefix} fee debug | token=${tokenAddress.slice(0, 10)} fee0=${fee0Eth.toFixed(6)} fee1=${fee1Eth.toFixed(6)} → fees=$${feesUsd.toFixed(4)}`);
                     }
                     else {
                         // Fallback to old math if missing DB records (legacy positions)
@@ -325,21 +327,27 @@ export class GuardianAgent {
                 }
             });
             if (exitReason) {
-                console.log(`[Guardian] 🚨 LP ${pos.id.slice(0, 8)} EXIT TRIGGERED: ${exitReason}`);
-                await logEvent('WARN', `[LP] Guardian triggered EXIT: ${exitReason}`, { positionId: pos.id });
-                // Add to TokenBlacklist
-                if (ta && ta.windowHighClose) {
-                    const wethAddr = (process.env.WETH_ADDRESS ?? '').toLowerCase();
-                    const tAddress = pos.token0.toLowerCase() === wethAddr ? pos.token1 : pos.token0;
-                    await prisma.tokenBlacklist.upsert({
-                        where: { tokenAddress: tAddress },
-                        update: { athPriceAtExit: ta.windowHighClose, reason: exitRule || 'MANUAL' },
-                        create: { tokenAddress: tAddress, athPriceAtExit: ta.windowHighClose, reason: exitRule || 'MANUAL' }
-                    });
-                    console.log(`[Guardian] 🚫 Added ${tAddress} to Blacklist (ATH: ${ta.windowHighClose})`);
+                if (pos.mode === 'SEMI' || pos.mode === 'MANUAL') {
+                    // Do not trigger exit or proposal for SEMI/MANUAL modes. User wants full control.
+                    console.log(`[Guardian] 🚨 LP ${pos.id.slice(0, 8)} EXIT condition met: ${exitReason}, but ignored due to ${pos.mode} mode.`);
                 }
-                if (this.onLPCloseSignal)
-                    this.onLPCloseSignal(pos, exitReason);
+                else {
+                    console.log(`[Guardian] 🚨 LP ${pos.id.slice(0, 8)} EXIT TRIGGERED: ${exitReason}`);
+                    await logEvent('WARN', `[LP] Guardian triggered EXIT: ${exitReason}`, { positionId: pos.id });
+                    // Add to TokenBlacklist
+                    if (ta && ta.windowHighClose) {
+                        const wethAddr = (process.env.WETH_ADDRESS ?? '').toLowerCase();
+                        const tAddress = pos.token0.toLowerCase() === wethAddr ? pos.token1 : pos.token0;
+                        await prisma.tokenBlacklist.upsert({
+                            where: { tokenAddress: tAddress },
+                            update: { athPriceAtExit: ta.windowHighClose, reason: exitRule || 'MANUAL' },
+                            create: { tokenAddress: tAddress, athPriceAtExit: ta.windowHighClose, reason: exitRule || 'MANUAL' }
+                        });
+                        console.log(`[Guardian] 🚫 Added ${tAddress} to Blacklist (ATH: ${ta.windowHighClose})`);
+                    }
+                    if (this.onLPCloseSignal)
+                        this.onLPCloseSignal(pos, exitReason);
+                }
             }
             // 6. DAY Mode fallback close
             if (pos.dayMode) {

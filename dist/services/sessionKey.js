@@ -1,17 +1,16 @@
 import { createWalletClient } from 'viem';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { prisma } from '../core/db.js';
-import { createMultiOwnerModularAccount } from "@alchemy/aa-accounts";
-import { LocalAccountSigner, createSmartAccountClient } from "@alchemy/aa-core";
+// import { createMultiOwnerLightAccount } from "@alchemy/aa-accounts"; // Unsupported on Robinhood
+import { LocalAccountSigner, createSmartAccountClient, createSimpleSmartAccount } from "@alchemy/aa-core";
 import { alchemyGasManagerMiddleware } from "@alchemy/aa-alchemy";
 import { http, createPublicClient, parseEther } from "viem";
-import { sessionKeyPluginActions, SessionKeyPermissionsBuilder, SessionKeyAccessListType } from "@alchemy/aa-accounts";
 import { privateKeyToAccount as ethPrivToAccount } from 'viem/accounts';
 /**
- * Initialize Alchemy Smart Account Client (MultiOwnerModularAccount)
+ * Initialize Alchemy Smart Account Client (MultiOwnerLightAccount)
  */
 import { getTierLimits } from "./tierGate.js";
-export async function createSmartAccount(privateKeyHex, tier, accountAddress, selfFunded = false) {
+export async function createSmartAccount(privateKeyHex, tier, accountAddress, selfFunded = false, owners, salt) {
     if (!process.env.ALCHEMY_API_KEY)
         throw new Error("Missing ALCHEMY_API_KEY");
     const rpcUrl = `https://robinhood-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}`;
@@ -30,11 +29,18 @@ export async function createSmartAccount(privateKeyHex, tier, accountAddress, se
         transport: transport,
         chain: robinhoodChain,
         signer,
+        factoryAddress: '0x9406Cc6185a346906296840746125a0E44976454', // SimpleAccount factory on Robinhood
     };
     if (accountAddress) {
         accountParams.accountAddress = accountAddress;
     }
-    const account = await createMultiOwnerModularAccount(accountParams);
+    else {
+        // SimpleAccount uses `index` instead of `salt` and only supports one owner (the signer).
+        // We can still segregate accounts by index.
+        if (salt !== undefined)
+            accountParams.index = salt;
+    }
+    const account = await createSimpleSmartAccount(accountParams);
     const limits = getTierLimits(tier);
     const publicClient = createPublicClient({ transport: transport, chain: robinhoodChain });
     // selfFunded = true: no paymaster middleware (used for LP ops to avoid policy restrictions)
@@ -80,63 +86,18 @@ export async function grantSessionKey(client, mode, swapScope = false) {
     };
 }
 /**
- * Auto-install session key plugin on startup if not already installed.
+ * Session Key functionality is natively handled by MultiOwnerLightAccount now.
+ * The backend admin acts as a co-owner, and we no longer need the ERC-6900 session key plugin.
  */
 export async function installSessionKeyPluginAndDelegate(tier) {
-    const envKey = process.env.LP_PRIVATE_KEY;
-    if (!envKey) {
-        console.log("[SessionKey] No LP_PRIVATE_KEY found in .env, skipping auto-install.");
-        return;
-    }
-    // 1. Get Master Client
-    const masterClient = await createSmartAccount(envKey, tier);
-    const accountAddress = masterClient.account.address;
-    // 2. Check if active session key exists in DB
-    const existingKey = await prisma.sessionKey.findFirst({
-        where: {
-            userId: accountAddress,
-            status: 'ACTIVE',
-            expiry: { gt: new Date() }
-        }
-    });
-    if (existingKey) {
-        console.log(`[SessionKey] Found existing active Session Key for ${accountAddress}. Skipping install.`);
-        return;
-    }
-    console.log(`[SessionKey] Automatically installing Session Key Plugin for ${accountAddress}...`);
-    // 3. Grant a new soft session key in DB
-    const { keyAddress } = await grantSessionKey(masterClient, "FULL");
-    // 4. In a real LIVE mode, we'd broadcast the addSessionKey transaction on-chain via Alchemy
-    const config = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
-    const tradingMode = config?.value || 'LIVE';
-    if (tradingMode === 'LIVE') {
-        try {
-            const permissions = new SessionKeyPermissionsBuilder()
-                .setContractAccessControlType(SessionKeyAccessListType.ALLOW_ALL_ACCESS)
-                .encode();
-            const sessionClient = masterClient.extend(sessionKeyPluginActions);
-            const res = await sessionClient.addSessionKey({
-                key: keyAddress,
-                permissions, // Root access (Option A)
-                tag: "0x0000000000000000000000000000000000000000000000000000000000000000",
-            });
-            console.log(`[SessionKey] On-Chain Plugin Installation Tx: ${res.hash}`);
-            await masterClient.waitForUserOperationTransaction({ hash: res.hash });
-            console.log(`[SessionKey] Plugin installation mined successfully.`);
-        }
-        catch (e) {
-            console.error(`[SessionKey] Failed to install plugin on-chain: ${e.message}`);
-        }
-    }
-    else {
-        console.log(`[SessionKey] [DRY_RUN] Simulated on-chain plugin installation for ${keyAddress}`);
-    }
+    console.log(`[SessionKey] Skipping Modular Account plugin installation (Using LightAccount)`);
 }
 /**
  * Ensure the smart account has enough ETH for gas.
  * If not, transfers from the EOA signer (PRIVATE_KEY env).
  */
-export async function ensureSmartAccountFunded(accountAddress, minEth = parseEther('0.005')) {
+export async function ensureSmartAccountFunded(accountAddress, minEth = parseEther('0.001') // ~$3 buffer (not fully spent, just required by Bundler precheck for high gasLimit)
+) {
     const rpcUrl = `https://robinhood-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}`;
     const chain = {
         id: 4663, name: 'Robinhood',
@@ -149,9 +110,9 @@ export async function ensureSmartAccountFunded(accountAddress, minEth = parseEth
         console.log(`[SessionKey] Smart account ETH sufficient: ${Number(balance) / 1e18} ETH`);
         return;
     }
-    const eoaKey = process.env.PRIVATE_KEY;
+    const eoaKey = (process.env.LP_PRIVATE_KEY || process.env.PRIVATE_KEY);
     if (!eoaKey)
-        throw new Error('[SessionKey] PRIVATE_KEY not set — cannot fund smart account');
+        throw new Error('[SessionKey] PRIVATE_KEY or LP_PRIVATE_KEY not set — cannot fund smart account');
     const eoaAccount = ethPrivToAccount(eoaKey);
     const walletC = createWalletClient({ account: eoaAccount, transport: http(rpcUrl), chain });
     const needed = minEth - balance;
@@ -231,10 +192,10 @@ export async function buildAndSendLPUserOperation(client, calls) {
     const isDeployed = codeJson.result && codeJson.result !== '0x';
     const initCode = isDeployed ? '0x' : await client.account.getInitCode();
     // Empirically-validated gas limits for LP operations (approve+swap+approveNPM+approveToken+mint)
-    // Measured from successful on-chain execution. Using 2× headroom for safety.
-    const callGasLimit = 0x150000n; // ~1.37M (plenty for swap)
-    const verifGasLimit = 0x1b000n; // ~110k (forces efficiency ratio to ~0.44, above the 0.4 requirement)
-    const preVerifGas = 0x20000n; // ~131k
+    // Measured from successful on-chain execution.
+    const callGasLimit = 0x200000n; // ~2.1M (plenty for complex swap + mint batch)
+    const verifGasLimit = isDeployed ? 0xc350n : 0x90000n; // ~50k if deployed (to satisfy Alchemy >0.4 efficiency rule), ~589k if deploying
+    const preVerifGas = 0x15000n; // ~86k
     const userOp = {
         sender: client.account.address,
         nonce: `0x${nonce.toString(16)}`,
@@ -257,8 +218,23 @@ export async function buildAndSendLPUserOperation(client, calls) {
         body: JSON.stringify({ jsonrpc: '2.0', method: 'eth_sendUserOperation', params: [signedUO, ENTRY_POINT], id: 1 })
     });
     const sendJson = await sendResp.json();
-    if (sendJson.error)
+    if (sendJson.error) {
+        if (sendJson.error.message.includes('AA13')) {
+            console.log(`[SessionKey] AA13 error detected. RPC sync issue likely (account already deployed). Retrying without initCode...`);
+            userOp.initCode = '0x';
+            const signedUORetry = await client.signUserOperation({ uoStruct: userOp });
+            const sendRespRetry = await fetch(rpcUrl, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ jsonrpc: '2.0', method: 'eth_sendUserOperation', params: [signedUORetry, ENTRY_POINT], id: 2 })
+            });
+            const sendJsonRetry = await sendRespRetry.json();
+            if (sendJsonRetry.error) {
+                throw new Error(`[Alchemy] UserOp send failed after AA13 retry: ${JSON.stringify(sendJsonRetry.error)}`);
+            }
+            return sendJsonRetry.result;
+        }
         throw new Error(`[Alchemy] UserOp send failed: ${JSON.stringify(sendJson.error)}`);
+    }
     const uoHash = sendJson.result;
     console.log(`[Alchemy] UserOp submitted. Hash: ${uoHash}`);
     // Poll for receipt with 3-minute timeout
@@ -288,31 +264,26 @@ export async function getMainAccountClient(tier, selfFunded = false) {
     const pk = process.env.LP_PRIVATE_KEY;
     if (!pk)
         throw new Error("LP_PRIVATE_KEY not set");
-    return await createSmartAccount(pk, tier, undefined, selfFunded);
+    const envAcc = process.env.SMART_ACCOUNT_ADDRESS;
+    return await createSmartAccount(pk, tier, envAcc, selfFunded);
 }
-export async function getSessionKeyClient(modeRequired, tier, selfFunded = false) {
-    const config = await prisma.systemConfig.findUnique({ where: { key: 'USE_SESSION_KEY' } });
-    const useSessionKey = config?.value === 'true';
-    if (!useSessionKey) {
-        return await getMainAccountClient(tier, selfFunded);
-    }
-    // Check for active session key in the database
-    const validKeys = await prisma.sessionKey.findMany({
-        where: {
-            status: 'ACTIVE',
-            expiry: { gt: new Date() }
+export async function getSessionKeyClient(modeRequired, tier, selfFunded = false, userWalletAddress) {
+    const pk = process.env.LP_PRIVATE_KEY;
+    if (!pk)
+        throw new Error("LP_PRIVATE_KEY not set");
+    let accountAddress = process.env.SMART_ACCOUNT_ADDRESS;
+    if (userWalletAddress && !accountAddress) {
+        const agent = await prisma.agent.findFirst({
+            where: { user: { walletAddress: userWalletAddress } }
+        });
+        if (agent?.smartAccountAddress) {
+            accountAddress = agent.smartAccountAddress;
         }
-    });
-    const validKey = validKeys.find(k => {
-        const scope = k.scope;
-        return scope && (scope.mode === modeRequired || scope.mode === 'FULL');
-    });
-    if (!validKey || !validKey.privateKey) {
-        throw new Error(`[SessionKey] ZERO-CUSTODY VIOLATION: No valid SessionKey found for mode ${modeRequired}. Ensure auto-install ran successfully.`);
+        else {
+            // Fallback: If not in DB, recompute it with userWalletAddress as salt.
+            const adminAddress = ethPrivToAccount(pk).address;
+            return await createSmartAccount(pk, tier, undefined, selfFunded, [userWalletAddress, adminAddress], BigInt(userWalletAddress));
+        }
     }
-    // Use the session key's private key to sign user operations
-    const pk = validKey.privateKey;
-    const accountAddress = validKey.userId;
-    // Create client using the SESSION KEY (Zero Custody)
     return await createSmartAccount(pk, tier, accountAddress, selfFunded);
 }

@@ -7,49 +7,49 @@ datasource db {
 }
 
 model User {
-  id               String       @id @default(uuid())
-  walletAddress    String       @unique
-  telegramChatId   String?      @unique
+  id               String    @id @default(uuid())
+  walletAddress    String    @unique
+  telegramChatId   String?   @unique
   telegramUsername String?
   linkCode         String?
   linkCodeExpiry   DateTime?
-  createdAt        DateTime     @default(now())
+  createdAt        DateTime  @default(now())
 
-  agents           Agent[]
-  lpPositions      LPPosition[]
-  positions        Position[]
+  agents      Agent[]
+  lpPositions LPPosition[]
+  positions   Position[]
 }
 
 model Agent {
-  id                  String   @id @default(uuid())
-  userId              String
-  user                User     @relation(fields: [userId], references: [id])
-  
-  name                String
-  smartAccountAddress String?  @unique
-  
-  status              String   @default("PENDING_FUNDING") // PENDING_FUNDING, ACTIVE, PAUSED_TIER, STOPPED
-  strategy            String   
-  mode                String   @default("SEMI") // MANUAL, SEMI
-  capital             Float    @default(0)
-  
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
+  id     String @id @default(uuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
 
-  lpPositions         LPPosition[] 
-  positions           Position[]
-  pendingActions      PendingAction[]
+  name                String
+  smartAccountAddress String? @unique
+
+  status   String @default("PENDING_FUNDING") // PENDING_FUNDING, ACTIVE, PAUSED_TIER, STOPPED
+  strategy String
+  mode     String @default("SEMI") // MANUAL, SEMI
+  capital  Float  @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lpPositions    LPPosition[]
+  positions      Position[]
+  pendingActions PendingAction[]
 }
 
 model PendingAction {
-  id          String   @id @default(uuid())
-  agentId     String
-  agent       Agent    @relation(fields: [agentId], references: [id])
-  
-  type        String   // "OPEN_POSITION", "CLOSE_POSITION"
-  payload     Json     
-  status      String   @default("PENDING") // PENDING, APPROVED, REJECTED, EXECUTED
-  createdAt   DateTime @default(now())
+  id      String @id @default(uuid())
+  agentId String
+  agent   Agent  @relation(fields: [agentId], references: [id])
+
+  type      String // "OPEN_POSITION", "CLOSE_POSITION"
+  payload   Json
+  status    String   @default("PENDING") // PENDING, APPROVED, REJECTED, EXECUTED
+  createdAt DateTime @default(now())
 }
 
 model Position {
@@ -73,10 +73,10 @@ model Position {
   tradingMode  String   @default("LIVE")
   exitReason   String?
 
-  userId       String?
-  user         User?    @relation(fields: [userId], references: [id])
-  agentId      String?
-  agent        Agent?   @relation(fields: [agentId], references: [id])
+  userId  String?
+  user    User?   @relation(fields: [userId], references: [id])
+  agentId String?
+  agent   Agent?  @relation(fields: [agentId], references: [id])
 }
 
 model Signal {
@@ -150,46 +150,48 @@ model DexProtocol {
 
 /// Tracks Uniswap V3 LP positions managed by LP Engine
 model LPPosition {
-  id              String   @id @default(uuid())
-  tokenId         String   @unique
-  txHash          String?
-  exitTxHash      String?
-  pool            String
-  token0          String
-  token1          String
-  token0Symbol    String?
-  token1Symbol    String?
-  feeTier         Int
-  tickLower       Int
-  tickUpper       Int
-  entryValue      Float
-  entryTick       Int      @default(0)
+  id                 String   @id @default(uuid())
+  tokenId            String   @unique
+  erc8004Id          String?
+  identityTxHash     String?
+  txHash             String?
+  exitTxHash         String?
+  pool               String
+  token0             String
+  token1             String
+  token0Symbol       String?
+  token1Symbol       String?
+  feeTier            Int
+  tickLower          Int
+  tickUpper          Int
+  entryValue         Float
+  entryTick          Int      @default(0)
   simulatedLiquidity String? // For DRY_RUN simulated positions
-  feesCollected   Float    @default(0)
-  harvestedFees   Float    @default(0)
-  ilRunning       Float    @default(0)
-  feeAboveILHours Int      @default(0)
-  ilAboveFeeHours Int      @default(0)
+  feesCollected      Float    @default(0)
+  harvestedFees      Float    @default(0)
+  ilRunning          Float    @default(0)
+  feeAboveILHours    Int      @default(0)
+  ilAboveFeeHours    Int      @default(0)
   lastFeeGrowth0     String?
   lastFeeGrowth1     String?
   /// Tracks consecutive minutes position has been out of range (for grace period)
-  outOfRangeMinutes Int    @default(0)
-  mode            String   @default("MANUAL")
-  status          String   @default("PENDING")
-  dayMode         Boolean  @default(false)
-  nightMode       Boolean  @default(false)
-  sessionKeyId    String?
-  tradingMode     String   @default("DRY_RUN")
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-  source          String   @default("SYSTEM")
-  managerAddress  String?
-  sentimentStatus String?
+  outOfRangeMinutes  Int      @default(0)
+  mode               String   @default("MANUAL")
+  status             String   @default("PENDING")
+  dayMode            Boolean  @default(false)
+  nightMode          Boolean  @default(false)
+  sessionKeyId       String?
+  tradingMode        String   @default("DRY_RUN")
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  source             String   @default("SYSTEM")
+  managerAddress     String?
+  sentimentStatus    String?
 
-  userId          String?
-  user            User?    @relation(fields: [userId], references: [id])
-  agentId         String?
-  agent           Agent?   @relation(fields: [agentId], references: [id])
+  userId  String?
+  user    User?   @relation(fields: [userId], references: [id])
+  agentId String?
+  agent   Agent?  @relation(fields: [agentId], references: [id])
 }
 
 model SessionKey {
@@ -205,47 +207,47 @@ model SessionKey {
 }
 
 model Watchlist {
-  id              String   @id @default(uuid())
-  tokenAddress    String   @unique
+  id              String    @id @default(uuid())
+  tokenAddress    String    @unique
   symbol          String?
   name            String?
-  quoteSymbol     String?  // WETH, USDG, etc.
-  quoteAddress    String?  // The actual 0x address of the quote token
+  quoteSymbol     String? // WETH, USDG, etc.
+  quoteAddress    String? // The actual 0x address of the quote token
   poolAddress     String?
-  addedAt         DateTime @default(now())
+  addedAt         DateTime  @default(now())
   lastCheckedAt   DateTime?
-  tradingMode     String   @default("LIVE")
-  status          String   @default("WATCHING") // WATCHING, EXECUTED, DROPPED
+  tradingMode     String    @default("LIVE")
+  status          String    @default("WATCHING") // WATCHING, EXECUTED, DROPPED
   athClose        Float?
-  timeframe       Int      @default(15)
+  timeframe       Int       @default(15)
   sentimentStatus String?
 }
 
 model TokenBlacklist {
-  id              String   @id @default(uuid())
-  tokenAddress    String   @unique
-  athPriceAtExit  Float?
-  reason          String?
-  blacklistedAt   DateTime @default(now())
+  id             String   @id @default(uuid())
+  tokenAddress   String   @unique
+  athPriceAtExit Float?
+  reason         String?
+  blacklistedAt  DateTime @default(now())
 }
 
 model FactoryRegistry {
-  id            String   @id @default(uuid())
-  name          String   // "hood.fun", "NOXA", etc.
-  address       String   @unique
-  status        String   @default("active") // "active" | "dead" | "dormant"
-  deploys7d     Int      @default(0)         
-  consecutiveLivenessFails Int @default(0)
-  lastDeployAt  DateTime?
-  updatedAt     DateTime @updatedAt
-  createdAt     DateTime @default(now())
+  id                       String    @id @default(uuid())
+  name                     String // "hood.fun", "NOXA", etc.
+  address                  String    @unique
+  status                   String    @default("active") // "active" | "dead" | "dormant"
+  deploys7d                Int       @default(0)
+  consecutiveLivenessFails Int       @default(0)
+  lastDeployAt             DateTime?
+  updatedAt                DateTime  @updatedAt
+  createdAt                DateTime  @default(now())
 }
 
 model LivenessCache {
-  tokenAddress  String   @id
-  verdict       String   // "ALIVE" | "DEAD"
-  failedCheck   String?  // "L1" | "L2" | etc.
-  failReason    String?  
-  expiresAt     DateTime 
-  createdAt     DateTime @default(now())
+  tokenAddress String   @id
+  verdict      String // "ALIVE" | "DEAD"
+  failedCheck  String? // "L1" | "L2" | etc.
+  failReason   String?
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
 }

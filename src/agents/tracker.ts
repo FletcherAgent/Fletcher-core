@@ -170,12 +170,35 @@ export class TrackerAgent {
               strategy: body.strategy || 'FULL_RANGE',
               mode: body.mode || 'SEMI',
               capital: parseFloat(body.capital) || 0,
-              status: 'PENDING_FUNDING'
+              status: 'PENDING_IDENTITY' // Changed from PENDING_FUNDING
             }
           });
 
+          // 4. Generate & Upload ERC-8004 Registration Metadata
+          let metadataUrl = "";
+          try {
+            const { uploadAgentMetadata } = await import('../services/supabase.js');
+            const metadata = {
+              agentId: agent.id,
+              owner: wallet,
+              chain: "4663",
+              capability: agent.strategy,
+              version: "v2.0"
+            };
+            metadataUrl = await uploadAgentMetadata(agent.id, metadata);
+          } catch (err: any) {
+             console.error("Failed to upload metadata to Supabase:", err);
+          }
+
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify({ success: true, agent }));
+          return res.end(JSON.stringify({ 
+            success: true, 
+            agent,
+            mintInstruction: {
+              contract: "0x7dae22b9ff332b894b419ba8670c14cc0d1d144e",
+              tokenURI: metadataUrl
+            }
+          }));
         } catch (e) {
           console.error(e);
           res.writeHead(500); return res.end();

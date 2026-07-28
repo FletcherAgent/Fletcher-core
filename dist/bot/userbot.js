@@ -15,7 +15,7 @@ export async function startUserbot(fletcherBot, orchestrator) {
     const apiHash = process.env.TELEGRAM_API_HASH || '';
     const sessionStr = process.env.TELEGRAM_SESSION || '';
     const targetGroupStr = process.env.TELEGRAM_ALPHA_GROUP_ID || '';
-    const ownerChatId = process.env.TELEGRAM_OWNER_ID || ''; // Your Telegram ID to receive alerts
+    const ownerChatId = process.env.TELEGRAM_CHAT_ID || process.env.TELEGRAM_OWNER_ID || ''; // Target for alerts
     if (!apiId || !apiHash || !sessionStr) {
         console.log('⚠️ [Userbot] Incomplete configuration (API_ID, API_HASH, or SESSION is missing). Userbot is not running.');
         return;

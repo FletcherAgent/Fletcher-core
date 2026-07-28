@@ -30,6 +30,28 @@ export class Orchestrator {
         this.tracker = new TrackerAgent();
         // ─── LP Engine proposal handler ────────────────────────────────────────
         this.lpEngine.onProposal = async (proposal) => {
+            // 1. User Agent Flow (Dual Approval via PendingAction)
+            if (proposal.agentId) {
+                const agent = await prisma.agent.findUnique({ where: { id: proposal.agentId }, include: { user: true } });
+                if (!agent)
+                    return;
+                // Ensure no bigints are present (LPProposal doesn't use bigints currently)
+                const safePayload = { ...proposal };
+                const pendingAction = await prisma.pendingAction.create({
+                    data: {
+                        agentId: agent.id,
+                        type: proposal.type,
+                        payload: safePayload,
+                        status: 'PENDING'
+                    }
+                });
+                if (agent.user.telegramChatId) {
+                    const msg = `🔔 <b>Agent Action Pending</b>\n\nAgent: <b>${agent.name}</b>\nAction: <b>${proposal.type}</b>\nToken: <b>${proposal.token0Symbol}/${proposal.token1Symbol}</b>\n\n${proposal.description.replace(/\*/g, '')}\n\n👉 <a href="https://fletcher.app/dashboard/pending-actions">Approve via Dashboard</a>`;
+                    this.bot.api.sendMessage(agent.user.telegramChatId, msg, { parse_mode: 'HTML' }).catch(console.error);
+                }
+                return; // Stop here, do not execute flagship logic
+            }
+            // 2. Flagship Agent Flow (Global Group Approval)
             const chatId = process.env.TELEGRAM_CHAT_ID;
             if (!chatId) {
                 console.warn('[Orchestrator] TELEGRAM_CHAT_ID not set — LP proposal dropped');
@@ -480,6 +502,12 @@ export class Orchestrator {
             }
             else {
                 console.warn(`[Orchestrator] Risk Warden rejected Alpha signal for ${tokenAddress}. Reason: ${riskEvaluation.reason}`);
+                if (riskEvaluation.reason === 'INSUFFICIENT_FUNDS_AFTER_BUFFER') {
+                    const chatId = process.env.TELEGRAM_CHAT_ID || process.env.TELEGRAM_OWNER_ID || '';
+                    if (chatId) {
+                        await this.bot.api.sendMessage(chatId, `⚠️ *Alpha Signal Rejected*\nAddress: \`${tokenAddress}\`\nReason: Insufficient WETH/USDG balance to meet the minimum trade size (gas buffer reserved).`, { parse_mode: 'Markdown' }).catch(err => console.error('[Orchestrator] Failed to send insufficient funds alert', err));
+                    }
+                }
                 this.processingTokens.delete(lowerToken);
             }
         }

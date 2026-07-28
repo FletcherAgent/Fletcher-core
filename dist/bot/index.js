@@ -1,6 +1,9 @@
 import { Bot } from "grammy";
 import * as dotenv from "dotenv";
 import { Orchestrator } from "../core/orchestrator.js";
+import { exec } from 'child_process';
+import util from 'util';
+const execPromise = util.promisify(exec);
 import { connectDb, prisma } from "../core/db.js";
 import { screenPairs } from "../services/gmgn.js";
 import { getUserTier, clearTierCache } from "../services/tierGate.js";
@@ -144,12 +147,57 @@ setInterval(() => {
     }
 }, 10000);
 // -----------------------
+const ADMIN_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+// Helper to check if it's admin
+const isAdmin = (ctx) => {
+    return ctx.chat?.id.toString() === ADMIN_CHAT_ID;
+};
+// Middleware to block non-admins
+const adminOnly = async (ctx, next) => {
+    if (isAdmin(ctx)) {
+        await next();
+    }
+    else {
+        await ctx.reply("⛔ Unauthorized. This command is restricted to Fletcher Admins.");
+    }
+};
+// --- PUBLIC COMMANDS ---
 bot.command("start", (ctx) => {
-    ctx.reply("🟢 Fletcher Agent Core is online.\nRobinhood Chain Active Range Manager.\n\nType /help to see the list of commands.");
+    ctx.reply("🟢 Fletcher Agent is online.\n\nType /link <code> to bind your web dashboard account.");
 });
+bot.command("link", async (ctx) => {
+    const code = ctx.match?.trim();
+    if (!code) {
+        return ctx.reply("❌ Invalid format! Usage: /link <code>");
+    }
+    // Attempt to find user with this link code
+    const user = await prisma.user.findFirst({
+        where: {
+            linkCode: code,
+            linkCodeExpiry: { gt: new Date() } // Must not be expired
+        }
+    });
+    if (!user) {
+        return ctx.reply("❌ Link code is invalid or has expired. Please generate a new one from the dashboard.");
+    }
+    // Update user with telegram details
+    await prisma.user.update({
+        where: { id: user.id },
+        data: {
+            telegramChatId: ctx.chat.id.toString(),
+            telegramUsername: ctx.from?.username || "",
+            linkCode: null, // Consume code
+            linkCodeExpiry: null
+        }
+    });
+    ctx.reply("✅ Successfully linked your Telegram to your Fletcher Dashboard! You will now receive agent notifications here.");
+});
+// --- ADMIN COMMANDS ---
+// Apply adminOnly middleware to everything below this line
+bot.use(adminOnly);
 bot.command("help", (ctx) => {
     const helpText = `
-🤖 <b>Fletcher Bot Commands</b> 🤖
+🤖 <b>Fletcher Admin Bot Commands</b> 🤖
 
 🚀 <b>Core System</b>
 /start - Start the bot and show initial status.
@@ -426,7 +474,7 @@ bot.command("lp", async (ctx) => {
         return ctx.reply("❌ Wallet address not configured in ENV.");
     const tier = await getUserTier(wallet);
     if (tier === 0 && sub !== 'status') {
-        return ctx.reply("❌ **Access Denied**\nYou need at least Tier 1 (10,000 $FLETCH) to use LP features.", { parse_mode: 'Markdown' });
+        return ctx.reply("❌ **Access Denied**\nYou need at least Tier 1 (1,000,000 $FLETCH) to use LP features.", { parse_mode: 'Markdown' });
     }
     const lpEngine = orchestrator.getLPEngine();
     // /lp status
@@ -708,6 +756,37 @@ bot.command('sessionkey', async (ctx) => {
         ctx.reply(`❌ Failed to generate Session Key: ${e?.message}`);
     }
 });
+bot.command('deploy_live', async (ctx) => {
+    if (!ctx.message || !('text' in ctx.message))
+        return;
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.reply('Usage: `/deploy_live <poolAddress>`\nExample: `/deploy_live 0x10cc6bd38112cac182db90b6a71d8bb5939526ba`', { parse_mode: 'Markdown' });
+    }
+    const poolAddress = args[1].trim();
+    // Basic validation of Ethereum address
+    if (!/^0x[a-fA-F0-9]{40}$/.test(poolAddress)) {
+        return ctx.reply('❌ Invalid Ethereum address format for pool.');
+    }
+    const msg = await ctx.reply(`🚀 *Starting Live LP Deployment for Pool:*\n\`${poolAddress}\`\n\n⏳ Executing script, please wait...`, { parse_mode: 'Markdown' });
+    try {
+        const { stdout, stderr } = await execPromise(`npx tsx scripts/deploy-live-lp.ts ${poolAddress}`);
+        // Telegram message length limit is 4096, so we truncate stdout if it's too long
+        const outStr = stdout.trim();
+        const truncated = outStr.length > 3500 ? outStr.substring(outStr.length - 3500) : outStr;
+        await ctx.reply(`✅ *Deployment Script Completed*\n\n*Logs (Tail):*\n\`\`\`\n${truncated}\n\`\`\``, { parse_mode: 'Markdown', reply_to_message_id: msg.message_id });
+        if (stderr && stderr.trim().length > 0) {
+            const errStr = stderr.trim();
+            const errTruncated = errStr.length > 500 ? errStr.substring(errStr.length - 500) : errStr;
+            await ctx.reply(`⚠️ *Warnings/Errors:*\n\`\`\`\n${errTruncated}\n\`\`\``, { parse_mode: 'Markdown' });
+        }
+    }
+    catch (e) {
+        const errorStr = (e.stdout || e.message || String(e)).trim();
+        const errTruncated = errorStr.length > 3500 ? errorStr.substring(errorStr.length - 3500) : errorStr;
+        await ctx.reply(`❌ *Deployment Script Failed!*\n\n\`\`\`\n${errTruncated}\n\`\`\``, { parse_mode: 'Markdown', reply_to_message_id: msg.message_id });
+    }
+});
 // ─── LP INLINE KEYBOARD CALLBACKS ───────────────────────────────────────────
 bot.on('callback_query:data', async (ctx) => {
     const data = ctx.callbackQuery.data;
@@ -759,11 +838,22 @@ bot.on('callback_query:data', async (ctx) => {
             }
             return;
         }
-        // LIVE — calldata is already built during proposal creation
-        // Only notification here; actual tx broadcast requires wallet signer
-        // (same as existing trench flow: user copies calldata or uses web3 wallet)
-        await ctx.editMessageText(`⏳ *LP ${type} approved.* Broadcasting transaction...\n` +
-            `_(Check your wallet or Fletcher web dashboard for tx status)_`, { parse_mode: 'Markdown' });
+        // LIVE — execute using Alchemy Session Key (forceExecute = true)
+        try {
+            await ctx.editMessageText(`⏳ *LP ${type} approved.* Executing via Alchemy Session Key...`, { parse_mode: 'Markdown' });
+            if (type === 'CLOSE') {
+                await lpEngine.proposeClosePosition(posId, 'Manual Telegram Approve', true);
+            }
+            else if (type === 'HARVEST') {
+                await lpEngine.proposeHarvest(posId, true);
+            }
+            else if (type === 'OPEN') {
+                await ctx.editMessageText(`❌ *LP OPEN cannot be executed directly from Telegram.* Use manual scripts.`, { parse_mode: 'Markdown' });
+            }
+        }
+        catch (err) {
+            await ctx.editMessageText(`❌ *Execution Failed:* ${err.message}`, { parse_mode: 'Markdown' });
+        }
         return;
     }
     // Blacklist approve/reject
