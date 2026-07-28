@@ -906,14 +906,20 @@ bot.on('callback_query:data', async (ctx) => {
       return;
     }
 
-    // LIVE — calldata is already built during proposal creation
-    // Only notification here; actual tx broadcast requires wallet signer
-    // (same as existing trench flow: user copies calldata or uses web3 wallet)
-    await ctx.editMessageText(
-      `⏳ *LP ${type} approved.* Broadcasting transaction...\n` +
-      `_(Check your wallet or Fletcher web dashboard for tx status)_`,
-      { parse_mode: 'Markdown' }
-    );
+    // LIVE — execute using Alchemy Session Key (forceExecute = true)
+    try {
+      await ctx.editMessageText(`⏳ *LP ${type} approved.* Executing via Alchemy Session Key...`, { parse_mode: 'Markdown' });
+      
+      if (type === 'CLOSE') {
+        await lpEngine.proposeClosePosition(posId, 'Manual Telegram Approve', true);
+      } else if (type === 'HARVEST') {
+        await lpEngine.proposeHarvest(posId, true);
+      } else if (type === 'OPEN') {
+        await ctx.editMessageText(`❌ *LP OPEN cannot be executed directly from Telegram.* Use manual scripts.`, { parse_mode: 'Markdown' });
+      }
+    } catch (err: any) {
+      await ctx.editMessageText(`❌ *Execution Failed:* ${err.message}`, { parse_mode: 'Markdown' });
+    }
     return;
   }
 

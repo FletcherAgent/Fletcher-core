@@ -748,7 +748,7 @@ export class LPEngineAgent {
 
   public async proposeOpenPosition(
     candidate: { token: GMGNToken; score: number; grokScore?: number; grokLabel?: string; sentimentStatus?: string },
-    options: { dayMode: boolean; nightMode: boolean; nightRange?: number; strategyMode?: boolean; lowerPct?: number; upperPct?: number; source?: string; agentId?: string; wallet?: string; mode?: 'MANUAL' | 'SEMI' | 'FULL' }
+    options: { dayMode: boolean; nightMode: boolean; nightRange?: number; strategyMode?: boolean; lowerPct?: number; upperPct?: number; source?: string; agentId?: string; wallet?: string; mode?: 'MANUAL' | 'SEMI' | 'FULL'; executeNow?: boolean }
   ): Promise<void> {
     const config = await loadLPConfig();
     const token = candidate.token;
@@ -1139,7 +1139,7 @@ export class LPEngineAgent {
       description,
     };
 
-    if (currentMode === 'FULL') {
+    if (currentMode === 'FULL' || options.executeNow) {
       if (isDryRun) {
         proposal.description = `✅ *Auto-Opened LP (Simulated)*\n` + proposal.description;
         if (this.onProposal) await this.onProposal(proposal);
@@ -1359,7 +1359,7 @@ export class LPEngineAgent {
    * Build proposal to close LP position (decrease 100% -> collect -> burn).
    * Called by Guardian (LPCloseSignal) or user via /lp close <id>.
    */
-  async proposeClosePosition(positionId: string, reason: string): Promise<void> {
+  async proposeClosePosition(positionId: string, reason: string, forceExecute: boolean = false): Promise<void> {
     const pos = await prisma.lPPosition.findUnique({ where: { id: positionId }, include: { user: true } });
     const userWallet = pos?.user?.walletAddress;
     if (!pos || pos.status !== 'OPEN') {
@@ -1432,7 +1432,7 @@ export class LPEngineAgent {
       description,
     };
 
-    if (pos.mode === 'FULL') {
+    if (pos.mode === 'FULL' || forceExecute) {
       if (pos.tradingMode === 'DRY_RUN') {
         await prisma.lPPosition.update({
           where: { id: positionId },
@@ -1497,7 +1497,7 @@ export class LPEngineAgent {
    * Collect fee from all OPEN eligible positions.
    * Called via /harvest command or Guardian LPCompoundSignal.
    */
-  async proposeHarvest(positionId?: string): Promise<void> {
+  async proposeHarvest(positionId?: string, forceExecute: boolean = false): Promise<void> {
     const where = positionId
       ? { id: positionId, status: 'OPEN' }
       : { status: 'OPEN' };
@@ -1545,7 +1545,7 @@ export class LPEngineAgent {
 
       await logEvent('INFO', `[LP] HARVEST Proposal created for ${pos.token0Symbol}/${pos.token1Symbol}`, { positionId: pos.id });
 
-      if (pos.mode === 'SEMI' || pos.mode === 'FULL') {
+      if (pos.mode === 'SEMI' || pos.mode === 'FULL' || forceExecute) {
         if (pos.tradingMode === 'DRY_RUN') {
           proposal.description = `✅ *Auto-Harvested LP (Simulated)*\n` + proposal.description;
           await prisma.lPPosition.update({

@@ -147,7 +147,7 @@ async function main() {
   try {
     await engine.proposeOpenPosition(
       { token: token as any, score: 90, sentimentStatus: 'BULLISH' },
-      { dayMode: true, nightMode: false, source: 'manual-test', mode: 'SEMI' }
+      { dayMode: true, nightMode: false, source: 'manual-test', mode: 'SEMI', executeNow: true }
     );
     console.log(`\n✅ Production execution finished successfully! Transaction sent.`);
   } catch (e: any) {
