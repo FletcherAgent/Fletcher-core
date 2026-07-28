@@ -120,36 +120,49 @@ export class TrackerAgent {
       }
 
       if (req.method === 'POST' && reqUrl.pathname === '/api/agents/deploy') {
+        console.log(`[API /deploy] Received request from ${req.socket.remoteAddress}`);
         try {
           const wallet = req.headers['x-wallet-address'] as string;
+          console.log(`[API /deploy] Wallet header: ${wallet}`);
           if (!wallet) {
+            console.error(`[API /deploy] Error: Missing wallet header`);
             res.writeHead(400); return res.end(JSON.stringify({ error: 'Missing wallet header' }));
           }
 
           // 1. Tier Gating Check
+          console.log(`[API /deploy] Checking tier for wallet: ${wallet}`);
           const { getUserTier } = await import('../services/tierGate.js');
           const tier = await getUserTier(wallet);
+          console.log(`[API /deploy] Tier resolved: ${tier}`);
           if (tier === 0) { // Standard tier (No FLETCH)
+            console.warn(`[API /deploy] Rejected: Insufficient FLETCH balance`);
             res.writeHead(403); 
             return res.end(JSON.stringify({ error: 'Insufficient $FLETCH balance. Minimum 1M required.' }));
           }
 
           const body = await getJsonBody(req);
+          console.log(`[API /deploy] Request body parsed successfully`);
           
           let user = await prisma.user.findUnique({ where: { walletAddress: wallet } });
           if (!user) {
+            console.log(`[API /deploy] User not found, creating new user for: ${wallet}`);
             user = await prisma.user.create({ data: { walletAddress: wallet } });
           }
 
           // 2. Predict Smart Account (Real Counterfactual CREATE2 via LightAccount)
+          console.log(`[API /deploy] Preparing Smart Account via viem/LightAccount`);
           const { createSmartAccount } = await import('../services/sessionKey.js');
           const { privateKeyToAccount } = await import('viem/accounts');
           const pk = (process.env.LP_PRIVATE_KEY || process.env.PRIVATE_KEY) as `0x${string}`;
-          if (!pk) throw new Error("No admin private key found for Smart Account generation.");
+          if (!pk) {
+            console.error(`[API /deploy] Error: No admin private key found`);
+            throw new Error("No admin private key found for Smart Account generation.");
+          }
           const adminAddress = privateKeyToAccount(pk).address;
           
           // MultiOwnerLightAccount gives co-ownership to both User and Admin.
           // Using User's wallet as the CREATE2 salt guarantees a unique address per user.
+          console.log(`[API /deploy] Creating LightAccount for wallet: ${wallet}`);
           const client = await createSmartAccount(
             pk, 
             tier, 
@@ -159,9 +172,11 @@ export class TrackerAgent {
             BigInt(wallet as string)
           );
           const predictedAddress = client.account.address;
+          console.log(`[API /deploy] Smart Account Address predicted: ${predictedAddress}`);
 
           // 3. Create Agent
           const agentName = body.name || generateAgentName();
+          console.log(`[API /deploy] Saving new Agent to database: ${agentName}`);
           const agent = await prisma.agent.create({
             data: {
               userId: user.id,
@@ -173,10 +188,12 @@ export class TrackerAgent {
               status: 'PENDING_IDENTITY' // Changed from PENDING_FUNDING
             }
           });
+          console.log(`[API /deploy] Agent created in DB with ID: ${agent.id}`);
 
           // 4. Generate & Upload ERC-8004 Registration Metadata
           let metadataUrl = "";
           try {
+            console.log(`[API /deploy] Uploading ERC-8004 metadata to Supabase`);
             const { uploadAgentMetadata } = await import('../services/supabase.js');
             const metadata = {
               agentId: agent.id,
@@ -186,10 +203,12 @@ export class TrackerAgent {
               version: "v2.0"
             };
             metadataUrl = await uploadAgentMetadata(agent.id, metadata);
+            console.log(`[API /deploy] Metadata uploaded successfully: ${metadataUrl}`);
           } catch (err: any) {
-             console.error("Failed to upload metadata to Supabase:", err);
+             console.error("[API /deploy] Failed to upload metadata to Supabase:", err);
           }
 
+          console.log(`[API /deploy] Request successful. Sending response...`);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           return res.end(JSON.stringify({ 
             success: true, 
@@ -200,17 +219,20 @@ export class TrackerAgent {
             }
           }));
         } catch (e) {
-          console.error(e);
-          res.writeHead(500); return res.end();
+          console.error(`[API /deploy] FATAL ERROR:`, e);
+          res.writeHead(500); return res.end(JSON.stringify({ error: 'Internal server error during deploy' }));
         }
       }
 
       if (req.method === 'POST' && reqUrl.pathname === '/api/agents/confirm-identity') {
+        console.log(`[API /confirm-identity] Received request from ${req.socket.remoteAddress}`);
         try {
           const body = await getJsonBody(req);
           const { agentId, txHash } = body;
           
+          console.log(`[API /confirm-identity] Agent ID: ${agentId}, TxHash: ${txHash}`);
           if (!agentId || !txHash) {
+            console.error(`[API /confirm-identity] Error: Missing agentId or txHash`);
             res.writeHead(400); return res.end(JSON.stringify({ error: 'Missing agentId or txHash' }));
           }
 
@@ -219,6 +241,7 @@ export class TrackerAgent {
           // For MVP, since the user already proved they sent the transaction, we will just assign a random or fetched ID.
           // Let's do a simple update for now to unblock the UI.
           const dummyTokenId = Math.floor(Math.random() * 10000) + 1; // Simulated tokenId
+          console.log(`[API /confirm-identity] Generated dummy Token ID: ${dummyTokenId}. Updating DB...`);
 
           await prisma.agent.update({
             where: { id: agentId },
@@ -228,12 +251,13 @@ export class TrackerAgent {
               identityTxHash: txHash
             }
           });
+          console.log(`[API /confirm-identity] Agent updated successfully in DB`);
 
           res.writeHead(200, { 'Content-Type': 'application/json' });
           return res.end(JSON.stringify({ success: true, tokenId: dummyTokenId }));
         } catch (e) {
-          console.error(e);
-          res.writeHead(500); return res.end();
+          console.error(`[API /confirm-identity] FATAL ERROR:`, e);
+          res.writeHead(500); return res.end(JSON.stringify({ error: 'Internal server error during confirmation' }));
         }
       }
 
