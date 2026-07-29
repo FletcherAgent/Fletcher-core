@@ -677,12 +677,21 @@ export class TrackerAgent {
           let userFilter: any = {};
           let userRecord = null;
           if (walletParam) {
-            // Fetch positions belonging to this specific user wallet
-            userFilter = { user: { walletAddress: { equals: walletParam, mode: 'insensitive' } } };
             userRecord = await prisma.user.findFirst({ 
               where: { walletAddress: { equals: walletParam, mode: 'insensitive' } },
               include: { agents: true }
             });
+            
+            if (userRecord) {
+              const agentIds = userRecord.agents.map((a: any) => a.id);
+              const conditions: any[] = [{ userId: userRecord.id }];
+              if (agentIds.length > 0) {
+                conditions.push({ agentId: { in: agentIds } });
+              }
+              userFilter = { OR: conditions };
+            } else {
+              userFilter = { id: 'non-existent-user-so-no-positions' };
+            }
           } else {
             // Public dashboard: fetch all positions to show user-deployed agents globally
             userFilter = {};
