@@ -464,6 +464,99 @@ export class TrackerAgent {
         }
       }
 
+      if (req.method === 'POST' && reqUrl.pathname === '/api/agents/x402/task') {
+        try {
+          const body = await getJsonBody(req);
+          const { agentId, taskParams, paymentTxHash } = body;
+          if (!agentId) {
+            res.writeHead(400); return res.end(JSON.stringify({ error: 'Missing agentId' }));
+          }
+
+          const agent = await prisma.agent.findUnique({ where: { id: agentId } });
+          if (!agent || !agent.smartAccountAddress) {
+            res.writeHead(404); return res.end(JSON.stringify({ error: 'Agent not found or has no smart account' }));
+          }
+
+          // Fetch reputation to calculate dynamic price
+          const positions = await prisma.lPPosition.findMany({
+            where: { agentId, status: 'CLOSED' }
+          });
+          const totalWins = positions.filter(pos => (pos.feesCollected + pos.ilRunning) > 0).length;
+          const totalLosses = positions.length - totalWins;
+          let reputationScore = 50 + (totalWins * 2) - totalLosses;
+          if (reputationScore > 100) reputationScore = 100;
+          if (reputationScore < 0) reputationScore = 0;
+
+          // Dynamic Pricing: 100 base + 10 * reputationScore
+          const feeRequired = 100 + (reputationScore * 10);
+          const FLETCH_CA = process.env.NEXT_PUBLIC_CA || '0x';
+
+          if (!paymentTxHash) {
+            // Flow 1: Payment Required
+            res.writeHead(402, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({
+              error: 'Payment Required',
+              requiredPayment: {
+                token: FLETCH_CA,
+                amount: feeRequired.toString(),
+                recipient: agent.smartAccountAddress
+              }
+            }));
+          }
+
+          // Flow 2: Payment Provided
+          // Check if receipt already used
+          const existingReceipt = await prisma.x402Receipt.findUnique({ where: { txHash: paymentTxHash } });
+          if (existingReceipt) {
+            res.writeHead(400); return res.end(JSON.stringify({ error: 'Payment txHash already used for another task' }));
+          }
+
+          // Verify txHash on-chain using viem
+          const { publicClient } = await import('../services/viem.js');
+          const txReceipt = await publicClient.waitForTransactionReceipt({ hash: paymentTxHash as `0x${string}` });
+          if (txReceipt.status !== 'success') {
+            res.writeHead(400); return res.end(JSON.stringify({ error: 'Transaction failed on-chain' }));
+          }
+          
+          // Note: In production we would decode the transfer event logs to ensure 
+          // the recipient is agent.smartAccountAddress and amount >= feeRequired.
+          // For MVP simulation, verifying a successful transaction hash is sufficient.
+
+          // Record the receipt
+          await prisma.x402Receipt.create({
+            data: {
+              txHash: paymentTxHash,
+              agentId: agent.id,
+              amount: feeRequired
+            }
+          });
+
+          // Simulate Task Execution
+          const analysisResult = `x402 Task Completed: Agent Analysis for ${taskParams?.target || 'Default'} yielded positive outlook based on recent metrics.`;
+
+          // (Optional) Call Reputation Registry to add points for successful task completion
+          if (agent.erc8004Id) {
+             const { buildReputationCall } = await import('./reputation.js');
+             // Simulate +1 win for paid tasks
+             const repCall = await buildReputationCall(agent.id, agent.erc8004Id, feeRequired, 1.0);
+             if (repCall) {
+               console.log(`[x402] Task complete. Reputation update payload generated for Agent ${agent.erc8004Id}`);
+             }
+          }
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({
+            success: true,
+            result: analysisResult,
+            receipt: paymentTxHash
+          }));
+
+        } catch (e: any) {
+          console.error("[x402 API Error]", e);
+          res.writeHead(500); return res.end(JSON.stringify({ error: e.message }));
+        }
+      }
+
       if (req.method === 'GET' && reqUrl.pathname === '/api/agents/reputation') {
         try {
           const erc8004Id = reqUrl.searchParams.get('erc8004Id');

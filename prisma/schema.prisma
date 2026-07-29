@@ -252,3 +252,11 @@ model LivenessCache {
   expiresAt    DateTime
   createdAt    DateTime @default(now())
 }
+
+model X402Receipt {
+  id        String   @id @default(uuid())
+  txHash    String   @unique
+  agentId   String
+  amount    Float
+  createdAt DateTime @default(now())
+}
