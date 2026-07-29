@@ -55,6 +55,11 @@ export async function startUserbot(fletcherBot, orchestrator) {
             if (!addressMatch)
                 return;
             const tokenAddress = addressMatch[0].toLowerCase(); // Normalize case
+            // Block Fletcher native token from being processed
+            if (tokenAddress === '0xb890beb4cd66360429d3126b08589b0828fd73fe') {
+                console.log(`[Userbot] ❌ Token ${tokenAddress} is the Fletcher native token! Ignoring signal.`);
+                return;
+            }
             if (processedTokens.has(tokenAddress)) {
                 return; // Ignore if already processed recently
             }
