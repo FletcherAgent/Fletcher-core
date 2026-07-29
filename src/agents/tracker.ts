@@ -342,6 +342,184 @@ export class TrackerAgent {
         }
       }
 
+      if (req.method === 'POST' && reqUrl.pathname === '/api/agents/grant-session-key') {
+        try {
+          const wallet = req.headers['x-wallet-address'] as string;
+          if (!wallet) {
+            res.writeHead(400); return res.end(JSON.stringify({ error: 'Missing wallet header' }));
+          }
+
+          const body = await getJsonBody(req);
+          const { signature } = body;
+          
+          if (!signature) {
+            res.writeHead(400); return res.end(JSON.stringify({ error: 'Missing signature' }));
+          }
+
+          const { verifyMessage } = await import('viem');
+          const isValid = await verifyMessage({
+            address: wallet as `0x${string}`,
+            message: "Grant FULL Session Key for my agent: " + wallet,
+            signature: signature as `0x${string}`
+          });
+
+          if (!isValid) {
+            res.writeHead(401); return res.end(JSON.stringify({ error: 'Invalid signature' }));
+          }
+
+          const user = await prisma.user.findUnique({
+            where: { walletAddress: wallet },
+            include: { agents: true }
+          });
+
+          const agent = user?.agents?.[0];
+          if (!agent) {
+            res.writeHead(404); return res.end(JSON.stringify({ error: 'Agent not found' }));
+          }
+          
+          if (!agent.smartAccountAddress) {
+            res.writeHead(400); return res.end(JSON.stringify({ error: 'Agent has no smart account address' }));
+          }
+
+          const { grantSessionKey } = await import('../services/sessionKey.js');
+          
+          // Generate the session key. Pass a mock client containing the smartAccountAddress
+          const keyData = await grantSessionKey(
+            { account: { address: agent.smartAccountAddress } }, 
+            'FULL'
+          );
+
+          // Update agent mode to FULL
+          await prisma.agent.update({
+            where: { id: agent.id },
+            data: { mode: 'FULL' }
+          });
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ success: true, sessionKey: keyData.keyAddress, expiry: keyData.expiry, mode: 'FULL' }));
+
+        } catch (e: any) {
+          console.error("[Grant Session Key API Error]", e);
+          res.writeHead(500); return res.end(JSON.stringify({ error: e.message }));
+        }
+      }
+
+      if (req.method === 'POST' && reqUrl.pathname === '/api/agents/revoke-session-key') {
+        try {
+          const wallet = req.headers['x-wallet-address'] as string;
+          if (!wallet) {
+            res.writeHead(400); return res.end(JSON.stringify({ error: 'Missing wallet header' }));
+          }
+
+          const body = await getJsonBody(req);
+          const { signature } = body;
+          
+          if (!signature) {
+            res.writeHead(400); return res.end(JSON.stringify({ error: 'Missing signature' }));
+          }
+
+          const { verifyMessage } = await import('viem');
+          const isValid = await verifyMessage({
+            address: wallet as `0x${string}`,
+            message: "Revoke FULL Session Key for my agent: " + wallet,
+            signature: signature as `0x${string}`
+          });
+
+          if (!isValid) {
+            res.writeHead(401); return res.end(JSON.stringify({ error: 'Invalid signature' }));
+          }
+
+          const user = await prisma.user.findUnique({
+            where: { walletAddress: wallet },
+            include: { agents: true }
+          });
+
+          const agent = user?.agents?.[0];
+          if (!agent) {
+            res.writeHead(404); return res.end(JSON.stringify({ error: 'Agent not found' }));
+          }
+          
+          if (!agent.smartAccountAddress) {
+            res.writeHead(400); return res.end(JSON.stringify({ error: 'Agent has no smart account address' }));
+          }
+
+          // Revoke session key by setting status to REVOKED in DB
+          await prisma.sessionKey.updateMany({
+            where: { userId: agent.smartAccountAddress, status: 'ACTIVE' },
+            data: { status: 'REVOKED' }
+          });
+
+          // Update agent mode back to SEMI
+          await prisma.agent.update({
+            where: { id: agent.id },
+            data: { mode: 'SEMI' }
+          });
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ success: true, mode: 'SEMI' }));
+
+        } catch (e: any) {
+          console.error("[Revoke Session Key API Error]", e);
+          res.writeHead(500); return res.end(JSON.stringify({ error: e.message }));
+        }
+      }
+
+      if (req.method === 'GET' && reqUrl.pathname === '/api/agents/reputation') {
+        try {
+          const erc8004Id = reqUrl.searchParams.get('erc8004Id');
+          const agentId = reqUrl.searchParams.get('agentId');
+          
+          if (!erc8004Id && !agentId) {
+            res.writeHead(400); return res.end(JSON.stringify({ error: 'Missing erc8004Id or agentId' }));
+          }
+
+          let targetErc8004Id = erc8004Id;
+          if (!targetErc8004Id && agentId) {
+            const agent = await prisma.agent.findUnique({ where: { id: agentId } });
+            targetErc8004Id = agent?.erc8004Id || null;
+          }
+
+          if (!targetErc8004Id) {
+            res.writeHead(404); return res.end(JSON.stringify({ error: 'Agent has no ERC8004 Identity' }));
+          }
+
+          // Fetch from database as primary data source (representing off-chain index of the Reputation Registry)
+          const positions = await prisma.lPPosition.findMany({
+            where: {
+              agent: { erc8004Id: targetErc8004Id },
+              status: 'CLOSED'
+            }
+          });
+
+          const totalProfitUsd = positions.reduce((acc, pos) => acc + (pos.feesCollected + pos.ilRunning), 0);
+          const totalWins = positions.filter(pos => (pos.feesCollected + pos.ilRunning) > 0).length;
+          const totalLosses = positions.length - totalWins;
+          const winRate = positions.length > 0 ? (totalWins / positions.length) * 100 : 0;
+          
+          // Base score of 50, +2 for win, -1 for loss, bounded to 0-100
+          let reputationScore = 50 + (totalWins * 2) - totalLosses;
+          if (reputationScore > 100) reputationScore = 100;
+          if (reputationScore < 0) reputationScore = 0;
+
+          // Note: In a production environment, we would ideally read directly from the ERC-8004 Reputation Registry
+          // using `agentRecords(uint256)` or similar to guarantee on-chain data accuracy.
+          // For now, since the registry contract interface is still evolving, we index it via our database.
+          
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ 
+            score: reputationScore, 
+            winRate: Math.round(winRate), 
+            totalPositions: positions.length,
+            totalProfitUsd: totalProfitUsd.toFixed(2),
+            onChain: false // indicates this is an indexed off-chain calculation of the expected on-chain state
+          }));
+
+        } catch (e: any) {
+          console.error("[Reputation API Error]", e);
+          res.writeHead(500); return res.end(JSON.stringify({ error: e.message }));
+        }
+      }
+
       if (req.method === 'GET' && reqUrl.pathname === '/api/agents/pending-actions') {
         try {
           const wallet = reqUrl.searchParams.get('wallet') || req.headers['x-wallet-address'] as string;

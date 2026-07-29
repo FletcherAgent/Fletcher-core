@@ -7,8 +7,10 @@ import { LPEngineAgent } from '../agents/lpengine.js';
 import { RiskWardenAgent } from '../agents/risk.js';
 import { GuardianAgent } from '../agents/guardian.js';
 import { TrackerAgent } from '../agents/tracker.js';
-import { WatchlistAgent } from '../agents/watchlist.js';
 import { prisma } from './db.js';
+import { getTokenInfo } from '../services/gmgn/index.js';
+import { WatchlistAgent } from '../agents/watchlist.js';
+import { getUserTier } from '../services/tierGate.js';
 export class Orchestrator {
     scout;
     trader;
@@ -191,6 +193,8 @@ export class Orchestrator {
                 if (riskEvaluation.approved) {
                     console.log(`[Orchestrator] Risk Warden approved. Forwarding to Trader with size ${riskEvaluation.recommendedSize}...`);
                     this.trader.processSignal(tokenAddress, riskEvaluation.recommendedSize, 'SCOUT');
+                    // Multi-Agent Distribution
+                    this.distributeSignalToAgents(tokenAddress, 'SCOUT').catch(console.error);
                     // Guardian now polls DB for OPEN positions autonomously, so we don't start monitoring manually here.
                 }
                 else {
@@ -310,6 +314,8 @@ export class Orchestrator {
                     }
                     console.log(`[Orchestrator] Forwarding CopyBuy to Trader. Size: ${finalSize}...`);
                     this.trader.processSignal(token, finalSize, 'COPYTRADE', wallet, txHash);
+                    // Multi-Agent Distribution
+                    this.distributeSignalToAgents(token, 'COPYTRADE').catch(console.error);
                     // Guardian DB polling handles monitoring
                 }
                 else {
@@ -367,6 +373,67 @@ export class Orchestrator {
                 console.error(`[Orchestrator] ❌ Unhandled error in onCopySellSignal for ${token}:`, err);
             }
         };
+    }
+    /**
+     * Distributes trading signals to all ACTIVE holder agents via LPEngine
+     */
+    async distributeSignalToAgents(tokenAddress, source) {
+        console.log(`[Orchestrator] 🚀 Distributing ${source} signal for ${tokenAddress} to Active Agents...`);
+        const activeAgents = await prisma.agent.findMany({ where: { status: 'ACTIVE' } });
+        if (activeAgents.length === 0)
+            return;
+        const token = await getTokenInfo(tokenAddress);
+        if (!token) {
+            console.warn(`[Orchestrator] Failed to fetch GMGN data for ${tokenAddress}, skipping distribution.`);
+            return;
+        }
+        for (const agent of activeAgents) {
+            const agentOpenCount = await prisma.lPPosition.count({
+                where: { agentId: agent.id, status: { in: ['OPEN', 'PENDING'] } }
+            });
+            // Max 1 position per agent for now
+            if (agentOpenCount >= 1)
+                continue;
+            await this.lpEngine.proposeOpenPosition({ token, score: 100 }, {
+                dayMode: false, nightMode: false, strategyMode: true,
+                lowerPct: 0.91, upperPct: 1.05, source: source,
+                agentId: agent.id,
+                wallet: agent.smartAccountAddress || undefined,
+                mode: agent.mode || 'MANUAL'
+            });
+        }
+    }
+    /**
+     * Continuous Check: Ensures all ACTIVE agents have holders that maintain the required $FLETCH balance.
+     */
+    startContinuousGateCheck() {
+        setInterval(async () => {
+            try {
+                const activeAgents = await prisma.agent.findMany({
+                    where: { status: 'ACTIVE' },
+                    include: { user: true }
+                });
+                for (const agent of activeAgents) {
+                    if (!agent.user?.walletAddress)
+                        continue;
+                    const tier = await getUserTier(agent.user.walletAddress);
+                    if (tier === 0) {
+                        console.log(`[Orchestrator] Agent ${agent.id} (Owner: ${agent.user.walletAddress}) lost tier status. Pausing...`);
+                        await prisma.agent.update({
+                            where: { id: agent.id },
+                            data: { status: 'PAUSED' }
+                        });
+                        if (agent.user.telegramChatId) {
+                            const msg = `🛑 <b>Agent Paused</b>\n\nYour agent <b>${agent.name}</b> has been paused because your $FLETCH balance dropped below the minimum requirement (Tier 1). Please deposit more $FLETCH to reactivate.`;
+                            this.bot.api.sendMessage(agent.user.telegramChatId, msg, { parse_mode: 'HTML' }).catch(console.error);
+                        }
+                    }
+                }
+            }
+            catch (e) {
+                console.error(`[Orchestrator] Error during Continuous Gate Check:`, e);
+            }
+        }, 60 * 60 * 1000); // 1 hour
     }
     /**
      * Manually injects a token into the pipeline (Useful for Dry Run / Telegram commands)

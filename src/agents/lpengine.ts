@@ -45,6 +45,7 @@ import {
   getLiquidityForAmounts,
   tickToSqrtPriceX96
 } from '../services/lpMath.js';
+import { buildReputationCall } from './reputation.js';
 
 // ─── ABI ─────────────────────────────────────────────────────────────────────
 
@@ -105,6 +106,7 @@ export interface LPProposal {
   nightMode: boolean;
   mode: 'MANUAL' | 'SEMI' | 'FULL';
   description: string;   // human-readable for Telegram
+  calls?: { target: string; data: string; value?: string }[];
 }
 
 // ─── MetaConfig loader ────────────────────────────────────────────────────────
@@ -1110,6 +1112,7 @@ export class LPEngineAgent {
         source: options.source ?? 'SYSTEM',
         tradingMode: isDryRun ? 'DRY_RUN' : 'LIVE',
         sentimentStatus: candidate.sentimentStatus || candidate.grokLabel,
+        agentId: options.agentId,
         simulatedLiquidity: simulatedLiquidity ? simulatedLiquidity.toString() : null,
         lastFeeGrowth0,
         lastFeeGrowth1,
@@ -1137,6 +1140,7 @@ export class LPEngineAgent {
       nightMode: options.nightMode,
       mode: 'MANUAL',
       description,
+      agentId: options.agentId,
     };
 
     if (currentMode === 'FULL' || options.executeNow) {
@@ -1413,6 +1417,20 @@ export class LPEngineAgent {
 
     await logEvent('INFO', `[LP] CLOSE Proposal created for ${pos.token0Symbol}/${pos.token1Symbol}`, { positionId, reason });
 
+    const netProfitUsd = pos.feesCollected + pos.ilRunning;
+    const pnlPercentage = (netProfitUsd / pos.entryValue) * 100;
+    const additionalCalls: { target: string; data: Hex }[] = [];
+
+    if (pos.agentId) {
+      const agent = await prisma.agent.findUnique({ where: { id: pos.agentId } });
+      if (agent && agent.erc8004Id) {
+        const repCall = await buildReputationCall(agent.id, agent.erc8004Id, netProfitUsd, pnlPercentage);
+        if (repCall) {
+          additionalCalls.push(repCall);
+        }
+      }
+    }
+
     const proposal: LPProposal = {
       type: 'CLOSE',
       positionId,
@@ -1431,6 +1449,7 @@ export class LPEngineAgent {
       nightMode: pos.nightMode,
       mode: pos.mode as 'MANUAL' | 'SEMI' | 'FULL',
       description,
+      calls: [{ target: npmAddress, data: closeCalldata }, ...additionalCalls],
     };
 
     if (pos.mode === 'FULL' || forceExecute) {
@@ -1447,10 +1466,10 @@ export class LPEngineAgent {
       try {
         const tier = await getUserTier(recipient);
         const client = await getSessionKeyClient('FULL', tier, false, userWallet);
-        // Single atomic V4 call: BURN_POSITION + TAKE_PAIR
-        const calls: UserOpCall[] = [
-          { target: npmAddress, data: closeCalldata },
-        ];
+        // Execute the bundled calls
+        const calls = (proposal.calls || [
+          { target: npmAddress as `0x${string}`, data: closeCalldata as `0x${string}` },
+        ]) as any;
 
         const txHash = await buildAndSendLPUserOperation(client, calls);
 

@@ -26,6 +26,7 @@ import { getDexConfig, getAllDexConfigs } from '../core/dexConfig.js';
 import { IntelligenceLayer } from '../services/intelligence.js';
 import { screenPairs, } from '../services/gmgn.js';
 import { fullRangeTicks, calcNightTickRange, getPoolSlot0, getFeeGrowthGlobal, feeToTickSpacing, MIN_TICK, MAX_TICK, getLiquidityForAmounts, tickToSqrtPriceX96 } from '../services/lpMath.js';
+import { buildReputationCall } from './reputation.js';
 // ─── ABI ─────────────────────────────────────────────────────────────────────
 const NPM_ABI = parseAbi([
     // mint
@@ -903,6 +904,7 @@ export class LPEngineAgent {
                 source: options.source ?? 'SYSTEM',
                 tradingMode: isDryRun ? 'DRY_RUN' : 'LIVE',
                 sentimentStatus: candidate.sentimentStatus || candidate.grokLabel,
+                agentId: options.agentId,
                 simulatedLiquidity: simulatedLiquidity ? simulatedLiquidity.toString() : null,
                 lastFeeGrowth0,
                 lastFeeGrowth1,
@@ -928,6 +930,7 @@ export class LPEngineAgent {
             nightMode: options.nightMode,
             mode: 'MANUAL',
             description,
+            agentId: options.agentId,
         };
         if (currentMode === 'FULL' || options.executeNow) {
             if (isDryRun) {
@@ -1174,6 +1177,18 @@ export class LPEngineAgent {
             data: { status: 'EXITING' },
         });
         await logEvent('INFO', `[LP] CLOSE Proposal created for ${pos.token0Symbol}/${pos.token1Symbol}`, { positionId, reason });
+        const netProfitUsd = pos.feesCollected + pos.ilRunning;
+        const pnlPercentage = (netProfitUsd / pos.entryValue) * 100;
+        const additionalCalls = [];
+        if (pos.agentId) {
+            const agent = await prisma.agent.findUnique({ where: { id: pos.agentId } });
+            if (agent && agent.erc8004Id) {
+                const repCall = await buildReputationCall(agent.id, agent.erc8004Id, netProfitUsd, pnlPercentage);
+                if (repCall) {
+                    additionalCalls.push(repCall);
+                }
+            }
+        }
         const proposal = {
             type: 'CLOSE',
             positionId,
@@ -1192,6 +1207,7 @@ export class LPEngineAgent {
             nightMode: pos.nightMode,
             mode: pos.mode,
             description,
+            calls: [{ target: npmAddress, data: closeCalldata }, ...additionalCalls],
         };
         if (pos.mode === 'FULL' || forceExecute) {
             if (pos.tradingMode === 'DRY_RUN') {
@@ -1208,10 +1224,10 @@ export class LPEngineAgent {
             try {
                 const tier = await getUserTier(recipient);
                 const client = await getSessionKeyClient('FULL', tier, false, userWallet);
-                // Single atomic V4 call: BURN_POSITION + TAKE_PAIR
-                const calls = [
+                // Execute the bundled calls
+                const calls = (proposal.calls || [
                     { target: npmAddress, data: closeCalldata },
-                ];
+                ]);
                 const txHash = await buildAndSendLPUserOperation(client, calls);
                 await prisma.lPPosition.update({
                     where: { id: positionId },

@@ -27,26 +27,11 @@ export class WatchlistAgent {
       return;
     }
 
-    const tModeConfig = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
-    const currentMode = (tModeConfig?.value ?? 'LIVE') === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE';
-
     const config = await prisma.systemConfig.findMany({
       where: { key: { in: ['lp.maxPositions'] } }
     });
     const map = Object.fromEntries(config.map(c => [c.key, c.value]));
-    const maxPositions = parseInt(map['lp.maxPositions'] ?? '3');
-
-    const openCount = await prisma.lPPosition.count({
-      where: { 
-        status: { in: ['OPEN', 'PENDING'] },
-        tradingMode: currentMode 
-      },
-    });
-
-    if (openCount >= maxPositions) {
-      console.log('[Watchlist] ⛔ Max positions reached, skipping entry checks.');
-      return;
-    }
+    const globalMaxPositions = parseInt(map['lp.maxPositions'] ?? '3');
 
     for (const item of items) {
       try {
@@ -168,10 +153,44 @@ export class WatchlistAgent {
             } 
           });
           
-          await this.lpEngine.proposeOpenPosition(
-            { token, score: 100 },
-            { dayMode: false, nightMode: false, strategyMode: true, lowerPct: 0.91, upperPct: 1.05, source: 'WATCHLIST' }
-          );
+          // --- MULTI-AGENT EXECUTION ---
+          console.log(`[Watchlist] 🚀 Breakout detected for ${item.symbol}. Distributing to Active Agents...`);
+          
+          // 1. Fetch all ACTIVE holder agents
+          const activeAgents = await prisma.agent.findMany({ where: { status: 'ACTIVE' } });
+          
+          for (const agent of activeAgents) {
+            const agentOpenCount = await prisma.lPPosition.count({
+              where: { agentId: agent.id, status: { in: ['OPEN', 'PENDING'] } }
+            });
+            // Max 1 position per agent for now
+            if (agentOpenCount >= 1) continue;
+            
+            await this.lpEngine.proposeOpenPosition(
+              { token, score: 100 },
+              { 
+                dayMode: false, nightMode: false, strategyMode: true, 
+                lowerPct: 0.91, upperPct: 1.05, source: 'WATCHLIST',
+                agentId: agent.id,
+                wallet: agent.smartAccountAddress || undefined,
+                mode: (agent.mode as 'MANUAL' | 'SEMI' | 'FULL') || 'MANUAL'
+              }
+            );
+          }
+          
+          // 2. Global Flagship Execution
+          const tModeConfig = await prisma.systemConfig.findUnique({ where: { key: 'TRADING_MODE' } });
+          const currentMode = (tModeConfig?.value ?? 'LIVE') === 'DRY_RUN' ? 'DRY_RUN' : 'LIVE';
+          const globalOpenCount = await prisma.lPPosition.count({
+             where: { status: { in: ['OPEN', 'PENDING'] }, tradingMode: currentMode, agentId: null }
+          });
+          
+          if (globalOpenCount < globalMaxPositions) {
+            await this.lpEngine.proposeOpenPosition(
+              { token, score: 100 },
+              { dayMode: false, nightMode: false, strategyMode: true, lowerPct: 0.91, upperPct: 1.05, source: 'WATCHLIST' }
+            );
+          }
           
           triggered = true;
           break; // Only open 1 position per loop
