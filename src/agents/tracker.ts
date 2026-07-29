@@ -684,15 +684,15 @@ export class TrackerAgent {
               include: { agents: true }
             });
           } else {
-            // Public dashboard: fetch only positions where userId is null (system/flagship)
-            userFilter = { userId: null };
+            // Public dashboard: fetch all positions to show user-deployed agents globally
+            userFilter = {};
           }
 
           const [wallets, signals, positions, lpPositions, logs, totalSignals, openPositionsCount, tradingModeConfig, maxPosConfig, autonomyConfig, liveAgg, dryRunAgg] = await Promise.all([
             prisma.trackedWallet.findMany({ orderBy: { createdAt: 'desc' } }),
             prisma.signal.findMany({ orderBy: { createdAt: 'desc' }, take: 20 }),
-            prisma.position.findMany({ where: userFilter, orderBy: { createdAt: 'desc' }, take: 20 }),
-            prisma.lPPosition.findMany({ where: userFilter, orderBy: { createdAt: 'desc' }, take: 20 }),
+            prisma.position.findMany({ where: userFilter, include: { agent: true }, orderBy: { createdAt: 'desc' }, take: 20 }),
+            prisma.lPPosition.findMany({ where: userFilter, include: { agent: true }, orderBy: { createdAt: 'desc' }, take: 20 }),
             prisma.log.findMany({ orderBy: { createdAt: 'desc' }, take: 200 }),
             prisma.signal.count(),
             prisma.position.count({ where: { status: 'OPEN', ...userFilter } }),
