@@ -36,21 +36,18 @@ export async function startUserbot(fletcherBot, orchestrator) {
         client.addEventHandler(async (event) => {
             const message = event.message;
             const text = message.text || '';
-            let isScarp = text.toLowerCase().includes('scarp');
-            if (!isScarp) {
-                try {
-                    const sender = await message.getSender();
-                    const username = sender?.username?.toLowerCase() || '';
-                    const firstName = sender?.firstName?.toLowerCase() || '';
-                    if (username.includes('scarp') || firstName.includes('scarp') || username.includes('maxcashguy')) {
-                        isScarp = true;
-                    }
-                }
-                catch (e) {
-                    console.warn(`[Userbot] ⚠️ Failed to fetch sender info for message:`, e?.message || e);
+            try {
+                const sender = await message.getSender();
+                const username = sender?.username?.toLowerCase() || '';
+                const firstName = sender?.firstName || 'Unknown';
+                console.log(`[Userbot] Received message in Alpha Group from: ${firstName} (@${username})`);
+                if (username !== 'maxcashguy') {
+                    console.log(`[Userbot] Ignoring message from @${username} (Not MaxCashGuy)`);
+                    return;
                 }
             }
-            if (!isScarp) {
+            catch (e) {
+                console.warn(`[Userbot] ⚠️ Failed to fetch sender info:`, e?.message || e);
                 return;
             }
             // Regex to find EVM address (0x followed by 40 hex characters)

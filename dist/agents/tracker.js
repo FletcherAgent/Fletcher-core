@@ -663,7 +663,12 @@ export class TrackerAgent {
                     }
                     else {
                         // Public dashboard: exclude logs tied to a specific user wallet
-                        filteredLogs = logs.filter(l => !l.meta?.wallet).slice(0, 50);
+                        filteredLogs = logs.filter(l => {
+                            if (!l.meta)
+                                return true;
+                            const metaObj = typeof l.meta === 'string' ? JSON.parse(l.meta) : l.meta;
+                            return !metaObj?.wallet;
+                        }).slice(0, 50);
                     }
                     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
                     res.end(JSON.stringify({
