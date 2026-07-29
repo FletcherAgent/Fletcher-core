@@ -702,13 +702,30 @@ export class TrackerAgent {
             prisma.lPPosition.aggregate({ where: { tradingMode: 'LIVE', ...userFilter }, _sum: { feesCollected: true } }),
             prisma.lPPosition.aggregate({ where: { tradingMode: 'DRY_RUN', ...userFilter }, _sum: { feesCollected: true } })
           ]);
-          // Filter logs in memory
           let filteredLogs = logs;
           if (walletParam) {
-            filteredLogs = logs.filter(l => (l.meta as any)?.wallet === walletParam).slice(0, 50);
+            const allowedWallets = [walletParam.toLowerCase()];
+            if (userRecord?.agents) {
+              userRecord.agents.forEach(a => {
+                if (a.smartAccountAddress) allowedWallets.push(a.smartAccountAddress.toLowerCase());
+              });
+            }
+            console.log(`[Tracker API] walletParam=${walletParam}, allowedWallets=${allowedWallets.join(',')}`);
+            filteredLogs = logs.filter(l => {
+              if (!l.meta) return false;
+              // Prisma Json fields can be parsed or not, handle both
+              const metaObj = typeof l.meta === 'string' ? JSON.parse(l.meta) : l.meta;
+              const metaWallet = metaObj?.wallet?.toLowerCase();
+              return metaWallet && allowedWallets.includes(metaWallet);
+            }).slice(0, 50);
+            console.log(`[Tracker API] filteredLogs length = ${filteredLogs.length}`);
           } else {
             // Public dashboard: exclude logs tied to a specific user wallet
-            filteredLogs = logs.filter(l => !(l.meta as any)?.wallet).slice(0, 50);
+            filteredLogs = logs.filter(l => {
+              if (!l.meta) return true;
+              const metaObj = typeof l.meta === 'string' ? JSON.parse(l.meta) : l.meta;
+              return !metaObj?.wallet;
+            }).slice(0, 50);
           }
 
           res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });

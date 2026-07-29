@@ -39,6 +39,24 @@ export class Orchestrator {
                     return;
                 // Ensure no bigints are present (LPProposal doesn't use bigints currently)
                 const safePayload = { ...proposal };
+                const isAuto = proposal.description.includes('✅ *Auto-') || proposal.description.includes('❌ *Auto-');
+                if (isAuto) {
+                    // If FULL mode executed it automatically, just log it as history
+                    await prisma.pendingAction.create({
+                        data: {
+                            agentId: agent.id,
+                            type: proposal.type,
+                            payload: safePayload,
+                            status: proposal.description.includes('✅') ? 'EXECUTED' : 'FAILED'
+                        }
+                    });
+                    if (agent.user.telegramChatId) {
+                        const msg = `🤖 <b>Auto-Trade Executed</b>\n\nAgent: <b>${agent.name}</b>\nAction: <b>${proposal.type}</b>\nToken: <b>${proposal.token0Symbol}/${proposal.token1Symbol}</b>\n\n${proposal.description.replace(/\*/g, '')}\n\n👉 <a href="https://fletcher.app/dashboard">View on Dashboard</a>`;
+                        this.bot.api.sendMessage(agent.user.telegramChatId, msg, { parse_mode: 'HTML' }).catch(console.error);
+                    }
+                    return; // Stop here, do not execute flagship logic
+                }
+                // Manual / Semi mode requires approval
                 const pendingAction = await prisma.pendingAction.create({
                     data: {
                         agentId: agent.id,

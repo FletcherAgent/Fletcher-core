@@ -248,8 +248,11 @@ export async function buildAndSendLPUserOperation(client, calls) {
         const rcpt = await rcptResp.json();
         if (rcpt.result) {
             const txHash = rcpt.result.receipt?.transactionHash;
-            if (!rcpt.result.success)
-                throw new Error(`[Alchemy] UserOp reverted on-chain. Tx: ${txHash}`);
+            if (!rcpt.result.success) {
+                const revertReason = rcpt.result.reason ? ` Reason: ${rcpt.result.reason}` : '';
+                console.error(`[Alchemy] UserOp Details:`, JSON.stringify(rcpt.result, null, 2));
+                throw new Error(`[Alchemy] UserOp reverted on-chain. Tx: ${txHash}${revertReason}`);
+            }
             console.log(`[Alchemy] UserOp mined! Tx Hash: ${txHash}`);
             return txHash;
         }

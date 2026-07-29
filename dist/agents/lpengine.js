@@ -883,6 +883,12 @@ export class LPEngineAgent {
             }
         }
         // Save PENDING record to DB (or OPEN if DRY RUN simulation)
+        let resolvedUserId = undefined;
+        if (options.agentId) {
+            const parentAgent = await prisma.agent.findUnique({ where: { id: options.agentId } });
+            if (parentAgent?.userId)
+                resolvedUserId = parentAgent.userId;
+        }
         const dbRecord = await prisma.lPPosition.create({
             data: {
                 tokenId: isDryRun ? `SIM-${Date.now()}` : `PENDING-${Date.now()}`,
@@ -905,6 +911,7 @@ export class LPEngineAgent {
                 tradingMode: isDryRun ? 'DRY_RUN' : 'LIVE',
                 sentimentStatus: candidate.sentimentStatus || candidate.grokLabel,
                 agentId: options.agentId,
+                userId: resolvedUserId,
                 simulatedLiquidity: simulatedLiquidity ? simulatedLiquidity.toString() : null,
                 lastFeeGrowth0,
                 lastFeeGrowth1,

@@ -40,17 +40,38 @@ async function main() {
   console.log(`This will fetch real data from GMGN and FORCE open a real LP transaction on-chain for your agent!`);
   
   try {
-    const { screenPairs } = await import('../src/services/gmgn.js');
-    const candidates = await screenPairs();
-    
-    if (candidates.length === 0) {
-      console.log(`❌ No tokens passed screening on GMGN right now. Try again later.`);
-      return;
-    }
+    // Bypassing GMGN to hardcode the requested pool: 0xb7f10f74b39291b9290b779978e19a7637c742d6
+    const targetToken = {
+      address: '0x5Cb6F181081301b44905F3ae15419112ecaBd8A6', // PIPEDOG Token
+      symbol: 'PIPEDOG',
+      priceUsd: 0.003608,
+      marketCap: 10460000,
+      volume24h: 67170000,
+      liquidity: 10460000,
+      decimals: 18,
+      name: 'PIPEDOG'
+    } as any;
 
-    const targetToken = candidates[0].token;
     console.log(`✅ Found Token: ${targetToken.symbol} (${targetToken.address})`);
     console.log(`🚀 Forcing LP Engine to execute autonomous trade...`);
+
+    // Reference from deploy-live-lp.ts: Mock resolvePool to ensure the correct NPM is used for V3
+    lpEngine.resolvePool = async () => {
+      const poolAddress = '0xB7f10f74B39291b9290b779978e19A7637C742D6';
+      const quoteAddress = '0x0bd7d308f8e1639fab988df18a8011f41eacad73'; // WETH
+      const factory = '0x1f7d7550B1b028f7571E69A784071F0205FD2EfA';
+      
+      console.log(`   └─ ✅ [Mock] Forcing Uniswap V3 / ALPS V3 NPM (Factory: ${factory})`);
+      
+      return {
+        poolAddress: poolAddress.toLowerCase(),
+        feeTier: 10000,
+        factoryAddress: factory.toLowerCase(),
+        managerAddress: '0xC36442b4a4522E871399CD717aBDD847Ab11FE88'.toLowerCase(), // Hardcode correct V3 NPM
+        version: 'V3',
+        quoteAddress: quoteAddress.toLowerCase()
+      };
+    };
 
     await lpEngine.proposeOpenPosition(
       { token: targetToken, score: 100 },
