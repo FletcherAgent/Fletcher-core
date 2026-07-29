@@ -507,15 +507,41 @@ export class TraderAgent {
         const isUniversalRouter = finalToAddress.toLowerCase() === '0x8876789976decbfcbbbe364623c63652db8c0904';
 
         if (isUniversalRouter) {
-          // Universal Router V3_SWAP_EXACT_IN (command 0x00): WETH -> tokenOut via V3 pool
-          const commands = '0x00' as `0x${string}`;
+          // Trench Universal Router uses 3-command pattern:
+          // cmd 0x0b = WRAP_ETH:         wrap native ETH (sent as msg.value) into WETH inside UR
+          // cmd 0x00 = V3_SWAP_EXACT_IN: buy as many tokens as possible for exact WETH
+          // cmd 0x0c = UNWRAP_WETH:      refund any unused WETH back to recipient as ETH
+          const commands = '0x0b000c' as `0x${string}`;
           const feeHex = POOL_FEE.toString(16).padStart(6, '0');
-          // Path: tokenIn (WETH) -> fee -> tokenOut (encoded as bytes for Universal Router)
-          const path = (WETH_ADDRESS.replace('0x', '') + feeHex + tokenOut.replace('0x', '')) as `0x${string}`;
 
+          // WRAP_ETH input: (uint256 recipientType, uint256 amountMin)
+          const wrapInput = encodeAbiParameters(
+            [{type: 'uint256'}, {type: 'uint256'}],
+            [2n, amountIn]
+          );
+
+          // V3_SWAP_EXACT_IN input: (address recipient, uint256 amountIn, uint256 amountOutMin, bytes path, bool payerIsUser, bytes hookData)
+          // IMPORTANT: Trench Universal Router requires 6 params (not 5) — hookData is required even if empty!
+          // For EXACT_IN, path is FORWARD: tokenIn → fee → tokenOut
+          const pathBytes = `0x${WETH_ADDRESS.slice(2).toLowerCase()}${feeHex}${tokenOut.slice(2).toLowerCase()}` as `0x${string}`;
+          console.log(`[Trader] 🛣️ V3 EXACT_IN path: ${pathBytes}`);
           const swapInput = encodeAbiParameters(
-            [{type: 'address'}, {type: 'uint256'}, {type: 'uint256'}, {type: 'bytes'}, {type: 'bool'}],
-            [(USER_WALLET as `0x${string}`), amountIn, amountOutMinimum, `0x${path}`, true] // payerIsUser=true → router pulls WETH from msg.sender (agent) via Permit2
+            [{type: 'address'}, {type: 'uint256'}, {type: 'uint256'}, {type: 'bytes'}, {type: 'bool'}, {type: 'bytes'}],
+            [
+              (USER_WALLET as `0x${string}`), // recipient of tokenOut
+              amountIn,                       // amountIn = WETH budget (we wrapped exactly this much)
+              amountOutMinimum,               // amountOutMinimum = minimum tokens to receive
+              pathBytes,                      // forward path for exact-in
+              false,                          // payerIsUser=false: WETH is already in UR from WRAP_ETH
+              '0x' as `0x${string}`           // hookData: empty bytes
+            ]
+          );
+
+          // UNWRAP_WETH input: (address recipient, uint256 amountMin)
+          // Refund any unused WETH back to agent as ETH
+          const unwrapInput = encodeAbiParameters(
+            [{type: 'address'}, {type: 'uint256'}],
+            [(USER_WALLET as `0x${string}`), 0n] // amountMin=0: refund all remaining
           );
 
           const universalRouterAbi = parseAbi([
@@ -524,8 +550,11 @@ export class TraderAgent {
           calldata = encodeFunctionData({
             abi: universalRouterAbi,
             functionName: 'execute',
-            args: [commands, [swapInput], deadline]
+            args: [commands, [wrapInput, swapInput, unwrapInput], deadline]
           });
+
+          // Return value=amountIn so caller knows to send ETH as msg.value
+          return { calldata, amountOutMinimum, expectedOut, toAddress: finalToAddress as `0x${string}`, value: amountIn };
         } else {
           // Standard SwapRouter02 (for chains that have it deployed)
           const swapRouterAbi = parseAbi([

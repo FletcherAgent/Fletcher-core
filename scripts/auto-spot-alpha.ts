@@ -3,7 +3,7 @@ import { Bot } from 'grammy';
 import { prisma, connectDb } from '../src/core/db.js';
 import { TraderAgent } from '../src/agents/trader.js';
 import { getSessionKeyClient } from '../src/services/sessionKey.js';
-import { parseAbi, encodeFunctionData, erc20Abi } from 'viem';
+import { erc20Abi } from 'viem';
 import { publicClient } from '../src/services/viem.js';
 
 async function main() {
@@ -37,7 +37,7 @@ async function main() {
     console.error('Usage: npx tsx scripts/auto-spot-alpha.ts <token_address>');
     process.exit(1);
   }
-  console.log(`\n⏳ Running ALPHA SPOT Strategy Engine for Agent: ${agent.name}...`);
+  console.log(`\n⏳ Running SPOT Strategy Engine for Agent: ${agent.name}...`);
   console.log(`🚀 Target Token: ${targetToken}`);
   
   try {
@@ -65,66 +65,33 @@ async function main() {
       return;
     }
     
-    // 3. Prepare Batch Calls for UserOperation
-    const wethAddress = '0x0bd7d308f8e1639fab988df18a8011f41eacad73'; // Robinhood Chain WETH
-    const permit2Address = '0x000000000022D473030F116dDEE9F6B43aC78BA3'; // Canonical Permit2 (deployed on Robinhood)
-    const PERMIT2_AMOUNT_MAX = BigInt('0xffffffffffffffffffffffffffffffffffffffff'); // uint160 max
-    const PERMIT2_EXPIRY_MAX = 281474976710655; // uint48 max
-
-    // Ensure the agent has enough WETH
-    const agentWethBalance = await publicClient.readContract({
-      address: wethAddress as `0x${string}`, abi: erc20Abi, functionName: 'balanceOf', args: [agentAccount.address]
-    });
-    console.log(`💰 Agent WETH Balance: ${Number(agentWethBalance)/1e18}`);
-    if (agentWethBalance < sizeInWeth) {
-      console.error(`❌ Agent does not have enough WETH. Needed: ${Number(sizeInWeth)/1e18}`);
+    // 3. Prepare Calls for UserOperation
+    // The swap flow sends native ETH as msg.value (UR wraps it → swaps → refunds leftover as ETH)
+    // No WETH approvals or Permit2 needed.
+    const swapValue = swapData.value ?? BigInt(0);
+    
+    // Check agent has enough native ETH for the swap
+    const agentEthBalance = await publicClient.getBalance({ address: agentAccount.address });
+    console.log(`💰 Agent ETH Balance: ${Number(agentEthBalance)/1e18} ETH`);
+    console.log(`💸 Swap requires: ${Number(swapValue)/1e18} ETH (as msg.value)`);
+    if (agentEthBalance < swapValue) {
+      console.error(`❌ Agent does not have enough ETH. Needed: ${Number(swapValue)/1e18} ETH`);
       return;
     }
 
     // We must dynamically import buildAndSendLPUserOperation from sessionKey.js
     const { buildAndSendLPUserOperation } = await import('../src/services/sessionKey.js');
 
-    const calls: any[] = [];
-
-    // Step A: ERC20 approve WETH -> Permit2 (if needed, for Permit2 to pull WETH)
-    const wethToPermit2Allowance = await publicClient.readContract({
-      address: wethAddress as `0x${string}`, abi: erc20Abi, functionName: 'allowance', args: [agentAccount.address, permit2Address as `0x${string}`]
-    });
-    if (wethToPermit2Allowance < sizeInWeth) {
-      console.log(`🔓 Adding WETH→Permit2 ERC20 Approval to batch`);
-      calls.push({
-        target: wethAddress,
-        data: encodeFunctionData({ abi: parseAbi(['function approve(address spender, uint256 amount)']), functionName: 'approve', args: [permit2Address as `0x${string}`, BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")] })
-      });
-    } else {
-      console.log(`✅ WETH→Permit2 ERC20 Approval already sufficient.`);
-    }
-
-    // Step B: Permit2.approve(WETH, UniversalRouter, amount, expiry) — grant UR to spend WETH via Permit2
-    const permit2Abi = parseAbi(['function allowance(address owner, address token, address spender) external view returns (uint160 amount, uint48 expiration, uint48 nonce)', 'function approve(address token, address spender, uint160 amount, uint48 expiration) external']);
-    const [p2Amount, p2Expiry] = await publicClient.readContract({
-      address: permit2Address as `0x${string}`, abi: permit2Abi, functionName: 'allowance', args: [agentAccount.address, wethAddress as `0x${string}`, swapData.toAddress]
-    }) as [bigint, number, number];
-    
-    if (p2Amount < sizeInWeth || p2Expiry < Math.floor(Date.now() / 1000) + 300) {
-      console.log(`🔓 Adding Permit2→UniversalRouter approval to batch (router: ${swapData.toAddress})`);
-      calls.push({
-        target: permit2Address,
-        data: encodeFunctionData({ abi: permit2Abi, functionName: 'approve', args: [wethAddress as `0x${string}`, swapData.toAddress, PERMIT2_AMOUNT_MAX, PERMIT2_EXPIRY_MAX] })
-      });
-    } else {
-      console.log(`✅ Permit2 approval for UniversalRouter already sufficient.`);
-    }
-
     console.log(`📦 Adding Swap Call to batch (Recipient: ${agentAccount.address})`);
-    calls.push({
+    const calls: any[] = [{
       target: swapData.toAddress,
       data: swapData.calldata as `0x${string}`,
-      value: swapData.value ?? BigInt(0)
-    });
+      value: swapValue
+    }];
 
     // 4. Execute Swap Batch via Alchemy Bundler
     console.log(`\n⚡ Broadcasting SPOT BUY batch transaction from Agent Wallet...`);
+
     console.log(`   - Sender Wallet (Gas Payer): ${agentAccount.address}`);
     console.log(`   - Destination Token: ${targetToken}`);
     console.log(`   - Target Router: ${swapData.toAddress}`);

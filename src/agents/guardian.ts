@@ -41,7 +41,7 @@ export class GuardianAgent {
       try {
         const openPositions = await prisma.position.findMany({ where: { status: 'OPEN' } });
         for (const pos of openPositions) {
-          if (!this.activeIntervals.has(pos.tokenAddress)) {
+          if (!this.activeIntervals.has(pos.id)) {
             console.log(`[Guardian] 📡 Detected unmonitored OPEN position for ${pos.tokenAddress}. Starting monitoring...`);
             this.startMonitoring(pos);
           }
@@ -527,7 +527,7 @@ export class GuardianAgent {
       
     }, 10000); // 10 seconds
 
-    this.activeIntervals.set(tokenAddress, { intervalId, initialQuote, highestQuote, startedAt });
+    this.activeIntervals.set(pos.id, { intervalId, initialQuote, highestQuote, startedAt });
   }
 
   /**
@@ -537,10 +537,10 @@ export class GuardianAgent {
     console.log(`[Guardian] Triggering exit sequence for ${pos.tokenAddress}. Reason: ${reason}`);
     
     // Stop the interval loop
-    const record = this.activeIntervals.get(pos.tokenAddress);
+    const record = this.activeIntervals.get(pos.id);
     if (record) {
       clearInterval(record.intervalId);
-      this.activeIntervals.delete(pos.tokenAddress);
+      this.activeIntervals.delete(pos.id);
     }
 
     // Fire the event back to the orchestrator
